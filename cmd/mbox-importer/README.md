@@ -121,7 +121,7 @@ renamed; the copy of a `.usenet.xz`/`.usenet.7z` unpacked into `-tmpdir` is remo
 | `-trackdb` | (none) | The [tracking database](#tracking-database). Empty means `<data>/cfg/mbox-import.sq3`; `off` turns the tracking off (the behaviour of the versions before it existed). A dry run never opens it, and a run with nothing to import does not create it |
 | `-reimport` | `false` | Import an input the tracking database knows as done again (it is read once more; its articles are then counted as `present`) |
 | `-log-db` | `true` | Write the log output of the run into the `log` table of the tracking database as well |
-| `-log-keep-runs` | `0` | At start, delete the `log` rows of all but the newest N runs (`0` = keep all). The `runs` and `inputs` rows are never deleted |
+| `-log-keep-runs` | `0` | At start, delete the `log` rows of all but the newest N runs (`0` = keep all). N counts the run doing the deleting, so `-log-keep-runs 1` keeps only this run's lines. The `runs` and `inputs` rows are never deleted |
 | `-status` | `false` | Print what the tracking database knows and exit, importing nothing (no input argument needed) |
 | `-json` | `false` | Print `-status` as JSON |
 | `-help` | | Print the usage and exit |
@@ -226,9 +226,13 @@ has seen, independent of the `INPUT.done` rename:
 
 | Table | Holds |
 |-------|-------|
-| `runs` | one row per run: start and end, version, host, pid, the command line, the exit code and the totals |
+| `runs` | one row per run: start and end, version, host, pid, boot id and process start time, the command line, the exit code and the totals |
 | `inputs` | one row per input path: source (`cli` or `iafetch`), item identifier and file name, size, mtime, md5, status, reason, target group, the counters of the last import and the first/last run that saw it |
-| `log` | the log lines of the runs, with their run id and, where the line names a file, its input id |
+| `log` | the log lines of the runs (without the logger's own date and time: the `ts` column holds that), with their run id and, where the line names a file, its input id |
+
+The `path` of an input row is absolute: a positional input is made absolute and cleaned before it is
+recorded, so the same file given as `./g.mbox` and as `/archive/g.mbox` is one row, and an input
+given twice in one command line is imported once.
 
 The schema version is the file's `PRAGMA user_version` (currently `1`); a file written by a newer
 importer is refused instead of being changed. The database is opened in WAL mode with a 30 second
@@ -269,10 +273,37 @@ That is what an archive.org mirror written by another user needs. With `-trackdb
 is an input error and the run exits 1, as before. An existing `INPUT.done` is no error either way.
 
 **A crashed run** leaves its inputs in `importing`. The next run marks them `failed` with the reason
-`interrupted` and imports them again, unless the run that holds them is still alive (its `runs` row
-has no end time and its pid still exists on the same host). An input a live run holds is left to
-that run and counted as `held-by-another-run`, so two importers on one tracking database never
-import the same input. There is no lock file.
+`interrupted` and imports them again, unless the run that holds them is really still running. That
+test is identity-aware, not just a pid test: the `runs` row has to have no end time, the same host
+name, the same kernel boot id (`/proc/sys/kernel/random/boot_id`, so a pid from before a reboot
+never counts) and the same process start time (field 22 of `/proc/<pid>/stat`, so a pid the kernel
+handed out again does not count either). Only where `/proc` gives neither value does it fall back to
+asking whether the pid exists. An input a live run holds is left to that run and counted as
+`held-by-another-run`, so two importers on one tracking database never import the same input. There
+is no lock file.
+
+An unfinished run of **another host** cannot be checked from here (the tracking database may sit on
+a shared file system), so its inputs stay `importing` and are skipped. `-reimport` takes such a row
+away from it — and any row whose run is no longer in the table — and logs one line per row:
+
+```
+[MBOX-IMPORT] tracking: -reimport takes input "…" from run 7 on host "arc1-ca"
+```
+
+A row that a run of this host is holding right now is never taken, not even with `-reimport`. If a
+row is stuck in `importing` and `-reimport` is not what you want, clear it with sqlite3:
+
+```bash
+sqlite3 data/cfg/mbox-import.sq3 \
+  "select i.id, i.path, i.last_run, r.host, r.pid, r.finished from inputs i
+     left join runs r on r.id = i.last_run where i.status = 'importing';"
+# the run above is really gone: let the next importer read these inputs again
+sqlite3 data/cfg/mbox-import.sq3 \
+  "update inputs set status = 'failed', reason = 'cleared by hand' where status = 'importing';"
+# or close the run that holds them, so the next run's sweep does it
+sqlite3 data/cfg/mbox-import.sq3 \
+  "update runs set finished = datetime('now') where id = 7 and finished is null;"
+```
 
 **The log in the database.** With `-log-db` (the default) the whole log output of the process — the
 importer's lines, the processor's and the database's alike — also goes into the `log` table: the

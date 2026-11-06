@@ -69,7 +69,7 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		trackDBFlag     = fs.String("trackdb", "", "import tracking database (\"\" = <data>/cfg/"+trackDBName+", \"off\" = no tracking); never opened in a dry run")
 		reimport        = fs.Bool("reimport", false, "import an input the tracking database knows as done again")
 		logDB           = fs.Bool("log-db", true, "write the log output of the run into the tracking database as well")
-		logKeepRuns     = fs.Int("log-keep-runs", 0, "at start, delete the log rows of all but the newest N runs (0 = keep all)")
+		logKeepRuns     = fs.Int("log-keep-runs", 0, "at start, delete the log rows of all but the newest N runs, this run included (0 = keep all)")
 		statusFlag      = fs.Bool("status", false, "print what the tracking database knows and exit, importing nothing")
 		jsonFlag        = fs.Bool("json", false, "print -status as JSON")
 	)

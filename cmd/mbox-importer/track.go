@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -54,7 +55,10 @@ const (
 	trackUnsupported = "unsupported" // the importer cannot read this file (reason says why)
 )
 
-// trackSchema is the schema of version trackSchemaVersion.
+// trackSchema is the schema of version trackSchemaVersion. CREATE IF NOT EXISTS only
+// creates what is missing, so a later version 2 needs its own ALTER TABLE / migration code
+// here (keyed on the user_version read by migrate), not a changed CREATE statement: an
+// existing table is never altered by this list.
 var trackSchema = []string{
 	`CREATE TABLE IF NOT EXISTS runs (
 		id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -63,6 +67,8 @@ var trackSchema = []string{
 		version   TEXT,
 		host      TEXT,
 		pid       INTEGER,
+		boot_id   TEXT,
+		pstart    INTEGER,
 		args      TEXT,
 		exit_code INTEGER,
 		inputs    INTEGER NOT NULL DEFAULT 0,
@@ -137,6 +143,12 @@ type tracker struct {
 	runID    int64
 	reimport bool // -reimport: import a done input again
 
+	// live and foreign are the unfinished runs seen at open (liveRuns): the ones whose
+	// process is still running on this host, and the ones of another host. Both are
+	// written once, before the first worker starts, and only read after that.
+	live    map[int64]bool
+	foreign map[int64]string
+
 	mu  sync.Mutex       // ids
 	ids map[string]int64 // input path -> inputs.id, for the log tee
 
@@ -154,12 +166,7 @@ func openTracker(path string, args []string, reimport, logDB bool, keepRuns int)
 			return nil, fmt.Errorf("create %s: %w", dir, err)
 		}
 	}
-	// _txlock=immediate: every transaction of this pool is a BEGIN IMMEDIATE, so the claim
-	// of an input takes the write lock before it reads the row. One connection: the log
-	// writer and the import workers write through the same pool and never nest a
-	// transaction, so a single connection cannot deadlock with itself.
-	dsn := "file:" + path + "?_busy_timeout=30000&_journal_mode=WAL&_synchronous=NORMAL&_txlock=immediate"
-	db, err := sql.Open("sqlite3", dsn)
+	db, err := sql.Open("sqlite3", trackDSN(path))
 	if err != nil {
 		return nil, err
 	}
@@ -189,6 +196,21 @@ func openTracker(path string, args []string, reimport, logDB bool, keepRuns int)
 		return nil, err
 	}
 	return t, nil
+}
+
+// trackDSN is the DSN the tracking database is opened with. The mattn driver hands every
+// "file:" DSN to SQLite's URI parser, so the path has to be escaped (iafetchDSN does the
+// same): an unescaped '?' or '#' in it would cut the path short and drop the parameters.
+// _txlock=immediate makes every transaction of the pool a BEGIN IMMEDIATE, so the claim of
+// an input takes the write lock before it reads the row.
+func trackDSN(path string) string {
+	return "file:" + (&url.URL{Path: path}).EscapedPath() +
+		"?_busy_timeout=30000&_journal_mode=WAL&_synchronous=NORMAL&_txlock=immediate"
+}
+
+// trackStatusDSN is the read-only DSN of -status: it never creates or writes the file.
+func trackStatusDSN(path string) string {
+	return "file:" + (&url.URL{Path: path}).EscapedPath() + "?mode=ro&_busy_timeout=10000"
 }
 
 // trackClose closes db on an error path and keeps the first error.
@@ -221,15 +243,15 @@ func (t *tracker) migrate() error {
 	return nil
 }
 
-// insertRun writes the row of this run and keeps its id.
+// insertRun writes the row of this run and keeps its id. Besides the pid it stores what
+// tells this process apart from a later one that happens to get the same pid: the kernel's
+// boot id and the process's start time (trackSelf).
 func (t *tracker) insertRun(args []string) error {
-	host, err := os.Hostname()
-	if err != nil {
-		host = ""
-	}
+	pid := os.Getpid()
 	res, err := database.RetryableExec(t.db,
-		`INSERT INTO runs (started, version, host, pid, args) VALUES (?, ?, ?, ?, ?)`,
-		trackNow(), config.AppVersion, host, os.Getpid(), strings.Join(args, " "))
+		`INSERT INTO runs (started, version, host, pid, boot_id, pstart, args) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		trackNow(), config.AppVersion, trackHostname(), pid, trackBootID(), trackProcStart(pid),
+		strings.Join(args, " "))
 	if err != nil {
 		return fmt.Errorf("insert run: %w", err)
 	}
@@ -241,20 +263,31 @@ func (t *tracker) insertRun(args []string) error {
 	return nil
 }
 
-// sweepInterrupted marks every input still "importing" from a run that is gone as
-// failed/interrupted. A row held by a run that is still running (its row has no finished
-// time and its pid is alive on this host) is left alone, so a second importer on the same
-// tracking DB does not steal the inputs of the first one.
+// sweepInterrupted marks every input still "importing" whose run is gone as
+// failed/interrupted, so the next run imports it again. Two kinds of row survive it:
+// one held by a run of this host that is really still running (liveRuns), so a second
+// importer on the same tracking DB does not steal the inputs of the first one, and one held
+// by an unfinished run of another host, which cannot be checked from here (claimInput hands
+// that one to -reimport instead).
 func (t *tracker) sweepInterrupted() error {
-	live, err := t.liveRuns()
+	live, foreign, err := t.liveRuns()
 	if err != nil {
 		return err
 	}
+	t.live = live
+	t.foreign = foreign
+	keep := make([]int64, 0, len(live)+len(foreign))
+	for id := range live {
+		keep = append(keep, id)
+	}
+	for id := range foreign {
+		keep = append(keep, id)
+	}
 	query := `UPDATE inputs SET status = ?, reason = ?, finished = ? WHERE status = ?`
 	args := []interface{}{trackFailed, "interrupted", trackNow(), trackImporting}
-	if len(live) > 0 {
-		marks := make([]string, len(live))
-		for i, id := range live {
+	if len(keep) > 0 {
+		marks := make([]string, len(keep))
+		for i, id := range keep {
 			marks[i] = "?"
 			args = append(args, id)
 		}
@@ -270,40 +303,122 @@ func (t *tracker) sweepInterrupted() error {
 	return nil
 }
 
-// liveRuns are the ids of the unfinished runs that look alive: this run, a run of this host
-// whose pid still exists, and (not checkable) every unfinished run of another host.
-func (t *tracker) liveRuns() ([]int64, error) {
-	host, err := os.Hostname()
-	if err != nil {
-		host = ""
-	}
+// liveRuns reads the unfinished run rows: live are the ones whose process is still running
+// on this host (this run included), foreign maps the id of every unfinished run of another
+// host to that host name. Both are written once, at open, and only read afterwards.
+func (t *tracker) liveRuns() (live map[int64]bool, foreign map[int64]string, err error) {
+	self := trackSelf()
 	rows, err := database.RetryableQuery(t.db,
-		`SELECT id, COALESCE(host, ''), COALESCE(pid, 0) FROM runs WHERE finished IS NULL`)
+		`SELECT id, COALESCE(host, ''), COALESCE(pid, 0), COALESCE(boot_id, ''), COALESCE(pstart, 0)
+			FROM runs WHERE finished IS NULL`)
 	if err != nil {
-		return nil, fmt.Errorf("read runs: %w", err)
+		return nil, nil, fmt.Errorf("read runs: %w", err)
 	}
 	defer rows.Close()
-	var live []int64
+	live, foreign = make(map[int64]bool), make(map[int64]string)
 	for rows.Next() {
-		var (
-			id    int64
-			rhost string
-			pid   int
-		)
-		if err := rows.Scan(&id, &rhost, &pid); err != nil {
-			return nil, fmt.Errorf("read runs: %w", err)
+		var other trackProc
+		var id int64
+		if err := rows.Scan(&id, &other.host, &other.pid, &other.bootID, &other.pstart); err != nil {
+			return nil, nil, fmt.Errorf("read runs: %w", err)
 		}
-		if id == t.runID || rhost != host || trackPidAlive(pid) {
-			live = append(live, id)
+		switch {
+		case id == t.runID || trackProcAlive(other, self):
+			live[id] = true
+		case other.host != self.host:
+			foreign[id] = other.host
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("read runs: %w", err)
+		return nil, nil, fmt.Errorf("read runs: %w", err)
 	}
-	return live, nil
+	return live, foreign, nil
 }
 
-// trackPidAlive reports whether a process with this pid exists (signal 0).
+// trackProc identifies the process of a run row.
+type trackProc struct {
+	host   string
+	pid    int
+	bootID string // the kernel's boot id, "" when it could not be read
+	pstart int64  // the process start time of /proc/<pid>/stat, 0 when it could not be read
+}
+
+// trackSelf is the identity of this process.
+func trackSelf() trackProc {
+	pid := os.Getpid()
+	return trackProc{host: trackHostname(), pid: pid, bootID: trackBootID(), pstart: trackProcStart(pid)}
+}
+
+// trackProcAlive reports whether the process of a run row is still running. It is identity
+// aware: another host is never "alive" here (liveRuns keeps those separately), a row written
+// before the last reboot is not (another boot id), and a pid the kernel handed out again is
+// not either (another process start time). Only where /proc gave neither a boot id nor a
+// start time (not Linux) does it fall back to the plain "does this pid exist" test, which
+// cannot tell a recycled pid apart.
+func trackProcAlive(row, self trackProc) bool {
+	if row.pid <= 0 || row.host != self.host {
+		return false
+	}
+	if row.bootID != "" && self.bootID != "" {
+		if row.bootID != self.bootID {
+			return false // the row is from before a reboot: that process is gone
+		}
+		if row.pstart > 0 {
+			return trackProcStart(row.pid) == row.pstart
+		}
+	}
+	return trackPidAlive(row.pid)
+}
+
+// trackHostname is os.Hostname with "" on error.
+func trackHostname() string {
+	host, err := os.Hostname()
+	if err != nil {
+		return ""
+	}
+	return host
+}
+
+// trackBootID is the kernel's boot id, a new value after every reboot ("" when it cannot be
+// read, for example where /proc is not mounted).
+func trackBootID() string {
+	b, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
+// trackProcStart is the start time of a process (field 22 of /proc/<pid>/stat, in clock
+// ticks since boot), 0 when it cannot be read. Two processes with the same pid and the same
+// boot id but different start times are different processes. Field 2 (the command) may hold
+// blanks and brackets, so the fields are counted after the last ')': field 3 comes first.
+func trackProcStart(pid int) int64 {
+	if pid <= 0 {
+		return 0
+	}
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return 0
+	}
+	i := strings.LastIndexByte(string(b), ')')
+	if i < 0 || i+2 >= len(b) {
+		return 0
+	}
+	fields := strings.Fields(string(b[i+2:]))
+	const startTimeField = 22 // of /proc/<pid>/stat, counting from 1
+	if len(fields) < startTimeField-2 {
+		return 0
+	}
+	v, err := strconv.ParseInt(fields[startTimeField-3], 10, 64)
+	if err != nil {
+		return 0
+	}
+	return v
+}
+
+// trackPidAlive reports whether a process with this pid exists (signal 0). It cannot tell a
+// recycled pid apart: only trackProcAlive's identity test can.
 func trackPidAlive(pid int) bool {
 	if pid <= 0 {
 		return false
@@ -333,6 +448,10 @@ func (t *tracker) pruneLog(keepRuns int) error {
 
 // trackErr logs a tracking error and counts it; it never stops the import.
 func (t *tracker) trackErr(what string, err error) {
+	if t == nil {
+		log.Printf("[MBOX-IMPORT] tracking: %s: %v", what, err)
+		return
+	}
 	t.errs.Add(1)
 	log.Printf("[MBOX-IMPORT] tracking: %s: %v", what, err)
 }
@@ -403,10 +522,11 @@ func (t *tracker) recordPlanned(in plannedInput) error {
 		case err != nil:
 			return err
 		case status == trackDone || status == trackImporting:
-			// keep what the import wrote; only the metadata of the source is refreshed
-			_, err = tx.Exec(`UPDATE inputs SET identifier = ?, name = ?,
-				md5 = CASE WHEN ? != '' THEN ? ELSE md5 END WHERE id = ?`,
-				in.Identifier, in.Name, in.MD5, in.MD5, id)
+			// Keep everything the import wrote: status, size, mtime and md5 are what
+			// claimInput compares the file on disk with, so a new md5 from the source
+			// would make a changed file look like the one that was imported.
+			_, err = tx.Exec(`UPDATE inputs SET identifier = ?, name = ? WHERE id = ?`,
+				in.Identifier, in.Name, id)
 			return err
 		}
 		_, err = tx.Exec(`UPDATE inputs SET source = ?, identifier = ?, name = ?, size = ?, mtime = ?,
@@ -450,14 +570,15 @@ func (t *tracker) claimInput(in plannedInput) (int64, claimState, error) {
 	err := database.RetryableTransactionExec(t.db, func(tx *sql.Tx) error {
 		id, state = 0, claimTake
 		var (
-			rowID  int64
-			status string
-			size   sql.NullInt64
-			mtime  sql.NullInt64
-			md5    sql.NullString
+			rowID   int64
+			status  string
+			size    sql.NullInt64
+			mtime   sql.NullInt64
+			md5     sql.NullString
+			lastRun sql.NullInt64
 		)
-		err := tx.QueryRow(`SELECT id, status, size, mtime, md5 FROM inputs WHERE path = ?`, in.Path).
-			Scan(&rowID, &status, &size, &mtime, &md5)
+		err := tx.QueryRow(`SELECT id, status, size, mtime, md5, last_run FROM inputs WHERE path = ?`, in.Path).
+			Scan(&rowID, &status, &size, &mtime, &md5, &lastRun)
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
 			res, err := tx.Exec(`INSERT INTO inputs (path, source, identifier, name, size, mtime, md5, status, first_run, last_run, started)
@@ -471,7 +592,7 @@ func (t *tracker) claimInput(in plannedInput) (int64, claimState, error) {
 			return err
 		case err != nil:
 			return err
-		case status == trackImporting:
+		case status == trackImporting && !t.takeHeld(in.Path, lastRun):
 			id, state = rowID, claimHeld
 			return nil
 		case status == trackDone && !t.reimport && trackSameFile(in, size, mtime, md5):
@@ -496,6 +617,32 @@ func (t *tracker) claimInput(in plannedInput) (int64, claimState, error) {
 		t.remember(in.Path, id)
 	}
 	return id, state, nil
+}
+
+// takeHeld reports whether this run takes an input row that still says "importing" away
+// from the run that holds it. Only -reimport does that, and only when the holder is not a
+// live run of this host: that leaves a row of an unfinished run of another host (which this
+// host cannot check) and a row whose run is gone from the table, the two cases the sweep at
+// start cannot clear. It logs one line per row it takes.
+func (t *tracker) takeHeld(path string, lastRun sql.NullInt64) bool {
+	if !t.reimport {
+		return false
+	}
+	if lastRun.Valid && t.live[lastRun.Int64] {
+		return false // that importer is running right now: leave its input alone
+	}
+	switch {
+	case !lastRun.Valid:
+		log.Printf("[MBOX-IMPORT] tracking: -reimport takes input %q: it is marked %s without a run", path, trackImporting)
+	default:
+		host := t.foreign[lastRun.Int64]
+		if host == "" {
+			host = "(unknown)"
+		}
+		log.Printf("[MBOX-IMPORT] tracking: -reimport takes input %q from run %d on host %q",
+			path, lastRun.Int64, host)
+	}
+	return true
 }
 
 // trackSameFile reports whether the file of in is the one the row was written for: the same
@@ -603,17 +750,28 @@ type trackLogLine struct {
 // previous output and to this writer, which puts it on a buffered channel. One goroutine
 // reads the channel and inserts the lines in batches. A full channel drops the line and
 // counts it: the import is never slowed down or blocked by the tracking DB.
+//
+// The line channel is never closed; stop() closes quit instead. A Write that arrives while
+// or after the writer stops therefore cannot panic on a closed channel: it is dropped and
+// counted, whoever logs it and whenever (the database and processor goroutines log from
+// their own goroutines, and log.SetOutput only orders the lines of the standard logger).
 type logTee struct {
 	t       *tracker
 	lines   chan trackLogLine
-	done    chan struct{}
+	quit    chan struct{} // closed by stop: the writer drains and returns
+	done    chan struct{} // closed by the writer when it has returned
 	dropped atomic.Int64
-	closed  atomic.Bool
+	closed  atomic.Bool // set by stop before quit is closed: Write only counts from then on
 }
 
 // startLogTee installs the tee as the log output of the process and starts its writer.
 func (t *tracker) startLogTee() {
-	tee := &logTee{t: t, lines: make(chan trackLogLine, trackLogQueue), done: make(chan struct{})}
+	tee := &logTee{
+		t:     t,
+		lines: make(chan trackLogLine, trackLogQueue),
+		quit:  make(chan struct{}),
+		done:  make(chan struct{}),
+	}
 	t.tee = tee
 	t.prevLog = log.Writer()
 	go tee.run()
@@ -622,16 +780,17 @@ func (t *tracker) startLogTee() {
 
 // Write never blocks and never fails: it splits the log output into lines and queues them.
 func (w *logTee) Write(p []byte) (int, error) {
-	if w.closed.Load() {
-		return len(p), nil
-	}
 	ts := trackNow()
 	for _, line := range strings.Split(strings.TrimRight(string(p), "\n"), "\n") {
 		if line == "" {
 			continue
 		}
+		if w.closed.Load() {
+			w.dropped.Add(1) // the writer is gone: the line only reaches the real output
+			continue
+		}
 		select {
-		case w.lines <- trackLogLine{ts: ts, msg: line}:
+		case w.lines <- trackLogLine{ts: ts, msg: trackStripLogPrefix(line)}:
 		default:
 			w.dropped.Add(1)
 		}
@@ -639,13 +798,41 @@ func (w *logTee) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// stop closes the channel, waits for the writer to insert what is left, records the number
-// of dropped lines as one last row and returns it. The caller has already taken the tee out
-// of the logger, so no Write can be in flight.
+// trackStripLogPrefix removes the standard logger's own date and time
+// ("2006/01/02 15:04:05 ") from a line: the ts column holds the time. Only exactly that
+// shape is removed, so a line written with other log flags (or none) is kept as it is.
+func trackStripLogPrefix(line string) string {
+	const shape = "0000/00/00 00:00:00 "
+	if len(line) < len(shape) {
+		return line
+	}
+	for i := 0; i < len(shape); i++ {
+		switch shape[i] {
+		case '0':
+			if line[i] < '0' || line[i] > '9' {
+				return line
+			}
+		default:
+			if line[i] != shape[i] {
+				return line
+			}
+		}
+	}
+	return line[len(shape):]
+}
+
+// stop stops the writer, waits for it to insert what is left, records the number of dropped
+// lines as one last row and returns it. The caller has already taken the tee out of the
+// logger, so in the normal case no Write can be in flight; a late one is counted, not lost
+// in a panic.
 func (w *logTee) stop() int64 {
 	w.closed.Store(true)
-	close(w.lines)
+	close(w.quit)
 	<-w.done
+	// lines that were queued but no longer inserted (a Write that raced with the stop)
+	if left := len(w.lines); left > 0 {
+		w.dropped.Add(int64(left))
+	}
 	dropped := w.dropped.Load()
 	if dropped > 0 {
 		msg := fmt.Sprintf("[MBOX-IMPORT] tracking: %d log line(s) dropped: the log writer could not keep up", dropped)
@@ -659,9 +846,9 @@ func (w *logTee) stop() int64 {
 }
 
 // run inserts the queued lines in batches of trackLogBatch, or every trackLogFlush, until
-// the channel is closed and drained. It stops writing after trackLogMaxFails failed inserts
-// in a row (the lines are then counted as dropped) so a broken tracking DB cannot stall or
-// flood the run.
+// stop closes quit; it then drains what is queued and inserts that too. It stops writing
+// after trackLogMaxFails failed inserts in a row (the lines are then counted as dropped) so
+// a broken tracking DB cannot stall or flood the run.
 func (w *logTee) run() {
 	defer close(w.done)
 	ticker := time.NewTicker(trackLogFlush)
@@ -670,17 +857,32 @@ func (w *logTee) run() {
 	fails := 0
 	for {
 		select {
-		case line, ok := <-w.lines:
-			if !ok {
-				w.flush(&batch, &fails)
-				return
-			}
+		case line := <-w.lines:
 			batch = append(batch, line)
 			if len(batch) >= trackLogBatch {
 				w.flush(&batch, &fails)
 			}
 		case <-ticker.C:
 			w.flush(&batch, &fails)
+		case <-w.quit:
+			w.drain(&batch, &fails)
+			return
+		}
+	}
+}
+
+// drain inserts everything that is still queued and returns.
+func (w *logTee) drain(batch *[]trackLogLine, fails *int) {
+	for {
+		select {
+		case line := <-w.lines:
+			*batch = append(*batch, line)
+			if len(*batch) >= trackLogBatch {
+				w.flush(batch, fails)
+			}
+		default:
+			w.flush(batch, fails)
+			return
 		}
 	}
 }
@@ -699,6 +901,7 @@ func (w *logTee) flush(batch *[]trackLogLine, fails *int) {
 	if err := w.insert(lines); err != nil {
 		*fails++
 		w.dropped.Add(int64(len(lines)))
+		w.t.errs.Add(1) // reported by close; trackErr would log from inside the writer
 		// the message goes through the tee itself: it is queued, never written from here
 		if *fails >= trackLogMaxFails {
 			log.Printf("[MBOX-IMPORT] tracking: log insert failed %d times, no more log rows this run: %v", *fails, err)
@@ -735,14 +938,42 @@ func (w *logTee) insert(lines []trackLogLine) error {
 // the size and mtime the file has now (the tracking DB compares them with the row of an
 // earlier import). Every positional input counts as supported, whatever its name: the open
 // decides, as it does without the tracking DB.
+//
+// The path is made absolute and cleaned, because it is the key of the inputs table: the same
+// file named "./g.mbox" and "/tmp/x/g.mbox" has to be one row, not two. A path that cannot
+// be made absolute (no working directory) is kept as it was.
 func plannedFromPaths(files []string) []plannedInput {
 	out := make([]plannedInput, 0, len(files))
 	for _, file := range files {
-		in := plannedInput{Path: file, Source: sourceCLI, Name: filepath.Base(file), Supported: true}
-		if fi, err := os.Stat(file); err == nil {
+		path := file
+		if abs, err := filepath.Abs(file); err == nil {
+			path = abs
+		} else {
+			path = filepath.Clean(file)
+		}
+		in := plannedInput{Path: path, Source: sourceCLI, Name: filepath.Base(path), Supported: true}
+		if fi, err := os.Stat(path); err == nil {
 			in.Size = fi.Size()
 			in.Mtime = fi.ModTime().Unix()
 		}
+		out = append(out, in)
+	}
+	return out
+}
+
+// dedupePlanned keeps the first plannedInput of every path. The path is the key of the
+// inputs table and of the log tee's line-to-input map, and two workers on one path would
+// claim it twice (the second one would see "importing"), so a repeated input is dropped
+// before the import starts. One line is logged per dropped repeat.
+func dedupePlanned(inputs []plannedInput) []plannedInput {
+	seen := make(map[string]bool, len(inputs))
+	out := make([]plannedInput, 0, len(inputs))
+	for _, in := range inputs {
+		if seen[in.Path] {
+			log.Printf("[MBOX-IMPORT] input %q given more than once: imported once", in.Path)
+			continue
+		}
+		seen[in.Path] = true
 		out = append(out, in)
 	}
 	return out
@@ -810,7 +1041,7 @@ func writeStatus(w io.Writer, path string, asJSON bool) error {
 
 // readStatus fills report from the tracking DB, opened read-only.
 func readStatus(path string, report *statusReport) error {
-	db, err := sql.Open("sqlite3", "file:"+path+"?mode=ro&_busy_timeout=10000")
+	db, err := sql.Open("sqlite3", trackStatusDSN(path))
 	if err != nil {
 		return err
 	}

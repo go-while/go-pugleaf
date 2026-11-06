@@ -285,6 +285,7 @@ func importInputs(files []string, opts *runOptions, sink articleSink, stop <-cha
 // run holds is left to that run, and an input the importer cannot read is only recorded.
 // A nil track imports every input, as a run without the tracking DB does.
 func importPlanned(inputs []plannedInput, opts *runOptions, sink articleSink, stop <-chan struct{}, track *tracker) *runSummary {
+	inputs = dedupePlanned(inputs)
 	res := &runSummary{Total: newCounters("")}
 	type outcome struct {
 		c                                       *counters
@@ -316,7 +317,7 @@ func importPlanned(inputs []plannedInput, opts *runOptions, sink articleSink, st
 				in := inputs[i]
 				if !in.Supported {
 					if err := track.recordPlanned(in); err != nil {
-						log.Printf("[MBOX-IMPORT] tracking: input %q: %v", in.Path, err)
+						track.trackErr(fmt.Sprintf("input %q", in.Path), err)
 					}
 					o.unsupported = true
 					continue
@@ -324,7 +325,7 @@ func importPlanned(inputs []plannedInput, opts *runOptions, sink articleSink, st
 				id, state, err := track.claimInput(in)
 				if err != nil {
 					// not knowing the state is no reason to skip the input
-					log.Printf("[MBOX-IMPORT] tracking: input %q: %v", in.Path, err)
+					track.trackErr(fmt.Sprintf("claim input %q", in.Path), err)
 				}
 				switch state {
 				case claimDone:

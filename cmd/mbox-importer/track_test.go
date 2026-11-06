@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -160,6 +161,28 @@ func TestMboxTrackRecordPlanned(t *testing.T) {
 		t.Fatalf("claimInput = %v, %v", state, err)
 	}
 	tr.finishInput(id, newCounters(supported.Path), false, false)
+	// A changed file recorded again must not overwrite the done row's size, mtime or md5:
+	// claimInput compares them with the file on disk to tell whether it is the same one,
+	// so the new values would make a changed file look like the one that was imported.
+	changed := supported
+	changed.Size, changed.Mtime, changed.MD5 = 999, 999, "ffff"
+	changed.Identifier, changed.Name = "item2", "g2.mbox.zip"
+	if err := tr.recordPlanned(changed); err != nil {
+		t.Fatalf("recordPlanned on a done row: %v", err)
+	}
+	var (
+		keptSize, keptMtime int64
+		keptMD5             string
+	)
+	if err := tr.db.QueryRow(`SELECT size, mtime, md5 FROM inputs WHERE id = ?`, id).
+		Scan(&keptSize, &keptMtime, &keptMD5); err != nil {
+		t.Fatal(err)
+	}
+	if keptSize != supported.Size || keptMtime != supported.Mtime || keptMD5 != supported.MD5 {
+		t.Errorf("recordPlanned changed the done row: size=%d mtime=%d md5=%q, want %d %d %q",
+			keptSize, keptMtime, keptMD5, supported.Size, supported.Mtime, supported.MD5)
+	}
+	// the identifier and the name of the source are refreshed, though
 	if err := tr.recordPlanned(supported); err != nil {
 		t.Fatalf("recordPlanned on a done row: %v", err)
 	}
@@ -362,6 +385,158 @@ func TestMboxTrackInterruptedAndHeld(t *testing.T) {
 	tr.close(nil, 0)
 }
 
+// TestMboxTrackRecycledPid pins that a row of a killed run whose pid the kernel handed out
+// again (this process's pid, another process start time) is swept, not taken for alive.
+func TestMboxTrackRecycledPid(t *testing.T) {
+	if trackProcStart(os.Getpid()) == 0 {
+		t.Skip("/proc/<pid>/stat is not readable: no process identity to test")
+	}
+	mtQuiet(t)
+	dir := t.TempDir()
+	in := plannedInput{Path: "/mirror/a.mbox", Source: sourceCLI, Size: 1, Mtime: 2, Supported: true}
+
+	tr := mtOpen(t, dir, false, false)
+	if _, state, err := tr.claimInput(in); err != nil || state != claimTake {
+		t.Fatalf("claim = %v, %v", state, err)
+	}
+	runID := tr.runID
+	tr.close(nil, 1)
+
+	db := mtRaw(t, dir)
+	// the run looks unfinished and holds our pid, but it started at another time: the
+	// process of that row is gone and the kernel gave its pid to this process
+	if _, err := db.Exec(`UPDATE runs SET finished = NULL, pid = ?, pstart = ? WHERE id = ?`,
+		os.Getpid(), trackProcStart(os.Getpid())+1, runID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE inputs SET status = ? WHERE path = ?`, trackImporting, in.Path); err != nil {
+		t.Fatal(err)
+	}
+	tr = mtOpen(t, dir, false, false)
+	status, reason := mtStatusOf(t, db, in.Path)
+	if status != trackFailed || reason != "interrupted" {
+		t.Errorf("a recycled pid's input = %q/%q, want failed/interrupted", status, reason)
+	}
+	if _, state, err := tr.claimInput(in); err != nil || state != claimTake {
+		t.Errorf("claim = %v, %v, want claimTake", state, err)
+	}
+	tr.close(nil, 0)
+
+	// a row of a run from before the last reboot (another boot id) is swept too
+	if _, err := db.Exec(`UPDATE runs SET finished = NULL, pid = ?, pstart = ?, boot_id = 'other-boot' WHERE id = ?`,
+		os.Getpid(), trackProcStart(os.Getpid()), runID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE inputs SET status = ?, last_run = ? WHERE path = ?`,
+		trackImporting, runID, in.Path); err != nil {
+		t.Fatal(err)
+	}
+	tr = mtOpen(t, dir, false, false)
+	if status, reason := mtStatusOf(t, db, in.Path); status != trackFailed || reason != "interrupted" {
+		t.Errorf("a pre-reboot input = %q/%q, want failed/interrupted", status, reason)
+	}
+	tr.close(nil, 0)
+}
+
+// TestMboxTrackForeignRun pins that an input held by an unfinished run of another host stays
+// held (this host cannot check that process) and that -reimport takes it.
+func TestMboxTrackForeignRun(t *testing.T) {
+	mtQuiet(t)
+	dir := t.TempDir()
+	in := plannedInput{Path: "/mirror/a.mbox", Source: sourceCLI, Size: 1, Mtime: 2, Supported: true}
+
+	tr := mtOpen(t, dir, false, false)
+	if _, state, err := tr.claimInput(in); err != nil || state != claimTake {
+		t.Fatalf("claim = %v, %v", state, err)
+	}
+	runID := tr.runID
+	tr.close(nil, 1)
+
+	db := mtRaw(t, dir)
+	if _, err := db.Exec(`UPDATE runs SET finished = NULL, host = 'other-host' WHERE id = ?`, runID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE inputs SET status = ?, last_run = ? WHERE path = ?`,
+		trackImporting, runID, in.Path); err != nil {
+		t.Fatal(err)
+	}
+
+	// without -reimport: the row stays importing and is skipped
+	tr = mtOpen(t, dir, false, false)
+	if status, _ := mtStatusOf(t, db, in.Path); status != trackImporting {
+		t.Errorf("the other host's input became %q", status)
+	}
+	if _, state, err := tr.claimInput(in); err != nil || state != claimHeld {
+		t.Errorf("claim = %v, %v, want claimHeld", state, err)
+	}
+	tr.close(nil, 0)
+
+	// with -reimport: this run takes it over
+	tr = mtOpen(t, dir, true, true)
+	id, state, err := tr.claimInput(in)
+	if err != nil || state != claimTake || id == 0 {
+		t.Errorf("claim with -reimport = %d, %v, %v, want claimTake", id, state, err)
+	}
+	tr.finishInput(id, newCounters(in.Path), false, false)
+	tr.close(nil, 0)
+	if status, _ := mtStatusOf(t, db, in.Path); status != trackDone {
+		t.Errorf("status after the take-over = %q, want %q", status, trackDone)
+	}
+	var msg string
+	if err := db.QueryRow(`SELECT msg FROM log WHERE msg LIKE '%-reimport takes input%' LIMIT 1`).Scan(&msg); err != nil {
+		t.Fatalf("no take-over line in the log: %v", err)
+	}
+	if !strings.Contains(msg, "other-host") || !strings.Contains(msg, fmt.Sprintf("run %d", runID)) {
+		t.Errorf("take-over line = %q", msg)
+	}
+
+	// a row of a live run of this host is never taken, not even with -reimport
+	tr = mtOpen(t, dir, true, false)
+	if _, err := db.Exec(`UPDATE inputs SET status = ?, last_run = ? WHERE path = ?`,
+		trackImporting, tr.runID, in.Path); err != nil {
+		t.Fatal(err)
+	}
+	if _, state, err := tr.claimInput(in); err != nil || state != claimHeld {
+		t.Errorf("claim of this run's own held input with -reimport = %v, %v, want claimHeld", state, err)
+	}
+	tr.close(nil, 0)
+}
+
+func TestMboxTrackProcIdentity(t *testing.T) {
+	self := trackSelf()
+	if self.pid != os.Getpid() {
+		t.Errorf("self pid = %d", self.pid)
+	}
+	if got := trackProcStart(-1); got != 0 {
+		t.Errorf("trackProcStart(-1) = %d", got)
+	}
+	// this process is alive
+	if !trackProcAlive(self, self) {
+		t.Error("trackProcAlive(self) = false")
+	}
+	for _, tc := range []struct {
+		name string
+		row  trackProc
+		want bool
+	}{
+		{"another host", trackProc{host: self.host + "x", pid: self.pid, bootID: self.bootID, pstart: self.pstart}, false},
+		{"no pid", trackProc{host: self.host}, false},
+		{"another boot", trackProc{host: self.host, pid: self.pid, bootID: "other", pstart: self.pstart}, false},
+		{"recycled pid", trackProc{host: self.host, pid: self.pid, bootID: self.bootID, pstart: self.pstart + 1}, false},
+		{"no proc info", trackProc{host: self.host, pid: self.pid}, true}, // falls back to the pid test
+	} {
+		if tc.row.bootID == "other" && self.bootID == "" {
+			continue // no /proc: the boot id is not part of the test
+		}
+		if tc.name == "recycled pid" && self.pstart == 0 {
+			continue // no /proc: a recycled pid cannot be told apart
+		}
+		if got := trackProcAlive(tc.row, self); got != tc.want {
+			t.Errorf("trackProcAlive(%s) = %t, want %t", tc.name, got, tc.want)
+		}
+	}
+}
+
 func TestMboxTrackMarkDonePermission(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores the directory permissions")
@@ -468,6 +643,9 @@ func TestMboxTrackLogRows(t *testing.T) {
 		}
 		if runID != tr.runID {
 			t.Errorf("log row run_id = %d, want %d", runID, tr.runID)
+		}
+		if !strings.HasPrefix(msg, "[MBOX-IMPORT]") {
+			t.Errorf("log row keeps the logger's own prefix: %q", msg)
 		}
 		switch {
 		case strings.Contains(msg, "importing file="):
@@ -698,6 +876,203 @@ func TestMboxTrackStatus(t *testing.T) {
 	}
 	if report.LogRows == 0 {
 		t.Error("no log rows in the report")
+	}
+}
+
+// TestMboxTrackPathsNormalised pins that a relative and an absolute spelling of one file are
+// one input row, and that the same input given twice is imported once.
+func TestMboxTrackPathsNormalised(t *testing.T) {
+	mtQuiet(t)
+	dir := t.TempDir()
+	inDir := t.TempDir()
+	abs := miWrite(t, inDir, "g.mbox", miFixture())
+
+	// the relative spelling of the same file, from the test's working directory
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rel, err := filepath.Rel(wd, abs)
+	if err != nil {
+		t.Skipf("no relative path from %s to %s: %v", wd, abs, err)
+	}
+	planned := plannedFromPaths([]string{rel})
+	if len(planned) != 1 || planned[0].Path != abs {
+		t.Fatalf("plannedFromPaths(%q) = %+v, want path %q", rel, planned, abs)
+	}
+
+	tr := mtOpen(t, dir, false, false)
+	res := importPlanned(plannedFromPaths([]string{rel}), &runOptions{tracked: true}, newCountingSink(), nil, tr)
+	if res.Inputs != 1 {
+		t.Fatalf("relative run: inputs=%d", res.Inputs)
+	}
+	tr.close(res, 0)
+
+	// the absolute spelling finds the row of the relative one
+	tr = mtOpen(t, dir, false, false)
+	res = importPlanned(plannedFromPaths([]string{abs}), &runOptions{tracked: true}, newCountingSink(), nil, tr)
+	if res.AlreadyImported != 1 || res.Inputs != 0 {
+		t.Errorf("absolute run: already=%d inputs=%d", res.AlreadyImported, res.Inputs)
+	}
+	tr.close(res, 0)
+
+	db := mtRaw(t, dir)
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM inputs`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("%d input rows for one file, want 1", n)
+	}
+
+	// the same path twice, with two workers: imported once, never held-by-another-run
+	other := miWrite(t, inDir, "h.mbox", miFixture())
+	tr = mtOpen(t, dir, false, false)
+	res = importPlanned(plannedFromPaths([]string{other, rel, other}), &runOptions{tracked: true, parallel: 2},
+		newCountingSink(), nil, tr)
+	if res.Inputs != 1 || res.HeldByRun != 0 || res.AlreadyImported != 1 {
+		t.Errorf("duplicate run: inputs=%d held=%d already=%d", res.Inputs, res.HeldByRun, res.AlreadyImported)
+	}
+	tr.close(res, 0)
+}
+
+func TestMboxTrackDedupePlanned(t *testing.T) {
+	mtQuiet(t)
+	got := dedupePlanned([]plannedInput{
+		{Path: "/a", Name: "first"},
+		{Path: "/b"},
+		{Path: "/a", Name: "second"},
+	})
+	if len(got) != 2 || got[0].Path != "/a" || got[0].Name != "first" || got[1].Path != "/b" {
+		t.Errorf("dedupePlanned = %+v", got)
+	}
+}
+
+func TestMboxTrackStripLogPrefix(t *testing.T) {
+	for _, tc := range []struct{ line, want string }{
+		{"2026/11/06 17:10:14 [MBOX-IMPORT] x", "[MBOX-IMPORT] x"},
+		{"2026/11/06 17:10:14 ", ""},
+		{"[MBOX-IMPORT] x", "[MBOX-IMPORT] x"},
+		{"2026/11/06 17:10:14.123456 [MBOX-IMPORT] x", "2026/11/06 17:10:14.123456 [MBOX-IMPORT] x"},
+		{"2026-11-06 17:10:14 [MBOX-IMPORT] x", "2026-11-06 17:10:14 [MBOX-IMPORT] x"},
+		{"short", "short"},
+		{"", ""},
+	} {
+		if got := trackStripLogPrefix(tc.line); got != tc.want {
+			t.Errorf("trackStripLogPrefix(%q) = %q, want %q", tc.line, got, tc.want)
+		}
+	}
+}
+
+// TestMboxTrackDSNEscaped pins that a '?' or '#' in the path of the tracking database does
+// not cut the DSN short: the database is the file that was named, no other file is created,
+// and -status reads it.
+func TestMboxTrackDSNEscaped(t *testing.T) {
+	mtQuiet(t)
+	base := t.TempDir()
+	dir := filepath.Join(base, "q?#dir")
+	path := filepath.Join(dir, "a?b#c.sq3")
+	tr, err := openTracker(path, nil, false, true, 0)
+	if err != nil {
+		t.Fatalf("openTracker %q: %v", path, err)
+	}
+	in := plannedInput{Path: "/mirror/a.mbox", Source: sourceCLI, Size: 1, Mtime: 2, Supported: true}
+	id, state, err := tr.claimInput(in)
+	if err != nil || state != claimTake {
+		t.Fatalf("claim = %v, %v", state, err)
+	}
+	tr.finishInput(id, newCounters(in.Path), false, false)
+	tr.close(&runSummary{Inputs: 1, Total: newCounters("")}, 0)
+
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("the named database was not written: %v", err)
+	}
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "q?#dir" {
+		t.Errorf("the open created something else in %s: %v", base, entries)
+	}
+	var out strings.Builder
+	if err := writeStatus(&out, path, false); err != nil {
+		t.Fatalf("writeStatus: %v", err)
+	}
+	if !strings.Contains(out.String(), trackDone) {
+		t.Errorf("status of the escaped path:\n%s", out.String())
+	}
+	if !strings.Contains(trackDSN(path), "%3F") || !strings.Contains(trackStatusDSN(path), "%3F") {
+		t.Errorf("the '?' is not escaped: %q / %q", trackDSN(path), trackStatusDSN(path))
+	}
+}
+
+// TestMboxTrackCloseWhileLogging pins that log lines written while (and after) the tee stops
+// are dropped and counted, never a panic or a send on a closed channel. Run with -race.
+func TestMboxTrackCloseWhileLogging(t *testing.T) {
+	mtQuiet(t)
+	dir := t.TempDir()
+	tr := mtOpen(t, dir, false, true)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for w := 0; w < 4; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			<-start
+			for i := 0; i < 500; i++ {
+				log.Printf("[MBOX-IMPORT] goroutine %d line %d", w, i)
+			}
+		}(w)
+	}
+	close(start)
+	tr.close(nil, 0) // concurrent with the loggers
+	wg.Wait()
+
+	// a Write that arrives after the stop is counted, not a panic
+	before := tr.tee.dropped.Load()
+	if _, err := tr.tee.Write([]byte("[MBOX-IMPORT] late line\n")); err != nil {
+		t.Fatalf("late write: %v", err)
+	}
+	if got := tr.tee.dropped.Load(); got != before+1 {
+		t.Errorf("dropped after a late write = %d, want %d", got, before+1)
+	}
+	select {
+	case <-tr.tee.done:
+	default:
+		t.Error("the log writer is still running after close")
+	}
+}
+
+// TestMboxTrackLogInsertFails pins that a log table that cannot be written does not stop the
+// import: the inputs row is still written, the run's exit code is 0 and the failure is
+// counted and reported.
+func TestMboxTrackLogInsertFails(t *testing.T) {
+	mtQuiet(t)
+	dir := t.TempDir()
+	inDir := t.TempDir()
+	file := miWrite(t, inDir, "g.mbox", miFixture())
+
+	tr := mtOpen(t, dir, false, true)
+	db := mtRaw(t, dir)
+	if _, err := db.Exec(`DROP TABLE log`); err != nil {
+		t.Fatalf("drop the log table: %v", err)
+	}
+	res := importPlanned(plannedFromPaths([]string{file}), &runOptions{tracked: true}, newCountingSink(), nil, tr)
+	if res.Inputs != 1 || res.exitCode() != 0 {
+		t.Errorf("inputs=%d exit=%d, want 1 and 0", res.Inputs, res.exitCode())
+	}
+	log.Printf("[MBOX-IMPORT] this line cannot be stored")
+	tr.close(res, 0)
+
+	if tr.errs.Load() == 0 {
+		t.Error("the failed log inserts were not counted")
+	}
+	if tr.tee.dropped.Load() == 0 {
+		t.Error("the lines of a failed insert were not counted as dropped")
+	}
+	// the import itself was recorded
+	if status, _ := mtStatusOf(t, db, plannedFromPaths([]string{file})[0].Path); status != trackDone {
+		t.Errorf("input status = %q, want %q", status, trackDone)
 	}
 }
 
