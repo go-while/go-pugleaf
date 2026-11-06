@@ -102,6 +102,7 @@ func importUAT(path string, opts *runOptions, sink articleSink, stop <-chan stru
 	log.Printf("[MBOX-IMPORT] uat file=%q group=%q version=%d messages=%d", path, p.Name, p.Version, p.Count())
 
 	c = newCounters(path)
+	c.Group = opts.group
 	var encoded, addedMIME int
 	raw := make(map[string]int)
 	in := sink.beginInput()
@@ -172,13 +173,10 @@ func importUAT(path string, opts *runOptions, sink articleSink, stop <-chan stru
 	case strings.HasSuffix(path, ".done"):
 		log.Printf("[MBOX-IMPORT] file=%q already named .done: not renamed", path)
 	default:
-		if err := markDone(path); err != nil {
-			log.Printf("[MBOX-IMPORT] file=%q not marked done: %v", path, err)
-			if !errors.Is(err, os.ErrExist) {
-				inputErr = true
-			}
-		} else {
-			c.MarkedDone = true
+		marked, renameErr := markDoneInput(path, opts.tracked)
+		c.MarkedDone = marked
+		if renameErr {
+			inputErr = true
 		}
 	}
 
