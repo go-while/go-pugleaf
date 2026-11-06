@@ -9,6 +9,7 @@ package main
 
 import (
 	"archive/zip"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +19,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -101,6 +103,14 @@ func importSpool(path string, kind spoolKind, opts *runOptions, sink articleSink
 	defer release()
 
 	log.Printf("[MBOX-IMPORT] importing spool file=%q", path)
+	if kind == spoolDir {
+		// what the tracking DB can compare for a directory: the path it was given and the
+		// directory's own modification time (spoolDirSizes keeps the size at 0). Articles
+		// added below it do not change either, so such an input is "already imported".
+		log.Printf("[MBOX-IMPORT] file=%q is a spool directory: the tracking database knows it by this path "+
+			"and the directory's own modification time; a change deeper in the tree is not seen, "+
+			"so import it again with -reimport", path)
+	}
 	in := sink.beginInput()
 	c, readErr := readSpool(fsys, path, opts, in, stop)
 	if c == nil {
@@ -121,6 +131,17 @@ func importSpool(path string, kind spoolKind, opts *runOptions, sink articleSink
 			log.Printf("[MBOX-IMPORT] input error: file=%q: %v", path, readErr)
 		}
 	}
+	// A walk that ended without an error and without one article is an input error: an
+	// empty tree, the wrong directory, an image whose spool is somewhere else, or a format
+	// the classifier does not recognise. Reporting it is the whole point — an input that is
+	// silently marked done is never looked at again.
+	noArticles := false
+	if readErr == nil && !stopped && c.Read == 0 {
+		noArticles = true
+		inputErr = true
+		log.Printf("[MBOX-IMPORT] input error: file=%q: no articles in the spool (files=%d not-article=%d)",
+			path, c.Files, c.NotArticle)
+	}
 	waitErr := in.endInput(opts.commitTimeout)
 	if waitErr != nil {
 		log.Printf("[MBOX-IMPORT] file=%q commit wait: %v", path, waitErr)
@@ -131,9 +152,9 @@ func importSpool(path string, kind spoolKind, opts *runOptions, sink articleSink
 	case opts.dryRun || !opts.markDone:
 	case kind == spoolDir:
 		log.Printf("[MBOX-IMPORT] file=%q is a spool directory: not renamed", path)
-	case stopped || c.StoppedEarly || c.Errors > 0 || waitErr != nil:
-		log.Printf("[MBOX-IMPORT] file=%q not marked done (stopped=%t stopped-early=%t errors=%d commit-wait-error=%t)",
-			path, stopped, c.StoppedEarly, c.Errors, waitErr != nil)
+	case stopped || c.StoppedEarly || noArticles || c.Errors > 0 || waitErr != nil:
+		log.Printf("[MBOX-IMPORT] file=%q not marked done (stopped=%t stopped-early=%t no-articles=%t errors=%d commit-wait-error=%t)",
+			path, stopped, c.StoppedEarly, noArticles, c.Errors, waitErr != nil)
 	case strings.HasSuffix(path, ".done"):
 		log.Printf("[MBOX-IMPORT] file=%q already named .done: not renamed", path)
 	default:
@@ -170,6 +191,11 @@ func openSpool(path string, kind spoolKind, opts *runOptions, stop <-chan struct
 			}
 		}, nil
 	case spoolDisc:
+		if opts.tmpDir == "" {
+			log.Printf("[MBOX-IMPORT] file=%q: -tmpdir is not set: the image is unpacked into the system "+
+				"temp directory, which is often small or a tmpfs (in memory); pass -tmpdir on a file system "+
+				"with room for the whole unpacked image", path)
+		}
 		dir, err := os.MkdirTemp(opts.tmpDir, "mbox-importer-disc-")
 		if err != nil {
 			return nil, nil, err
@@ -188,12 +214,13 @@ func openSpool(path string, kind spoolKind, opts *runOptions, stop <-chan struct
 	return nil, nil, fmt.Errorf("not a news spool input (%d)", int(kind))
 }
 
-// unpackDisc unpacks the whole disc image into dir with `7z x -y -bd -o<dir> -- IMAGE` and
-// waits for the program; its per-file output is dropped, the tail of its stderr goes into
-// the error. The image can hold millions of files (utzoo: 5.2 GB in 2.08M files), so the
-// shutdown must not wait for it: when stop is closed the process group is killed and
-// errStopped is returned. 7z runs in a process group of its own, so Ctrl-C at a terminal
-// does not reach it directly and this kill is what ends it.
+// unpackDisc unpacks the whole disc image into dir with
+// `7z x -y -bd -bso0 -bsp0 -o<dir> -- IMAGE` and waits for the program; its listing and
+// progress are off, its stderr is read line by line (sevenZipErrors) and its exit status is
+// judged by discUnpackResult. The image can hold millions of files (utzoo: 5.2 GB in 2.08M
+// files), so the shutdown must not wait for it: when stop is closed the process group is
+// killed and errStopped is returned. 7z runs in a process group of its own, so Ctrl-C at a
+// terminal does not reach it directly and this kill is what ends it.
 func unpackDisc(image, dir, sevenZip string, stop <-chan struct{}) error {
 	prog, err := exec.LookPath(sevenZip)
 	if err != nil {
@@ -210,9 +237,10 @@ func unpackDisc(image, dir, sevenZip string, stop <-chan struct{}) error {
 	}
 	log.Printf("[MBOX-IMPORT] unpacking disc file=%q (%d bytes) to %q with %s", image, size, dir, filepath.Base(prog))
 
-	stderr := &tailBuffer{}
-	cmd := exec.Command(prog, "x", "-y", "-bd", "-o"+dir, "--", image)
-	cmd.Stdout = io.Discard // the per-file listing
+	stderr := &sevenZipErrors{}
+	// -bso0 -bsp0 turn the per-file listing and the progress off; the error stream stays
+	cmd := exec.Command(prog, "x", "-y", "-bd", "-bso0", "-bsp0", "-o"+dir, "--", image)
+	cmd.Stdout = io.Discard
 	cmd.Stderr = stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.WaitDelay = 10 * time.Second // Wait must not hang on children keeping the pipes open
@@ -223,12 +251,10 @@ func unpackDisc(image, dir, sevenZip string, stop <-chan struct{}) error {
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 	select {
-	case err := <-done:
-		if err != nil {
-			if msg := stderr.String(); msg != "" {
-				return fmt.Errorf("7z x: %w: %s", err, msg)
-			}
-			return fmt.Errorf("7z x: %w", err)
+	case waitErr := <-done:
+		stderr.flush() // Wait returned, so the stderr copy is done: no line is left
+		if err := discUnpackResult(image, dir, waitErr, stderr); err != nil {
+			return err
 		}
 	case <-stop:
 		killGroup(cmd)
@@ -237,6 +263,159 @@ func unpackDisc(image, dir, sevenZip string, stop <-chan struct{}) error {
 	}
 	log.Printf("[MBOX-IMPORT] unpacked disc file=%q to %q", image, dir)
 	return nil
+}
+
+// dangerousLinkMessage is what 7-Zip says about a symbolic link whose target leaves the
+// image ("ERROR: Dangerous link path was ignored : SPOOL/alt/test/link : ../../../other/9").
+const dangerousLinkMessage = "Dangerous link path was ignored"
+
+// discUnpackResult turns the exit status of a `7z x` run into an error, or nil when the
+// image was unpacked well enough to walk it.
+//
+// 7-Zip's exit codes are 0 (ok), 1 (warnings: something could not be read, the rest is
+// there), 2 (a fatal error) and 255 (user break). Exit 1 is logged and taken, because every
+// file that was extracted is still a file of the spool.
+//
+// Exit 2 has one harmless cause that old CD images run into: a symbolic link whose target
+// leaves the image is refused, a 0-byte placeholder is written in its place and everything
+// else is extracted (7-Zip 25.01 then exits 2). That image is taken as well — and marked
+// done afterwards, deliberately: unpacking it again on the next scan would end exactly the
+// same way. It is only taken when the unpack directory is not empty and every other ERROR
+// line of the run is one of those refused links, so a real failure (an archive that cannot
+// be opened, a truncated one — 7-Zip prints an "ERRORS:" header for that — or a killed 7z)
+// stays an input error.
+func discUnpackResult(image, dir string, waitErr error, stderr *sevenZipErrors) error {
+	if waitErr == nil {
+		stderr.logDangerous(image)
+		return nil
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(waitErr, &exitErr) {
+		return fmt.Errorf("7z x: %w%s", waitErr, stderr.detail())
+	}
+	switch code := exitErr.ExitCode(); {
+	case code == 1:
+		// warnings only: 7-Zip could not read something, the rest was extracted
+		log.Printf("[MBOX-IMPORT] file=%q: 7z reported warnings (exit 1), importing what it extracted%s",
+			image, stderr.detail())
+		stderr.logDangerous(image)
+		return nil
+	case code == 2 && stderr.dangerousOnly() && !dirIsEmpty(dir):
+		stderr.logDangerous(image)
+		return nil
+	}
+	return fmt.Errorf("7z x: %w%s", waitErr, stderr.detail())
+}
+
+// dirIsEmpty reports whether dir holds no entry at all (or cannot be read).
+func dirIsEmpty(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	return err != nil || len(entries) == 0
+}
+
+// discErrorKeep is the most "ERROR" lines of one 7z run kept for the error message.
+const discErrorKeep = 5
+
+// sevenZipErrors is the stderr of a 7z run, read line by line: it counts the refused
+// symbolic links (dangerousLinkMessage) and keeps the other "ERROR" lines, which is what
+// tells a disc image with such links apart from a real failure — the tail of the output
+// alone cannot, because the lines may be anywhere in it. It also keeps the last stderrKeep
+// bytes for the error message, as the other 7z paths do. exec writes into it from its own
+// goroutine, so everything is locked.
+type sevenZipErrors struct {
+	tail tailBuffer // locked itself
+
+	mu        sync.Mutex
+	partial   []byte   // bytes since the last newline
+	dangerous int      // lines about a refused symbolic link
+	other     []string // the first discErrorKeep other ERROR lines
+	otherSeen int      // all other ERROR lines
+}
+
+func (s *sevenZipErrors) Write(p []byte) (int, error) {
+	if _, err := s.tail.Write(p); err != nil {
+		return 0, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.partial = append(s.partial, p...)
+	for {
+		i := bytes.IndexByte(s.partial, '\n')
+		if i < 0 {
+			break
+		}
+		s.line(string(s.partial[:i]))
+		s.partial = append([]byte(nil), s.partial[i+1:]...)
+	}
+	if len(s.partial) > stderrKeep {
+		// a program writing one endless line must not grow this buffer without end
+		s.line(string(s.partial))
+		s.partial = nil
+	}
+	return len(p), nil
+}
+
+// flush classifies a last line that had no newline. Call it after Wait returned, which is
+// after exec finished copying the process's stderr.
+func (s *sevenZipErrors) flush() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.partial) > 0 {
+		s.line(string(s.partial))
+		s.partial = nil
+	}
+}
+
+// line classifies one line of the output; the caller holds the lock.
+func (s *sevenZipErrors) line(l string) {
+	t := strings.TrimSpace(strings.TrimRight(l, "\r"))
+	switch {
+	case strings.Contains(t, dangerousLinkMessage):
+		s.dangerous++
+	case strings.HasPrefix(t, "ERROR"): // "ERROR: ..." and the "ERRORS:" header
+		s.otherSeen++
+		if len(s.other) < discErrorKeep {
+			s.other = append(s.other, t)
+		}
+	}
+}
+
+// dangerousOnly reports whether the run complained about refused symbolic links and about
+// nothing else.
+func (s *sevenZipErrors) dangerousOnly() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.dangerous > 0 && s.otherSeen == 0
+}
+
+// logDangerous logs the refused symbolic links of the run, if there were any.
+func (s *sevenZipErrors) logDangerous(image string) {
+	s.mu.Lock()
+	n := s.dangerous
+	s.mu.Unlock()
+	if n > 0 {
+		log.Printf("[MBOX-IMPORT] file=%q: %d dangerous link(s) skipped by 7z: a symbolic link out of the "+
+			"image is left as an empty file, everything else was extracted", image, n)
+	}
+}
+
+// detail is what goes into an error message or a warning: ": " and the ERROR lines of the
+// run, or the tail of its output when there were none; "" when it said nothing at all.
+func (s *sevenZipErrors) detail() string {
+	s.mu.Lock()
+	lines, seen := append([]string(nil), s.other...), s.otherSeen
+	s.mu.Unlock()
+	if len(lines) > 0 {
+		msg := strings.Join(lines, "; ")
+		if seen > len(lines) {
+			msg = fmt.Sprintf("%s (and %d more)", msg, seen-len(lines))
+		}
+		return ": " + msg
+	}
+	if msg := s.tail.String(); msg != "" {
+		return ": " + msg
+	}
+	return ""
 }
 
 // killGroup kills the process group of a started command (so its children go too), or the

@@ -165,7 +165,7 @@ Positional arguments are the inputs; at least one is required (except with `-sta
 | `NAME.usenet` | a [UAT archive](#uat-archives), one newsgroup per file: the messages are decompressed by one run of the zstd program (`-zstd`) over the whole message store |
 | `NAME.usenet.xz` | a UAT archive compressed with xz, as published on [usenet.nereid.pl](https://usenet.nereid.pl/): unpacked with `xz -dc -- ARCHIVE` (`-xz`; if xz is not found, `7z e -so -bd -txz -- ARCHIVE`) to `NAME.usenet` in a private subdirectory of `-tmpdir`, then read like `NAME.usenet` |
 | `NAME.usenet.7z` | a UAT archive in 7z, as published on archive.org ([`usenet-uat-pc-games`](https://archive.org/details/usenet-uat-pc-games)): the entry `NAME.usenet` is unpacked with the 7z program (`-7z`) to a private subdirectory of `-tmpdir`, then read like `NAME.usenet` |
-| `IMAGE.iso`, `IMAGE.cdr`, `IMAGE.sqsh`, `IMAGE.img` | a [disc image](#disc-images-and-news-spools) holding a news spool: unpacked with the 7z program (`-7z`) into a private subdirectory of `-tmpdir` (`7z x -y -bd -o<dir> -- IMAGE`), walked article by article, and the directory is removed again |
+| `IMAGE.iso`, `IMAGE.cdr`, `IMAGE.sqsh`, `IMAGE.img` | a [disc image](#disc-images-and-news-spools) holding a news spool: unpacked with the 7z program (`-7z`) into a private subdirectory of `-tmpdir` (`7z x -y -bd -bso0 -bsp0 -o<dir> -- IMAGE`), walked article by article, and the directory is removed again |
 | `DIR` | its files whose names contain `.mbox`, `.bag` or `.usenet` and do not end in `.done`, sorted by name; subdirectories are not entered |
 | `DIR` with `-spool` | the directory itself is one input: a [news spool](#disc-images-and-news-spools), walked article by article (a mounted image, an unpacked tree) |
 | `SPOOL.zip` with `-spool` | the zip itself is one input: a news spool read through `archive/zip`, nothing is unpacked |
@@ -176,9 +176,11 @@ still imported, and the run exits with code 1. An empty (0-byte) mbox input coun
 A non-empty input that is not an mbox is an input error too. A 7z that fails only at the end (for
 example a CRC error) leaves the articles already imported in place and the input is not marked done.
 
-A disc image whose 7z run fails (not an image, a format this 7z cannot read, no space in `-tmpdir`)
-is an input error too, and so is a `.zip` spool that cannot be opened; the unpack directory is
-removed in every case. A disc image is an input only when it is named on the command line or comes
+A disc image whose 7z run fails (not an image, a format this 7z cannot read, a truncated image, no
+space in `-tmpdir`) is an input error too, and so is a `.zip` spool that cannot be opened and a
+spool that holds no article at all; the unpack directory is removed in every case. 7-Zip warnings
+(exit 1) and the symbolic links it refuses (exit 2, `Dangerous link path was ignored`) are not
+failures, see [Disc images and news spools](#disc-images-and-news-spools). A disc image is an input only when it is named on the command line or comes
 from `-from-iafetch`: a directory scan still looks for mbox files, not for images.
 
 For UAT inputs these are input errors as well: a zstd program that cannot be found (checked before
@@ -236,12 +238,23 @@ message store without an error or a size mismatch. The archive given on the comm
 gets renamed (`X.usenet.xz` becomes `X.usenet.xz.done`); the copy unpacked into `-tmpdir` is always
 removed, whether or not the input was marked done.
 
-For a news spool input it means that the walk reached the end of the tree. A **disc image** is
-renamed like any other input (`NN_1992_16.iso` becomes `NN_1992_16.iso.done`), and its unpack
-directory under `-tmpdir` is removed in every case (success, input error, signal). A **spool
-directory** (`-spool DIR`) is **never** renamed — it is a tree, often a mount point, not the thing
-that was imported — and one line says so; only the [tracking database](#tracking-database)
-remembers it. A `-spool SPOOL.zip` is a file and is renamed like any other input.
+For a news spool input it means that the walk reached the end of the tree **and found at least one
+article**: a spool that was walked and held no article (an empty tree, the wrong directory, an
+image whose spool is somewhere else) is an input error and is not marked done, because an input
+that is silently marked done is never looked at again:
+
+```
+[MBOX-IMPORT] input error: file="…/NN_1992_16.iso": no articles in the spool (files=1842 not-article=1842)
+```
+
+A **disc image** is renamed like any other input (`NN_1992_16.iso` becomes `NN_1992_16.iso.done`),
+and its unpack directory under `-tmpdir` is removed in every case (success, input error, signal). A
+**spool directory** (`-spool DIR`) is **never** renamed — it is a tree, often a mount point, not the
+thing that was imported — and one line says so; only the [tracking database](#tracking-database)
+remembers it, by its path and the directory's **own** modification time (its recorded size is 0).
+A file added deeper in the tree does not change that, so a second run of the same directory is
+"already imported": import it again with `-reimport`. One line per spool directory input says so.
+A `-spool SPOOL.zip` is a file and is renamed, and tracked by size and mtime, like any other input.
 
 Skipped and rejected articles do not block the rename: they are counted and logged, and a second
 run would skip them again. Nothing is ever renamed in a dry run or with `-mark-done=false`. An input
@@ -277,6 +290,13 @@ The `path` of an input row is absolute: a positional input is made absolute and 
 recorded, so the same file given as `./g.mbox` and as `/archive/g.mbox` is one row, and an input
 given twice in one command line is imported once.
 
+A **news spool directory** (`-spool DIR`, a mount point included) is one input row like a file, but
+a directory has no size and no content hash to compare: its row keeps size `0` and the directory's
+**own** modification time, so a rerun of the same directory is "already imported" even when files
+were added deeper in the tree. Use `-reimport` for such a tree, or a fresh mount point per image.
+Disc images and `-spool SPOOL.zip` are ordinary file rows (size, mtime, and the md5 of
+`-verify-md5`).
+
 The schema version is the file's `PRAGMA user_version` (currently `1`); a file written by a newer
 importer is refused instead of being changed. The database is opened in WAL mode with a 30 second
 busy timeout, and every transaction is a `BEGIN IMMEDIATE`.
@@ -290,7 +310,7 @@ An input row has one of these states:
 | `done` | imported |
 | `failed` | an input error, article errors or a failed commit wait; `reason` says which |
 | `stopped` | SIGINT/SIGTERM ended the import of this input |
-| `unsupported` | the importer cannot read this file at all; `reason` says why (`tar`, `txt`, `ufs`, `xml`, `torrent`, `csv`, `unsupported-suffix`). These are final: no scan tries them again. Disc images (`iso`, `sqsh`, `img`, `.cdr`) were in this list until the importer learned to read them |
+| `unsupported` | the importer cannot read this file at all; `reason` says why (`tar`, `txt`, `ufs`, `xml`, `torrent`, `csv`, `unsupported-suffix`). These are final: no scan tries them again. Disc images (`iso`, `sqsh`, `img`, `cdr`) were in this list until the importer learned to read them |
 
 **An input is imported once.** At the start of an input the run compares the file with its row: a
 row that is `done` for the same size and mtime (and the same md5, when the row and the source both
@@ -637,7 +657,7 @@ walks such a tree directly instead of expecting a separator-delimited file.
 
 | Input | How it is read |
 |-------|----------------|
-| `IMAGE.iso` | ISO 9660 (Rock Ridge and Joliet included): unpacked with `7z x -y -bd -o<dir> -- IMAGE`, then walked |
+| `IMAGE.iso` | ISO 9660 (Rock Ridge and Joliet included): unpacked with `7z x -y -bd -bso0 -bsp0 -o<dir> -- IMAGE`, then walked |
 | `IMAGE.cdr` | a raw CD dump (`CDROM_March92.cdr`), the same way |
 | `IMAGE.sqsh` | a squashfs image (`utzoo.sqsh`), the same way |
 | `IMAGE.img` | a raw FAT floppy image (the `DOUG.*` Amiga floppies), the same way |
@@ -652,8 +672,11 @@ not mix in `NAME.mbox.zip` files.
 **Space in `-tmpdir`.** An image is unpacked in full, into a private subdirectory of `-tmpdir` that
 is removed again on every path (success, input error, Ctrl-C). It needs room for the whole unpacked
 contents — `utzoo.sqsh` unpacks to **5.2 GB in 2.08M files**, a NetNews CD to about 600 MB in
-~190k files — and a file system that is happy with millions of small files. The default (the system
-temp directory) is usually not that, so pass `-tmpdir /big/tmp`. The unpack is logged:
+~190k files — and a file system that is happy with millions of small files. With `-parallel N` up
+to N images are unpacked at the same time, so the space needed is **N × the largest unpacked
+image**. The default (the system temp directory) is usually neither big enough nor a disk (it is
+often a tmpfs, in memory), so pass `-tmpdir /big/tmp`; a run that unpacks an image without
+`-tmpdir` logs a warning. The unpack is logged:
 
 ```
 [MBOX-IMPORT] unpacking disc file="…/NN_1992_16.iso" (650117120 bytes) to "/big/tmp/mbox-importer-disc-123" with 7z
@@ -669,9 +692,31 @@ mbox-importer -data ./data -spool /mnt/x
 fusermount -u /mnt/x
 ```
 
+The **mount point is the input's identity** here: the tracking database remembers `/mnt/x`, not the
+image behind it. Mount the next image somewhere else (or `-reimport` it), or the second image is
+"already imported"; a per-image mount point such as `/mnt/nn-1992-16` keeps the rows apart and
+readable in `-status`.
+
 **7z runs in its own process group.** Ctrl-C therefore does not reach it directly: the importer
 kills it (and its children), removes the unpack directory and ends the input as stopped, exit code
-130. A failed `7z x` is an input error (exit code 1) and the directory goes too.
+130. A process that is killed outright (`SIGKILL`, a crash, a power cut) cannot clean up, so a
+`mbox-importer-disc-*` tree is left under `-tmpdir`: no later run removes it, delete it by hand.
+
+**What `7z x` is allowed to complain about.** Exit status 0 is the normal case. Exit status 1
+(warnings: something could not be read) is logged and the files that were extracted are imported.
+Exit status 2 is an input error (exit code 1), with one exception that the old CD images need: a
+symbolic link whose target leaves the image is refused by 7-Zip, which writes an empty file in its
+place, extracts everything else and still exits 2. That image is imported — and marked done, so it
+is not unpacked again on the next scan, which would end exactly the same way — as long as the
+unpack directory is not empty and every other `ERROR` line of the run is such a link. The refused
+links are counted:
+
+```
+[MBOX-IMPORT] file="…/NN_1992_16.iso" 37 dangerous link(s) skipped by 7z: a symbolic link out of the image is left as an empty file, everything else was extracted
+```
+
+An archive that cannot be opened, a truncated one (7-Zip prints an `ERRORS:` header) and a killed
+7z stay input errors.
 
 ### What the walk counts
 

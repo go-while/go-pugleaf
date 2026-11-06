@@ -220,9 +220,10 @@ func iafetchInput(identifier, name string, size int64, md5, recorded, base strin
 // here either (an upper-case "F.ISO" is, because a disc image is decided case-insensitively).
 func iafetchSupported(name string) (bool, string) {
 	base := filepath.Base(filepath.FromSlash(name))
-	if isDiscImage(base) && !strings.HasSuffix(base, ".done") {
+	if isDiscImage(base) && !strings.HasSuffix(strings.ToLower(base), ".done") {
 		// isDiscImage ignores a trailing ".done" (a positional input can be imported
-		// again), but a ".done" name in the mirror is not an input, as for an mbox
+		// again), but a ".done" name in the mirror is not an input, as for an mbox. The
+		// check is case-insensitive like isDiscImage itself ("CD1.ISO.DONE").
 		return true, ""
 	}
 	if isInputName(base) && iafetchReadable(base) {

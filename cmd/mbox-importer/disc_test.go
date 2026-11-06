@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -239,6 +241,135 @@ func TestMboxDiscUnpack(t *testing.T) {
 	}
 }
 
+// TestMboxDiscDangerousLink: 7-Zip refuses a symbolic link whose target leaves the image
+// ("Dangerous link path was ignored"), writes an empty file in its place and exits 2
+// although it extracted everything else. Such an image is imported anyway; the refused
+// links are counted and logged.
+func TestMboxDiscDangerousLink(t *testing.T) {
+	need7z(t)
+	dir := t.TempDir()
+	tree := dcSpoolTree(t, filepath.Join(dir, "tree"))
+	// a relative link that stays inside the tree but climbs out of its own directory:
+	// 7-Zip refuses exactly this (the target is "../../../other/9")
+	if err := os.MkdirAll(filepath.Join(tree, "other"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tree, "other", "9"), []byte(miArticle(miID2, miBeta, "linked")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../../../other/9", filepath.Join(tree, "SPOOL", "alt", "test", "link")); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, c := range []struct {
+		name  string
+		build func() string
+	}{
+		{"iso", func() string { return dcMakeISO(t, tree, filepath.Join(dir, "links.iso")) }},
+		{"sqsh", func() string { return dcMakeSquashfs(t, tree, filepath.Join(dir, "links.sqsh")) }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			image := c.build()
+			tmp := t.TempDir()
+			var buf bytes.Buffer
+			log.SetOutput(&buf)
+			t.Cleanup(func() { log.SetOutput(os.Stderr) })
+			fsys, release, err := openSpool(image, spoolDisc, &runOptions{sevenZip: "7z", tmpDir: tmp}, nil)
+			log.SetOutput(os.Stderr)
+			if err != nil {
+				t.Fatalf("openSpool: %v\n%s", err, buf.String())
+			}
+			defer release()
+			if b, err := fs.ReadFile(fsys, "SPOOL/alt/test/1"); err != nil || len(b) == 0 {
+				t.Errorf("the rest of the image was not extracted: %v %q", err, b)
+			}
+			if b, err := fs.ReadFile(fsys, "other/9"); err != nil || len(b) == 0 {
+				t.Errorf("the link target itself was not extracted: %v %q", err, b)
+			}
+			if want := "dangerous link(s) skipped by 7z"; !strings.Contains(buf.String(), want) {
+				t.Errorf("log lacks %q\n%s", want, buf.String())
+			}
+		})
+	}
+}
+
+// dcExitErr returns a real *exec.ExitError for the given exit code.
+func dcExitErr(t *testing.T, code int) error {
+	t.Helper()
+	err := exec.Command("sh", "-c", fmt.Sprintf("exit %d", code)).Run()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("sh -c 'exit %d': %v, want an *exec.ExitError", code, err)
+	}
+	return err
+}
+
+// TestMboxDiscUnpackResult pins which 7z exit status is still good enough to walk the
+// unpacked image (see discUnpackResult).
+func TestMboxDiscUnpackResult(t *testing.T) {
+	dangerous := "ERROR: Dangerous link path was ignored : SPOOL/alt/test/link : ../../../other/9\n"
+	for _, c := range []struct {
+		name   string
+		code   int // 0: no error from Wait
+		stderr string
+		empty  bool // the unpack directory holds nothing
+		ok     bool
+	}{
+		{"ok", 0, "", false, true},
+		{"ok with a refused link", 0, dangerous, false, true},
+		{"warnings", 1, "WARNING: cannot read something\n", false, true},
+		{"refused link", 2, dangerous, false, true},
+		{"refused links, partial write", 2, dangerous + "ERROR: Dangerous link path was ignored : a : ../b", false, true},
+		{"refused link, nothing extracted", 2, dangerous, true, false},
+		{"refused link and a real error", 2, dangerous + "ERRORS:\nUnexpected end of archive\n", false, false},
+		{"cannot open the archive", 2, "ERROR: x.iso\nCannot open the file as archive\n", true, false},
+		{"exit 2 without a reason", 2, "", false, false},
+		{"another exit code", 3, "ERROR: whatever\n", false, false},
+	} {
+		dir := t.TempDir()
+		if !c.empty {
+			if err := os.WriteFile(filepath.Join(dir, "SPOOL"), []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		stderr := &sevenZipErrors{}
+		if _, err := stderr.Write([]byte(c.stderr)); err != nil {
+			t.Fatal(err)
+		}
+		stderr.flush()
+		var waitErr error
+		if c.code != 0 {
+			waitErr = dcExitErr(t, c.code)
+		}
+		err := discUnpackResult("x.iso", dir, waitErr, stderr)
+		if (err == nil) != c.ok {
+			t.Errorf("%s: discUnpackResult = %v, want ok=%v", c.name, err, c.ok)
+		}
+		if err != nil && !strings.Contains(err.Error(), "7z x") {
+			t.Errorf("%s: error %v does not name the command", c.name, err)
+		}
+	}
+
+	// the stderr scanner counts the refused links and keeps the other ERROR lines
+	stderr := &sevenZipErrors{}
+	chunks := []string{"ERROR: Dangerous link path", " was ignored : a : ../b\nERR", "ORS:\nUnexpected end"}
+	for _, chunk := range chunks {
+		if _, err := stderr.Write([]byte(chunk)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stderr.flush() // the last line has no newline
+	if stderr.dangerous != 1 || stderr.otherSeen != 1 {
+		t.Errorf("dangerous=%d otherSeen=%d, want 1 and 1", stderr.dangerous, stderr.otherSeen)
+	}
+	if stderr.dangerousOnly() {
+		t.Error("dangerousOnly with another ERROR line")
+	}
+	if d := stderr.detail(); !strings.Contains(d, "ERRORS:") {
+		t.Errorf("detail = %q, want the ERROR line in it", d)
+	}
+}
+
 // TestMboxDiscUnpackErrors: a corrupt image and a missing 7z program are input errors and
 // leave no unpack directory behind.
 func TestMboxDiscUnpackErrors(t *testing.T) {
@@ -337,6 +468,11 @@ func TestMboxDiscUnpackStopped(t *testing.T) {
 // the import loop. readSpool is still the wave-0 stub (errSpoolNotImplemented), so every
 // input ends as an input error here; what this pins is the dispatch, the cleanup of the
 // unpack directory and that no spool input is renamed on a failed read.
+//
+// Two paths of importSpool cannot be reached while readSpool is that stub, because it never
+// returns a nil error: a spool that was walked and held no article at all (the "no articles
+// in the spool" input error) and a spool that was imported and is then marked done. Both
+// are for the walker's own tests, or for the verifier once the spool slice is merged.
 func TestMboxDiscImportDispatch(t *testing.T) {
 	need7z(t)
 	dir := t.TempDir()

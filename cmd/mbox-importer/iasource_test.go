@@ -366,6 +366,7 @@ func TestMboxIASupportedNames(t *testing.T) {
 		{"disk.img", true, ""},
 		{"CDROM_March92.cdr", true, ""},
 		{"cd1.iso.done", false, iaReasonUnsupported}, // already imported by an older run
+		{"CD1.ISO.DONE", false, iaReasonUnsupported}, // the .done guard is case-insensitive too
 		{"spool.tar", false, "tar"},
 		{"item_djvu.txt", false, "txt"},
 		{"spool.ufs", false, "ufs"},
