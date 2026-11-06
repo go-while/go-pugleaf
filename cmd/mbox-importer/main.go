@@ -72,6 +72,10 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		logKeepRuns     = fs.Int("log-keep-runs", 0, "at start, delete the log rows of all but the newest N runs, this run included (0 = keep all)")
 		statusFlag      = fs.Bool("status", false, "print what the tracking database knows and exit, importing nothing")
 		jsonFlag        = fs.Bool("json", false, "print -status as JSON")
+		fromIAFetch     = fs.String("from-iafetch", "", "take the inputs from the download database of mbox2nntp's iafetch at this path (read-only) instead of positional inputs")
+		fromIAFetchBase = fs.String("from-iafetch-base", "", "iafetch's working directory: a relative path in its database is resolved against it (needs -from-iafetch)")
+		verifyMD5       = fs.Bool("verify-md5", false, "check the md5 iafetch recorded before an input is imported (needs -from-iafetch)")
+		follow          = fs.Duration("follow", 0, "after the inputs of a scan are done, wait this long and scan again, until a signal stops the run (0 = one scan; needs -from-iafetch)")
 	)
 	fs.Usage = func() { usage(fs) }
 	if err := fs.Parse(args); err != nil {
@@ -101,7 +105,11 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		fmt.Fprintf(fs.Output(), "mbox-importer: -log-keep-runs %d is negative\n", *logKeepRuns)
 		return 2
 	}
-	if fs.NArg() == 0 {
+	if msg := checkIAFetchFlags(*fromIAFetch, *fromIAFetchBase, *verifyMD5, *follow, fs.NArg(), trackPath, *dryRun); msg != "" {
+		fmt.Fprintln(fs.Output(), "mbox-importer: "+msg)
+		return 2
+	}
+	if *fromIAFetch == "" && fs.NArg() == 0 {
 		fmt.Fprintln(fs.Output(), "mbox-importer: no input given")
 		fs.Usage()
 		return 2
@@ -156,6 +164,8 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		keepBinary:      *keepBinary,
 		markDone:        *markDoneFlag,
 		strictMsgID:     *strictMsgID,
+		verifyMD5:       *verifyMD5,
+		follow:          *follow,
 		commitTimeout:   *commitTimeout,
 		maxArticleSize:  *maxArtSize,
 	}
@@ -175,17 +185,37 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		stop = sigStop
 	}
 
-	files, expandErrs := expandInputs(fs.Args())
-	// the inputs of this run; wave 2 of plan mbox-import-tracking adds the rows of
-	// iafetch's database here (-from-iafetch), the import loop below takes them as they are
-	planned := plannedFromPaths(files)
+	// The inputs of this run: the positional arguments, or the files iafetch recorded in its
+	// download database (-from-iafetch). The iafetch scan stays a function, because -follow
+	// runs it again after every wait; an error in the first scan (a relative path without
+	// -from-iafetch-base, a database that cannot be read) ends the run before it starts.
+	var (
+		planned    []plannedInput
+		expandErrs []error
+		scan       scanFunc
+	)
+	if *fromIAFetch != "" {
+		scan = func() ([]plannedInput, error) { return iafetchInputs(*fromIAFetch, *fromIAFetchBase) }
+		first, err := scan()
+		if err != nil {
+			fmt.Fprintf(fs.Output(), "mbox-importer: %v\n", err)
+			return 2
+		}
+		planned = first
+		opts.markDone = false // iafetch's mirror is only read, never renamed
+	} else {
+		files, errs := expandInputs(fs.Args())
+		expandErrs = errs
+		planned = plannedFromPaths(files)
+	}
 
 	// The tracking database is opened before the run is logged: its log tee catches every
 	// line of the run, and its close (deferred before the database shutdown, so it runs
 	// after it) catches the shutdown lines too. A run with nothing to import does not
-	// create it (and a dry run never touches it).
+	// create it (and a dry run never touches it); a -follow run does, because a later scan
+	// will have inputs.
 	var track *tracker
-	if trackPath != "" && !opts.dryRun && len(planned) > 0 {
+	if trackPath != "" && !opts.dryRun && (len(planned) > 0 || opts.follow > 0) {
 		t, err := openTracker(trackPath, args, *reimport, *logDB, *logKeepRuns)
 		if err != nil {
 			log.Printf("[MBOX-IMPORT] tracking database %q: %v", trackPath, err)
@@ -199,10 +229,17 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 	for _, err := range expandErrs {
 		log.Printf("[MBOX-IMPORT] input error: %v", err)
 	}
+	if *fromIAFetch != "" {
+		logIAFetchSource(*fromIAFetch, *fromIAFetchBase, *markDoneFlag)
+	}
 
 	if opts.dryRun {
+		if opts.follow > 0 {
+			log.Printf("[MBOX-IMPORT] -follow %v is ignored in a dry run: one scan", opts.follow)
+			opts.follow = 0
+		}
 		sink := newCountingSink()
-		res := importPlanned(planned, opts, sink, stop, nil)
+		res := importScans(planned, scan, opts, sink, stop, nil)
 		res.InputErrors += len(expandErrs)
 		res.Inputs += len(expandErrs)
 		logDryRunGroups(sink.groups)
@@ -211,7 +248,7 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		return res.exitCode()
 	}
 
-	if len(planned) == 0 {
+	if len(planned) == 0 && opts.follow <= 0 {
 		// nothing to import (empty directory, every input already .done, or only missing paths)
 		log.Printf("[MBOX-IMPORT] no inputs to import")
 		res := &runSummary{Inputs: len(expandErrs), InputErrors: len(expandErrs)}
@@ -255,12 +292,59 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		return 1
 	}
 
-	res := importPlanned(planned, opts, newProcessorSink(db, proc), stop, track)
+	res := importScans(planned, scan, opts, newProcessorSink(db, proc), stop, track)
 	res.InputErrors += len(expandErrs)
 	res.Inputs += len(expandErrs)
 	logTotals(res)
 	lastRun = res
 	return res.exitCode()
+}
+
+// checkIAFetchFlags checks the flag combinations of -from-iafetch (plan mbox-import-tracking)
+// and returns the message of exit code 2, or "" when the command line is fine.
+//
+// -from-iafetch-base, -verify-md5 and -follow only mean something for the inputs of
+// iafetch's database: the base resolves its relative paths, the md5 to check against comes
+// from it, and a list of positional inputs is not scanned again. -from-iafetch needs the
+// tracking database, because without it a scan has no memory and would import every
+// recorded file again — except in a dry run, which imports nothing and opens no database
+// at all, so -dry-run -trackdb off is fine there.
+func checkIAFetchFlags(dbPath, base string, verifyMD5 bool, follow time.Duration, args int, trackPath string, dryRun bool) string {
+	if dbPath == "" {
+		switch {
+		case base != "":
+			return "-from-iafetch-base needs -from-iafetch"
+		case verifyMD5:
+			return "-verify-md5 needs -from-iafetch: only iafetch's database records an md5 to check against"
+		case follow != 0:
+			return "-follow needs -from-iafetch: a list of positional inputs is not scanned again"
+		}
+		return ""
+	}
+	switch {
+	case args > 0:
+		return "-from-iafetch and positional inputs exclude each other"
+	case trackPath == "" && !dryRun:
+		return "-from-iafetch needs the tracking database: with -trackdb off every scan would import every recorded file again"
+	case follow < 0:
+		return fmt.Sprintf("-follow %v is negative", follow)
+	}
+	return ""
+}
+
+// logIAFetchSource logs the one line a -from-iafetch run says about its source: the mirror
+// is only read, so no input is renamed, whatever -mark-done says (runOptions.markDone is
+// already false by then). markDoneFlag is the value the command line asked for.
+func logIAFetchSource(dbPath, base string, markDoneFlag bool) {
+	where := "paths as recorded: absolute, a relative one needs -from-iafetch-base"
+	if base != "" {
+		where = fmt.Sprintf("relative paths resolved under %q", base)
+	}
+	if markDoneFlag {
+		log.Printf("[MBOX-IMPORT] -from-iafetch %q (%s): read-only, -mark-done is ignored (the tracking database holds the import state)", dbPath, where)
+		return
+	}
+	log.Printf("[MBOX-IMPORT] -from-iafetch %q (%s): read-only, nothing is renamed (-mark-done was already off)", dbPath, where)
 }
 
 // lockShortHashLen returns the stored short hash length, storing want on the first run.
@@ -357,6 +441,7 @@ func batchQueueSize(parallel, maxBatch, maxQueue int) int {
 func usage(fs *flag.FlagSet) {
 	out := fs.Output()
 	fmt.Fprintln(out, "Usage: mbox-importer [flags] INPUT...")
+	fmt.Fprintln(out, "       mbox-importer [flags] -from-iafetch DB [-from-iafetch-base DIR]   (inputs from iafetch's download database)")
 	fmt.Fprintln(out, "       mbox-importer [flags] -status [-json]   (prints the tracking database, imports nothing)")
 	fmt.Fprintln(out, "  INPUT: NAME.mbox, NAME.bag, NAME.mbox.gz, NAME.mbox.zip, NAME.mbox.7z (via -7z),")
 	fmt.Fprintln(out, "         UAT archives NAME.usenet, NAME.usenet.xz (via -xz), NAME.usenet.7z (via -7z), all via -zstd,")
@@ -369,6 +454,7 @@ func usage(fs *flag.FlagSet) {
 	fmt.Fprintln(out, "  mbox-importer -data ./data-test-mbox -parallel 4 -max-batch 500 /archive/usenet/")
 	fmt.Fprintln(out, "  mbox-importer -data ./data-test-mbox -group-from-name -parallel 4 /archive/uat-mbox/   # de.comm.foo.mbox.gz -> de.comm.foo")
 	fmt.Fprintln(out, "  mbox-importer -data ./data-test-mbox -status                                         # what the tracking database knows")
+	fmt.Fprintln(out, "  mbox-importer -data ./data-test-mbox -from-iafetch /archive.org/.iafetch/iafetch.sqlite -group-from-name -parallel 4 -follow 10m")
 	fmt.Fprintln(out, "Exit codes: 0 ok, 1 input, article, commit or database error, 2 bad command line, 130 stopped by a signal")
 	fmt.Fprintln(out, "Flags:")
 	fs.PrintDefaults()

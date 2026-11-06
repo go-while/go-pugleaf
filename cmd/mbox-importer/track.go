@@ -55,6 +55,12 @@ const (
 	trackUnsupported = "unsupported" // the importer cannot read this file (reason says why)
 )
 
+// md5_seen of the inputs table holds the sum -verify-md5 computed for a file that did not
+// match the md5 its source recorded (status pending, reason md5-mismatch), so an unchanged
+// corrupt file is not hashed again on every scan (md5KnownMismatch). It is part of version 1
+// of the schema: no tracking database of version 1 exists outside the worktrees of plan
+// mbox-import-tracking, so no migration is needed for it.
+//
 // trackSchema is the schema of version trackSchemaVersion. CREATE IF NOT EXISTS only
 // creates what is missing, so a later version 2 needs its own ALTER TABLE / migration code
 // here (keyed on the user_version read by migrate), not a changed CREATE statement: an
@@ -88,6 +94,7 @@ var trackSchema = []string{
 		size           INTEGER,
 		mtime          INTEGER,
 		md5            TEXT,
+		md5_seen       TEXT,
 		status         TEXT NOT NULL,
 		reason         TEXT,
 		group_name     TEXT,
@@ -537,9 +544,12 @@ func (t *tracker) recordPlanned(in plannedInput) error {
 	})
 }
 
-// trackPlannedStatus is the status a planned input is recorded with.
+// trackPlannedStatus is the status a planned input is recorded with: pending for one the
+// importer can read, and for one it could read if the file on disk were ready (a missing or
+// changed file, a failed -verify-md5: plannedPending), so the next scan tries it again. An
+// input there is no reader for (iso, txt, ...) is recorded as unsupported, with its reason.
 func trackPlannedStatus(in plannedInput) string {
-	if in.Supported {
+	if in.Supported || plannedPending(in) {
 		return trackPending
 	}
 	return trackUnsupported
@@ -554,31 +564,58 @@ const (
 	claimHeld                   // another live run is importing it
 )
 
-// claimInput takes the input for this run: it inserts or updates its row to "importing" in
-// one BEGIN IMMEDIATE transaction, so two runs on the same tracking DB never import the
-// same input. It returns claimDone when the row says done and the file on disk is the same
-// one (size, mtime, and the md5 when both are known), claimHeld when a live run holds it.
-// With a nil tracker every input is claimTake with id 0.
+// claimPrev is the state of the input row before the claim took it: empty for a row that
+// did not exist. -verify-md5 uses it to tell a file it already hashed and found wrong from
+// one it has not seen (md5KnownMismatch).
+type claimPrev struct {
+	status  string
+	reason  string
+	size    int64
+	mtime   int64
+	md5     string
+	md5Seen string
+}
+
+// claimInput is claimInputRow without the previous row state, for callers that only want to
+// know whether the input is theirs.
 func (t *tracker) claimInput(in plannedInput) (int64, claimState, error) {
+	id, state, _, err := t.claimInputRow(in)
+	return id, state, err
+}
+
+// claimInputRow takes the input for this run: it inserts or updates its row to "importing"
+// in one BEGIN IMMEDIATE transaction, so two runs on the same tracking DB never import the
+// same input. It returns claimDone when the row says done and the file on disk is the same
+// one (size, mtime, and the md5 when both are known), claimHeld when a live run holds it,
+// and with claimTake the state the row had before (prev), read in the same transaction.
+// With a nil tracker every input is claimTake with id 0 and an empty prev.
+func (t *tracker) claimInputRow(in plannedInput) (int64, claimState, claimPrev, error) {
 	if t == nil {
-		return 0, claimTake, nil
+		return 0, claimTake, claimPrev{}, nil
 	}
 	var (
 		id    int64
 		state claimState
+		prev  claimPrev
 	)
 	err := database.RetryableTransactionExec(t.db, func(tx *sql.Tx) error {
-		id, state = 0, claimTake
+		id, state, prev = 0, claimTake, claimPrev{}
 		var (
 			rowID   int64
 			status  string
+			reason  sql.NullString
 			size    sql.NullInt64
 			mtime   sql.NullInt64
 			md5     sql.NullString
+			md5Seen sql.NullString
 			lastRun sql.NullInt64
 		)
-		err := tx.QueryRow(`SELECT id, status, size, mtime, md5, last_run FROM inputs WHERE path = ?`, in.Path).
-			Scan(&rowID, &status, &size, &mtime, &md5, &lastRun)
+		err := tx.QueryRow(`SELECT id, status, reason, size, mtime, md5, md5_seen, last_run FROM inputs WHERE path = ?`, in.Path).
+			Scan(&rowID, &status, &reason, &size, &mtime, &md5, &md5Seen, &lastRun)
+		if err == nil {
+			prev = claimPrev{status: status, reason: reason.String, size: size.Int64,
+				mtime: mtime.Int64, md5: md5.String, md5Seen: md5Seen.String}
+		}
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
 			res, err := tx.Exec(`INSERT INTO inputs (path, source, identifier, name, size, mtime, md5, status, first_run, last_run, started)
@@ -611,12 +648,34 @@ func (t *tracker) claimInput(in plannedInput) (int64, claimState, error) {
 		return err
 	})
 	if err != nil {
-		return 0, claimTake, err
+		return 0, claimTake, claimPrev{}, err
 	}
 	if state == claimTake {
 		t.remember(in.Path, id)
 	}
-	return id, state, nil
+	return id, state, prev, nil
+}
+
+// releaseInput puts an input this run claimed back to "pending" without importing it:
+// -verify-md5 read another md5 than the source recorded (reason reasonMD5Mismatch, md5Seen
+// the sum it read) or could not read the file (reasonMD5Error, md5Seen ""). The row keeps
+// everything the claim wrote — source, identifier, name, size, mtime, md5, the counters and
+// first_run/last_run — so the next scan compares the same file state; only the status, the
+// reason, md5_seen and the timestamps change. The status has to go back to pending: an
+// "importing" row of this very run would look like claimHeld to every later scan of a
+// -follow run, and recordPlanned cannot do it (it keeps an importing row as it is).
+//
+// It is only called with the id of a row this run claimed (claimTake), and like the other
+// tracking writes it never changes the exit code: an error is logged and counted.
+func (t *tracker) releaseInput(id int64, reason, md5Seen string) {
+	if t == nil || id == 0 {
+		return
+	}
+	if _, err := database.RetryableExec(t.db,
+		`UPDATE inputs SET status = ?, reason = ?, md5_seen = ?, started = NULL, finished = ? WHERE id = ?`,
+		trackPending, reason, md5Seen, trackNow(), id); err != nil {
+		t.trackErr(fmt.Sprintf("release input %d", id), err)
+	}
 }
 
 // takeHeld reports whether this run takes an input row that still says "importing" away
