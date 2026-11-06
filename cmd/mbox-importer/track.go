@@ -735,6 +735,10 @@ func (t *tracker) finishInput(id int64, c *counters, inputErr, stopped bool) {
 		status, reason = trackFailed, fmt.Sprintf("%d article error(s)", c.Errors)
 	case c.CommitFailed:
 		status, reason = trackFailed, "commit wait failed"
+	case c.FileErrors > 0:
+		// a spool input whose image has bad blocks: imported as far as it could be read
+		// (no re-walk would do better), so the row is done and says how many files failed
+		reason = fmt.Sprintf("%d unreadable file(s)", c.FileErrors)
 	}
 	if c == nil {
 		c = newCounters("")
