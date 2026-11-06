@@ -105,7 +105,7 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		fmt.Fprintf(fs.Output(), "mbox-importer: -log-keep-runs %d is negative\n", *logKeepRuns)
 		return 2
 	}
-	if msg := checkIAFetchFlags(*fromIAFetch, *fromIAFetchBase, *verifyMD5, *follow, fs.NArg(), trackPath); msg != "" {
+	if msg := checkIAFetchFlags(*fromIAFetch, *fromIAFetchBase, *verifyMD5, *follow, fs.NArg(), trackPath, *dryRun); msg != "" {
 		fmt.Fprintln(fs.Output(), "mbox-importer: "+msg)
 		return 2
 	}
@@ -307,8 +307,9 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 // iafetch's database: the base resolves its relative paths, the md5 to check against comes
 // from it, and a list of positional inputs is not scanned again. -from-iafetch needs the
 // tracking database, because without it a scan has no memory and would import every
-// recorded file again.
-func checkIAFetchFlags(dbPath, base string, verifyMD5 bool, follow time.Duration, args int, trackPath string) string {
+// recorded file again — except in a dry run, which imports nothing and opens no database
+// at all, so -dry-run -trackdb off is fine there.
+func checkIAFetchFlags(dbPath, base string, verifyMD5 bool, follow time.Duration, args int, trackPath string, dryRun bool) string {
 	if dbPath == "" {
 		switch {
 		case base != "":
@@ -323,7 +324,7 @@ func checkIAFetchFlags(dbPath, base string, verifyMD5 bool, follow time.Duration
 	switch {
 	case args > 0:
 		return "-from-iafetch and positional inputs exclude each other"
-	case trackPath == "":
+	case trackPath == "" && !dryRun:
 		return "-from-iafetch needs the tracking database: with -trackdb off every scan would import every recorded file again"
 	case follow < 0:
 		return fmt.Sprintf("-follow %v is negative", follow)
@@ -335,9 +336,9 @@ func checkIAFetchFlags(dbPath, base string, verifyMD5 bool, follow time.Duration
 // is only read, so no input is renamed, whatever -mark-done says (runOptions.markDone is
 // already false by then). markDoneFlag is the value the command line asked for.
 func logIAFetchSource(dbPath, base string, markDoneFlag bool) {
-	where := "absolute paths"
+	where := "paths as recorded: absolute, a relative one needs -from-iafetch-base"
 	if base != "" {
-		where = fmt.Sprintf("relative paths under %q", base)
+		where = fmt.Sprintf("relative paths resolved under %q", base)
 	}
 	if markDoneFlag {
 		log.Printf("[MBOX-IMPORT] -from-iafetch %q (%s): read-only, -mark-done is ignored (the tracking database holds the import state)", dbPath, where)

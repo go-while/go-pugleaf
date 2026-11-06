@@ -91,6 +91,7 @@ type runSummary struct {
 	AlreadyImported                 int // inputs the tracking DB knows as done (same file)
 	Unsupported                     int // planned inputs the importer cannot read at all
 	Pending                         int // planned inputs worth another look on the next scan
+	HashStopped                     int // -verify-md5: inputs whose hashing the signal ended
 	HeldByRun                       int // inputs another live run of the tracking DB holds
 	Scans                           int // scans of this run (1 without -follow)
 	Stopped                         bool
@@ -112,6 +113,7 @@ func (r *runSummary) addScan(o *runSummary) {
 	r.AlreadyImported += o.AlreadyImported
 	r.Unsupported += o.Unsupported
 	r.Pending += o.Pending
+	r.HashStopped += o.HashStopped
 	r.HeldByRun += o.HeldByRun
 	r.Stopped = r.Stopped || o.Stopped
 	r.PerInput = append(r.PerInput, o.PerInput...)
@@ -319,6 +321,7 @@ func importPlanned(inputs []plannedInput, opts *runOptions, sink articleSink, st
 		c                                                *counters
 		started, inputErr, stopped                       bool
 		alreadyImported, heldByRun, unsupported, pending bool
+		hashStopped                                      bool // -verify-md5: the signal ended the hashing
 	}
 	outcomes := make([]outcome, len(inputs))
 
@@ -343,13 +346,6 @@ func importPlanned(inputs []plannedInput, opts *runOptions, sink articleSink, st
 				}
 				o := &outcomes[i]
 				in := inputs[i]
-				if in.Supported && opts.verifyMD5 && in.MD5 != "" {
-					checked, stopped := verifyPlannedMD5(in, stop)
-					if stopped {
-						continue // the hashing was cut short: the input is not started
-					}
-					in = checked
-				}
 				if !in.Supported {
 					if err := track.recordPlanned(in); err != nil {
 						track.trackErr(fmt.Sprintf("input %q", in.Path), err)
@@ -361,7 +357,7 @@ func importPlanned(inputs []plannedInput, opts *runOptions, sink articleSink, st
 					}
 					continue
 				}
-				id, state, err := track.claimInput(in)
+				id, state, prev, err := track.claimInputRow(in)
 				if err != nil {
 					// not knowing the state is no reason to skip the input
 					track.trackErr(fmt.Sprintf("claim input %q", in.Path), err)
@@ -373,6 +369,18 @@ func importPlanned(inputs []plannedInput, opts *runOptions, sink articleSink, st
 				case claimHeld:
 					o.heldByRun = true
 					continue
+				}
+				// the claim came first on purpose: only an input this run is really going
+				// to read is hashed, so a done input is never hashed again (-verify-md5)
+				if opts.verifyMD5 {
+					switch verifyClaimedMD5(track, id, in, prev, stop) {
+					case md5Released:
+						o.pending = true
+						continue
+					case md5Stopped:
+						o.hashStopped = true
+						continue
+					}
 				}
 				o.started = true
 				if uatSuffix(in.Path) != "" {
@@ -408,6 +416,11 @@ feed:
 			continue
 		case o.pending:
 			res.Pending++
+			continue
+		case o.hashStopped:
+			// the shutdown signal ended the hashing before the input was read: no input
+			// was in progress, so this alone does not make the run a stopped one
+			res.HashStopped++
 			continue
 		case o.alreadyImported:
 			res.AlreadyImported++
@@ -473,9 +486,10 @@ var followWait = func(d time.Duration, stop <-chan struct{}) bool {
 // one process is one run of the tracking DB.
 //
 // A failed later scan is not fatal: iafetch keeps writing its DB while the importer runs, so
-// the error is logged and the next round scans again (the first scan is checked by the
-// caller, before the run starts). A stop while waiting ends the run without an error; a stop
-// inside an input is a stopped run (exit code 130), as it is without -follow.
+// the error is logged and the next wait scans again, without a round of its own (the first
+// scan is checked by the caller, before the run starts). Exit code 130 is for a stop inside
+// an input only: a stop while waiting, between two scans, or while an input was being hashed
+// for -verify-md5 ends the run without an error.
 func importScans(first []plannedInput, scan scanFunc, opts *runOptions, sink articleSink, stop <-chan struct{}, track *tracker) *runSummary {
 	total := &runSummary{Total: newCounters("")}
 	planned := first
@@ -491,17 +505,39 @@ func importScans(first []plannedInput, scan scanFunc, opts *runOptions, sink art
 		if scan == nil || opts.follow <= 0 || total.Stopped {
 			return total
 		}
-		if !followWait(opts.follow, stop) {
-			log.Printf("[MBOX-IMPORT] -follow: shutdown signal while waiting %v for the next scan: %d scan(s) done",
-				opts.follow, total.Scans)
+		next, ok := followScan(scan, opts.follow, stop, total.Scans)
+		if !ok {
 			return total
+		}
+		planned = next
+	}
+}
+
+// followScan waits follow and scans again, until a scan succeeds; it reports false when the
+// run is to end instead (the stop channel closed while it waited, while it scanned, or
+// between the two). A failed scan is logged and tried again after the next wait.
+func followScan(scan scanFunc, follow time.Duration, stop <-chan struct{}, scans int) ([]plannedInput, bool) {
+	for {
+		if !followWait(follow, stop) {
+			log.Printf("[MBOX-IMPORT] -follow: shutdown signal while waiting %v for the next scan: %d scan(s) done",
+				follow, scans)
+			return nil, false
 		}
 		next, err := scan()
 		if err != nil {
-			log.Printf("[MBOX-IMPORT] -follow: scan %d failed, trying again in %v: %v", round+1, opts.follow, err)
-			next = nil
+			log.Printf("[MBOX-IMPORT] -follow: scan failed after %d scan(s), trying again in %v: %v",
+				scans, follow, err)
+			continue
 		}
-		planned = next
+		// the signal may have arrived while the scan was running: no further input is
+		// started, and nothing was in progress, so the run ends without an error
+		select {
+		case <-stop:
+			log.Printf("[MBOX-IMPORT] -follow: shutdown signal before the next scan was imported: %d scan(s) done", scans)
+			return nil, false
+		default:
+		}
+		return next, true
 	}
 }
 
@@ -558,9 +594,9 @@ func logScanTotals(round int, r *runSummary) {
 	if t == nil {
 		t = newCounters("")
 	}
-	log.Printf("[MBOX-IMPORT] scan %d done: imported=%d already-imported=%d pending=%d unsupported=%d held-by-another-run=%d input-errors=%d read=%d stored=%d present=%d errors=%d",
-		round, r.Inputs, r.AlreadyImported, r.Pending, r.Unsupported, r.HeldByRun, r.InputErrors,
-		t.Read, t.Stored, t.Present, t.Errors)
+	log.Printf("[MBOX-IMPORT] scan %d done: imported=%d already-imported=%d pending=%d unsupported=%d held-by-another-run=%d md5-stopped=%d input-errors=%d read=%d stored=%d present=%d errors=%d",
+		round, r.Inputs, r.AlreadyImported, r.Pending, r.Unsupported, r.HeldByRun, r.HashStopped,
+		r.InputErrors, t.Read, t.Stored, t.Present, t.Errors)
 }
 
 // Reasons of -verify-md5 (plannedInput.Reason). Both are pending reasons: the recorded md5
@@ -585,25 +621,70 @@ func plannedPending(in plannedInput) bool {
 	return iafetchPending(in.Reason) || in.Reason == reasonMD5Mismatch || in.Reason == reasonMD5Error
 }
 
-// verifyPlannedMD5 hashes the file of in and compares the sum with the md5 the source
-// recorded (-verify-md5). A mismatch is no input error: the input is returned as not
-// supported with the reason reasonMD5Mismatch, which the tracking DB records as pending, so
-// a file iafetch is replacing right now is imported on a later scan. stopped reports that
-// the stop channel ended the hashing; in is then left as it was and not imported this scan.
-func verifyPlannedMD5(in plannedInput, stop <-chan struct{}) (checked plannedInput, stopped bool) {
-	sum, err := fileMD5(in.Path, stop)
+// md5Result is what -verify-md5 decided about an input this run has claimed.
+type md5Result int
+
+const (
+	md5Pass     md5Result = iota // the sum matches (or there is none to check): import it
+	md5Released                  // put back to pending: another sum, or the file could not be read
+	md5Stopped                   // the shutdown signal ended the hashing: the row says stopped
+)
+
+// verifyFileMD5 is the hash function of -verify-md5; tests replace it to count the files
+// that are really hashed and to stop a run inside the hashing.
+var verifyFileMD5 = fileMD5
+
+// verifyClaimedMD5 checks the md5 of an input this run has claimed (claimTake), before the
+// input is read. The claim comes first so that only a file that is really going to be
+// imported is hashed; a file the tracking DB knows as done is never hashed again.
+//
+// A mismatch is no input error: the row goes back to pending with the reason
+// reasonMD5Mismatch and the sum that was read (md5_seen), so a file iafetch is replacing
+// right now is imported on a later scan — and an unchanged file that still does not match
+// is not hashed again (md5KnownMismatch). A file that cannot be read becomes
+// pending/reasonMD5Error. The shutdown signal during the hashing leaves the row "stopped"
+// (nothing of the input was read), which is not a stopped import: no input was in progress.
+func verifyClaimedMD5(track *tracker, id int64, in plannedInput, prev claimPrev, stop <-chan struct{}) md5Result {
+	if in.MD5 == "" {
+		log.Printf("[MBOX-IMPORT] file=%q -verify-md5: the source recorded no md5: not checked", in.Path)
+		return md5Pass
+	}
+	if md5KnownMismatch(in, prev) {
+		log.Printf("[MBOX-IMPORT] file=%q -verify-md5: unchanged since its md5 %s did not match the recorded %s: not hashed again, still pending",
+			in.Path, prev.md5Seen, in.MD5)
+		track.releaseInput(id, reasonMD5Mismatch, prev.md5Seen)
+		return md5Released
+	}
+	sum, err := verifyFileMD5(in.Path, stop)
 	switch {
 	case errors.Is(err, errStopped):
-		return in, true
+		log.Printf("[MBOX-IMPORT] file=%q -verify-md5: hashing ended by the shutdown signal: not imported", in.Path)
+		track.finishInput(id, nil, false, true)
+		return md5Stopped
 	case err != nil:
-		log.Printf("[MBOX-IMPORT] file=%q md5 check failed: %v", in.Path, err)
-		in.Supported, in.Reason = false, reasonMD5Error
+		log.Printf("[MBOX-IMPORT] file=%q -verify-md5: %v: not imported, pending for the next scan", in.Path, err)
+		track.releaseInput(id, reasonMD5Error, "")
+		return md5Released
 	case !strings.EqualFold(sum, in.MD5):
 		log.Printf("[MBOX-IMPORT] file=%q md5 %s does not match the recorded %s: not imported, pending for the next scan",
 			in.Path, sum, in.MD5)
-		in.Supported, in.Reason = false, reasonMD5Mismatch
+		track.releaseInput(id, reasonMD5Mismatch, sum)
+		return md5Released
 	}
-	return in, false
+	return md5Pass
+}
+
+// md5KnownMismatch reports whether this file was hashed before and did not match: its row
+// was left pending/md5-mismatch, the file still has the same size and mtime, the source
+// still records the same md5, and the sum that was read then is still another one. Such a
+// file is not read again (it would give the same sum). A re-download by iafetch changes the
+// recorded md5, a repaired or replaced file its size or mtime, and either makes it hash
+// again.
+func md5KnownMismatch(in plannedInput, prev claimPrev) bool {
+	return prev.status == trackPending && prev.reason == reasonMD5Mismatch &&
+		prev.size == in.Size && prev.mtime == in.Mtime &&
+		prev.md5 != "" && strings.EqualFold(prev.md5, in.MD5) &&
+		prev.md5Seen != "" && !strings.EqualFold(prev.md5Seen, in.MD5)
 }
 
 // fileMD5 is the hex md5 of the file at path. It reads the file in md5ChunkSize blocks and
