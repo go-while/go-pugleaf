@@ -98,7 +98,7 @@ func fwWantCounts(t *testing.T, sum *runSummary, imported, already, pending, uns
 }
 
 // TestMboxFollowIAFetchRun: a -from-iafetch run imports the files the importer can read,
-// records the .iso and the OCR .txt as unsupported and a recorded file that is not on disk
+// records the .tar and the OCR .txt as unsupported and a recorded file that is not on disk
 // as pending; the second run imports nothing; once the missing file arrives the next run
 // imports it (its pending row is claimed like any other).
 func TestMboxFollowIAFetchRun(t *testing.T) {
@@ -113,7 +113,7 @@ func TestMboxFollowIAFetchRun(t *testing.T) {
 	alpha := fwRecord(t, db, base, "usenet-one", "alpha.mbox", miArticle(miID1, miAlpha, "a"))
 	beta := fwRecord(t, db, base, "usenet-two", "beta.mbox.gz",
 		string(gzipBytes(t, miArticle(miID2, miBeta, "b"))))
-	iso := fwRecord(t, db, base, "usenet-one", "cd1.iso", "a CD image, not an mbox")
+	tar := fwRecord(t, db, base, "usenet-one", "spool.tar", "a tar of a spool, not an mbox")
 	txt := fwRecord(t, db, base, "usenet-one", "usenet-one_djvu.txt", "OCR derivative")
 	// recorded by iafetch, not on disk yet (iafetch is still writing, or it was moved away)
 	gammaBody := miArticle(miID3, miAlpha, "c")
@@ -135,7 +135,7 @@ func TestMboxFollowIAFetchRun(t *testing.T) {
 	track := fwTrackDB(t, data)
 	fwWantStatus(t, track, alpha, trackDone, "")
 	fwWantStatus(t, track, beta, trackDone, "")
-	fwWantStatus(t, track, iso, trackUnsupported, "iso")
+	fwWantStatus(t, track, tar, trackUnsupported, "tar")
 	fwWantStatus(t, track, txt, trackUnsupported, "txt")
 	fwWantStatus(t, track, gamma, trackPending, iaReasonMissing)
 	var (
@@ -716,7 +716,7 @@ func TestMboxFollowDryRun(t *testing.T) {
 	iaItem(t, db, "usenet-dry", 1, "done")
 	fwRecord(t, db, base, "usenet-dry", "alpha.mbox", miArticle(miID1, miAlpha, "a"))
 	fwRecord(t, db, base, "usenet-dry", "beta.mbox", miArticle(miID2, miBeta, "b"))
-	fwRecord(t, db, base, "usenet-dry", "cd1.iso", "a CD image")
+	fwRecord(t, db, base, "usenet-dry", "spool.tar", "a tar of a spool")
 	fwRecord(t, db, base, "usenet-dry", "usenet-dry_djvu.txt", "OCR")
 	fwPlan(t, db, base, "usenet-dry", "gamma.mbox", miArticle(miID3, miAlpha, "c"))
 
@@ -741,7 +741,7 @@ func TestMboxFollowDryRun(t *testing.T) {
 	for _, want := range []string{
 		"[MBOX-IMPORT] scan 1: 5 planned input(s): supported=2 pending=1 unsupported=2",
 		"[MBOX-IMPORT] scan 1: pending missing=1",
-		"[MBOX-IMPORT] scan 1: unsupported iso=1 txt=1",
+		"[MBOX-IMPORT] scan 1: unsupported tar=1 txt=1",
 		"[MBOX-IMPORT] scan 1 done: imported=2 already-imported=0 pending=1 unsupported=2",
 		"is ignored in a dry run",
 		fmt.Sprintf("[MBOX-IMPORT] dry-run group=%q articles=1", miAlpha),

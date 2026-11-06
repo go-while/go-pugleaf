@@ -114,7 +114,10 @@ func isCSVIndexName(name string) bool {
 // expandInputs turns the positional arguments into the list of files to import:
 // a file is itself, a directory contributes its *.mbox* / *.bag* / *.usenet* entries (not *.done),
 // sorted by name, without recursion. Missing paths are reported in errs.
-func expandInputs(args []string) (files []string, errs []error) {
+//
+// With spool (-spool) a directory argument is one input itself, a news spool walked article
+// by article (disc.go), and is not scanned for mbox files.
+func expandInputs(args []string, spool bool) (files []string, errs []error) {
 	for _, arg := range args {
 		fi, err := os.Stat(arg)
 		if err != nil {
@@ -123,6 +126,10 @@ func expandInputs(args []string) (files []string, errs []error) {
 		}
 		if !fi.IsDir() {
 			files = append(files, arg)
+			continue
+		}
+		if spool {
+			files = append(files, arg) // -spool: the directory is the input
 			continue
 		}
 		entries, err := os.ReadDir(arg)
@@ -146,8 +153,9 @@ func expandInputs(args []string) (files []string, errs []error) {
 }
 
 // inputKind returns the lower-case kind of path by its suffix (a trailing ".done" is
-// ignored, so a renamed input can be imported again): "gz", "zip", "7z" or "mbox" for
-// everything else (.mbox, .bag, any other name: the parser rejects a non-mbox).
+// ignored, so a renamed input can be imported again): "gz", "zip", "7z", "disc" (a disc
+// image, discSuffixes) or "mbox" for everything else (.mbox, .bag, any other name: the
+// parser rejects a non-mbox).
 func inputKind(p string) string {
 	name := strings.TrimSuffix(strings.ToLower(filepath.Base(p)), ".done")
 	switch {
@@ -157,6 +165,11 @@ func inputKind(p string) string {
 		return "zip"
 	case strings.HasSuffix(name, ".7z"):
 		return "7z"
+	}
+	for _, s := range discSuffixes {
+		if strings.HasSuffix(name, s) {
+			return kindDisc
+		}
 	}
 	return "mbox"
 }
@@ -194,6 +207,11 @@ func openSource(path, sevenZip string) (*source, error) {
 	var r io.Reader
 	kind := inputKind(path)
 	switch kind {
+	case kindDisc:
+		// never reached through the dispatch (importPlanned sends a disc image to
+		// importSpool), only when openSource is called with one by hand
+		_ = fh.Close()
+		return nil, fmt.Errorf("%s: is a disc image: it is read as a news spool, not as an mbox", path)
 	case "mbox":
 		s.closers = append(s.closers, fh)
 		r = fh
