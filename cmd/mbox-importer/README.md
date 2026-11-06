@@ -18,6 +18,9 @@ with IHAVE.
 - Creates missing newsgroups on the fly
 - Skips articles that are already in their target group, so a run can be repeated
 - Renames a fully imported input to `INPUT.done` (`-mark-done`), so a directory can be re-run
+- Remembers every input, every run and the whole log output in a tracking database
+  (`<data>/cfg/mbox-import.sq3`, `-trackdb off` turns it off), so an input is not imported twice
+  even when it cannot be renamed, and `-status` says what is done and what is left
 - Dry run (`-dry-run`): parses the inputs and counts per target group without opening a database
   (for UAT archives `zstd`, and `xz` or `7z`, still run)
 
@@ -56,6 +59,13 @@ near-miss samples (see [Near-misses](#near-misses)).
 ./build/mbox-importer -data ./data de.comm.internet.commerce.mbox.gz
 ./build/mbox-importer -data ./data de.comm.internet.commerce.mbox.zip
 ./build/mbox-importer -data ./data -7z /usr/bin/7z de.comm.internet.commerce.mbox.7z
+```
+
+### What the importer already did
+
+```bash
+mbox-importer -data ./data-test-mbox -status          # done, pending, unsupported, failed, last run
+mbox-importer -data ./data-test-mbox -status -json    # the same for scripts
 ```
 
 ### A directory
@@ -108,9 +118,15 @@ renamed; the copy of a `.usenet.xz`/`.usenet.7z` unpacked into `-tmpdir` is remo
 | `-parallel` | `1` | Inputs imported at the same time (1-32). Each worker takes the next input in the given order; the summary keeps that order. Every worker still hands its articles to the one batch writer, so more workers mostly help with many small inputs or slow unpacking |
 | `-max-batch` | `1000` | Articles the batch writer commits per group database transaction (100-1000). Smaller batches commit sooner and hold less in memory; larger ones are faster on big inputs |
 | `-max-queue` | `0` | Articles the batch writer may hold queued over all groups (16-100000) before it stops taking more. `0` sizes it from the other two flags: twice `-parallel` × `-max-batch`, at least 1280 (so `-parallel 4` gives 8000). See [Throughput](#throughput) |
+| `-trackdb` | (none) | The [tracking database](#tracking-database). Empty means `<data>/cfg/mbox-import.sq3`; `off` turns the tracking off (the behaviour of the versions before it existed). A dry run never opens it, and a run with nothing to import does not create it |
+| `-reimport` | `false` | Import an input the tracking database knows as done again (it is read once more; its articles are then counted as `present`) |
+| `-log-db` | `true` | Write the log output of the run into the `log` table of the tracking database as well |
+| `-log-keep-runs` | `0` | At start, delete the `log` rows of all but the newest N runs (`0` = keep all). The `runs` and `inputs` rows are never deleted |
+| `-status` | `false` | Print what the tracking database knows and exit, importing nothing (no input argument needed) |
+| `-json` | `false` | Print `-status` as JSON |
 | `-help` | | Print the usage and exit |
 
-Positional arguments are the inputs; at least one is required.
+Positional arguments are the inputs; at least one is required (except with `-status`).
 
 ## Inputs
 
@@ -189,16 +205,98 @@ run would skip them again. Nothing is ever renamed in a dry run or with `-mark-d
 whose name already ends in `.done` (a re-run of a renamed input) keeps its name, and an existing
 `INPUT.done` is never replaced (the input is then logged as not marked done). An input
 that is not marked done is logged with its counters; an unread rest or a stuck parser is not an
-error by itself, article errors and a failed commit wait are (exit code 1).
+error by itself, article errors and a failed commit wait are (exit code 1). With the
+[tracking database](#tracking-database) on, a rename the file system refuses is not an error either:
+the database remembers that the input was imported.
 
 Exit codes:
 
 | Code | Meaning |
 |------|---------|
 | `0` | every input was read without an article error (marked done or not, see the log; also when there was nothing to import) |
-| `1` | an input could not be opened or read (open, unpack, 7z exit status, close or rename error; for a UAT input also a missing zstd, a zstd failure or a size mismatch), an article could not be stored (`errors` > 0), or the commit wait failed; a database/processor/hostname error |
-| `2` | bad command line (unknown flag, no input, invalid `-group` name, `-group` with `-group-from-name`, `-useshorthashlen` outside 2-7, negative `-commit-timeout`, `-parallel` outside 1-32, `-max-batch` outside 100-1000, `-max-queue` outside 16-100000, negative `-max-article-size`) |
+| `1` | an input could not be opened or read (open, unpack, 7z exit status, close or rename error; for a UAT input also a missing zstd, a zstd failure or a size mismatch), an article could not be stored (`errors` > 0), or the commit wait failed; a database/processor/hostname error, or the tracking database could not be opened |
+| `2` | bad command line (unknown flag, no input, invalid `-group` name, `-group` with `-group-from-name`, `-useshorthashlen` outside 2-7, negative `-commit-timeout`, `-parallel` outside 1-32, `-max-batch` outside 100-1000, `-max-queue` outside 16-100000, negative `-max-article-size`, negative `-log-keep-runs`, `-status` with `-trackdb off`) |
 | `130` | stopped by SIGINT/SIGTERM |
+
+## Tracking database
+
+Every run that imports something writes to one SQLite file, `<data>/cfg/mbox-import.sq3` by default
+(`-trackdb PATH` for another one, `-trackdb off` for none). It is the importer's memory of what it
+has seen, independent of the `INPUT.done` rename:
+
+| Table | Holds |
+|-------|-------|
+| `runs` | one row per run: start and end, version, host, pid, the command line, the exit code and the totals |
+| `inputs` | one row per input path: source (`cli` or `iafetch`), item identifier and file name, size, mtime, md5, status, reason, target group, the counters of the last import and the first/last run that saw it |
+| `log` | the log lines of the runs, with their run id and, where the line names a file, its input id |
+
+The schema version is the file's `PRAGMA user_version` (currently `1`); a file written by a newer
+importer is refused instead of being changed. The database is opened in WAL mode with a 30 second
+busy timeout, and every transaction is a `BEGIN IMMEDIATE`.
+
+An input row has one of these states:
+
+| Status | Meaning |
+|--------|---------|
+| `pending` | known, not imported yet |
+| `importing` | a run holds it right now |
+| `done` | imported |
+| `failed` | an input error, article errors or a failed commit wait; `reason` says which |
+| `stopped` | SIGINT/SIGTERM ended the import of this input |
+| `unsupported` | the importer cannot read this file; `reason` says why (`iso`, `txt`, ...) |
+
+**An input is imported once.** At the start of an input the run compares the file with its row: a
+row that is `done` for the same size and mtime (and the same md5, when the row and the source both
+know one) means the file was imported before. It is not read again and counted in one line per run:
+
+```
+[MBOX-IMPORT] tracking: not imported: already-imported=2 unsupported=5 held-by-another-run=0
+```
+
+A file that changed (another size or mtime) is imported again; its articles that are already in the
+group are counted as `present`. `-reimport` ignores the done state and reads every input again.
+
+**The rename is no longer the only memory.** `-mark-done` keeps its default and its meaning, but
+with the tracking database on, a rename the file system refuses (`permission denied`) is logged once
+for that input and is **not** an input error any more, because the database holds the state:
+
+```
+[MBOX-IMPORT] file="…" not marked done: rename …: permission denied
+[MBOX-IMPORT] file="…" rename not permitted: the tracking database holds the import state
+```
+
+That is what an archive.org mirror written by another user needs. With `-trackdb off` such a rename
+is an input error and the run exits 1, as before. An existing `INPUT.done` is no error either way.
+
+**A crashed run** leaves its inputs in `importing`. The next run marks them `failed` with the reason
+`interrupted` and imports them again, unless the run that holds them is still alive (its `runs` row
+has no end time and its pid still exists on the same host). An input a live run holds is left to
+that run and counted as `held-by-another-run`, so two importers on one tracking database never
+import the same input. There is no lock file.
+
+**The log in the database.** With `-log-db` (the default) the whole log output of the process — the
+importer's lines, the processor's and the database's alike — also goes into the `log` table: the
+writer puts every line on a buffered channel (10000 lines) that one goroutine inserts in batches
+(1000 lines or one second per transaction) and that stops with the run. It never slows the import
+down: when the channel is full the line is dropped and counted, and the count is written as the last
+log row and printed at the end. Nothing is deleted by itself; `-log-keep-runs N` deletes the log rows
+of older runs at the start of a run (a line is about 100 bytes, so even a very large import is a few
+GB at worst). `-log-db=false` keeps the `runs` and `inputs` rows and writes no log lines.
+
+**`-status`** prints what the database knows and imports nothing (exit 0, also when there is no
+database yet). `-status -json` prints the same as JSON for scripts:
+
+```
+$ mbox-importer -data ./data-test-mbox -status
+tracking db: data-test-mbox/cfg/mbox-import.sq3
+inputs by status:
+  done                1       633 B
+last run: id=3 started=… finished=… version=… exit=0 inputs=0 read=0 stored=0 present=0 skipped=0 rejected=0 errors=0
+log rows: 136
+```
+
+It lists the inputs per status with their byte count, the last 10 failed inputs with their reason,
+the totals of the last run and the number of log rows.
 
 ## What is stored
 
@@ -349,6 +447,18 @@ then a totals line:
 A dry run also logs one `[MBOX-IMPORT] dry-run group="…" articles=…` line per target group (largest
 first); there `stored` counts the articles that would be handed to the processor.
 
+A run with the [tracking database](#tracking-database) logs its file and run id at the start, one
+line for the inputs it did not import, and one line per unusual event (an interrupted input of an
+earlier run, deleted log rows, dropped log lines):
+
+```
+[MBOX-IMPORT] tracking db="data/cfg/mbox-import.sq3" run=7
+[MBOX-IMPORT] tracking: not imported: already-imported=2 unsupported=5 held-by-another-run=0
+```
+
+Unless `-log-db=false` is given, every one of these lines (and every line of the processor and the
+database) is stored in the `log` table of that database as well.
+
 - `read`: messages the parser returned (for UAT inputs: messages read from the archive); `stored`: handed to the processor and accepted;
   `present`: already in the target group; `skipped`: see [Skip reasons](#skip-reasons) (followed by
   the non-zero counts per reason in parentheses, `-` when none); `rejected`: refused by the
@@ -364,7 +474,9 @@ first); there `stored` counts the articles that would be handed to the processor
 
 - `-nntphostname` must resolve in DNS: the processor validates it when it starts.
 - When testing, run against a scratch root (`-data ./data-test-<name>`), never against live data.
-- Run one importer per data directory at a time (SQLite).
+- Run one importer per data directory at a time (SQLite). Two importers that share only the
+  tracking database (different data directories) do not import the same input: see
+  [Tracking database](#tracking-database).
 - The import is sequential: one input and one article at a time.
 - With `-history=false` no history entries are written; `history-rebuild` can backfill them later.
 

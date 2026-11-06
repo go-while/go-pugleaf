@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"os"
 	"sort"
@@ -33,6 +34,7 @@ var errRejected = errors.New("rejected")
 // counters are the per-input (and total) results.
 type counters struct {
 	File                                                               string
+	Group                                                              string // forced target group of the input (-group, -group-from-name), "" otherwise
 	Read, Stored, Present, Rejected, Errors, ParserSkipped, NearMisses int
 	Skipped                                                            map[skipReason]int
 	StoppedEarly, Unread, MarkedDone                                   bool
@@ -84,6 +86,9 @@ func (c *counters) add(o *counters) {
 type runSummary struct {
 	Inputs, InputErrors, MarkedDone int
 	CommitErrors                    int // inputs whose commit wait failed
+	AlreadyImported                 int // inputs the tracking DB knows as done (same file)
+	Unsupported                     int // planned inputs the importer cannot read
+	HeldByRun                       int // inputs another live run of the tracking DB holds
 	Stopped                         bool
 	Total                           *counters
 	PerInput                        []*counters
@@ -133,6 +138,7 @@ type runOptions struct {
 	groupFromName                      bool // -group-from-name: the target group of an input is its file name (inputOptions)
 	history, dryRun, keepBinary        bool
 	markDone, strictMsgID              bool
+	tracked                            bool          // the tracking DB is on: it, not the rename, holds the import state
 	commitTimeout                      time.Duration // 0: no limit
 	maxArticleSize                     int           // -max-article-size in bytes, header and body; 0: no limit
 }
@@ -263,24 +269,36 @@ func handleLines(c *counters, rawHead, body []string, isBinary bool, opts *runOp
 // maxParallel is the upper bound of -parallel.
 const maxParallel = 32
 
-// importInputs imports files until stop is closed: one after the other, or opts.parallel at
-// a time, each worker taking the next file in the given order. Once stop is closed no further
-// input is started. The summary lists the inputs in the given order, whatever order they
-// finished in.
+// importInputs imports the files of a run without a tracking DB (the paths are turned into
+// plannedInputs of source cli).
 func importInputs(files []string, opts *runOptions, sink articleSink, stop <-chan struct{}) *runSummary {
+	return importPlanned(plannedFromPaths(files), opts, sink, stop, nil)
+}
+
+// importPlanned imports inputs until stop is closed: one after the other, or opts.parallel
+// at a time, each worker taking the next input in the given order. Once stop is closed no
+// further input is started. The summary lists the inputs in the given order, whatever order
+// they finished in.
+//
+// With a tracking DB (track != nil) every input is claimed first: one that the DB knows as
+// done (the same file) is counted as already imported and not read again, one another live
+// run holds is left to that run, and an input the importer cannot read is only recorded.
+// A nil track imports every input, as a run without the tracking DB does.
+func importPlanned(inputs []plannedInput, opts *runOptions, sink articleSink, stop <-chan struct{}, track *tracker) *runSummary {
 	res := &runSummary{Total: newCounters("")}
 	type outcome struct {
-		c                          *counters
-		started, inputErr, stopped bool
+		c                                       *counters
+		started, inputErr, stopped              bool
+		alreadyImported, heldByRun, unsupported bool
 	}
-	outcomes := make([]outcome, len(files))
+	outcomes := make([]outcome, len(inputs))
 
 	workers := opts.parallel
 	if workers < 1 {
 		workers = 1
 	}
-	if workers > len(files) {
-		workers = len(files)
+	if workers > len(inputs) {
+		workers = len(inputs)
 	}
 	next := make(chan int)
 	var wg sync.WaitGroup
@@ -295,17 +313,39 @@ func importInputs(files []string, opts *runOptions, sink articleSink, stop <-cha
 				default:
 				}
 				o := &outcomes[i]
-				o.started = true
-				if uatSuffix(files[i]) != "" {
-					o.c, o.inputErr, o.stopped = importUAT(files[i], opts, sink, stop)
-				} else {
-					o.c, o.inputErr, o.stopped = importInput(files[i], opts, sink, stop)
+				in := inputs[i]
+				if !in.Supported {
+					if err := track.recordPlanned(in); err != nil {
+						log.Printf("[MBOX-IMPORT] tracking: input %q: %v", in.Path, err)
+					}
+					o.unsupported = true
+					continue
 				}
+				id, state, err := track.claimInput(in)
+				if err != nil {
+					// not knowing the state is no reason to skip the input
+					log.Printf("[MBOX-IMPORT] tracking: input %q: %v", in.Path, err)
+				}
+				switch state {
+				case claimDone:
+					o.alreadyImported = true
+					continue
+				case claimHeld:
+					o.heldByRun = true
+					continue
+				}
+				o.started = true
+				if uatSuffix(in.Path) != "" {
+					o.c, o.inputErr, o.stopped = importUAT(in.Path, opts, sink, stop)
+				} else {
+					o.c, o.inputErr, o.stopped = importInput(in.Path, opts, sink, stop)
+				}
+				track.finishInput(id, o.c, o.inputErr, o.stopped)
 			}
 		}()
 	}
 feed:
-	for i := range files {
+	for i := range inputs {
 		select {
 		case <-stop:
 			break feed
@@ -322,7 +362,17 @@ feed:
 
 	notStarted := 0
 	for _, o := range outcomes {
-		if !o.started {
+		switch {
+		case o.unsupported:
+			res.Unsupported++
+			continue
+		case o.alreadyImported:
+			res.AlreadyImported++
+			continue
+		case o.heldByRun:
+			res.HeldByRun++
+			continue
+		case !o.started:
 			notStarted++
 			continue
 		}
@@ -347,6 +397,10 @@ feed:
 	if notStarted > 0 {
 		res.Stopped = true
 		log.Printf("[MBOX-IMPORT] stopped by shutdown signal: %d inputs not started", notStarted)
+	}
+	if res.AlreadyImported > 0 || res.Unsupported > 0 || res.HeldByRun > 0 {
+		log.Printf("[MBOX-IMPORT] tracking: not imported: already-imported=%d unsupported=%d held-by-another-run=%d",
+			res.AlreadyImported, res.Unsupported, res.HeldByRun)
 	}
 	return res
 }
@@ -385,6 +439,7 @@ func importInput(path string, opts *runOptions, sink articleSink, stop <-chan st
 	log.Printf("[MBOX-IMPORT] importing file=%q", path)
 	in := sink.beginInput()
 	c, readErr := readMbox(src, opts, in, stop)
+	c.Group = opts.group
 	stopped = errors.Is(readErr, errStopped)
 	c.Unread = src.Unread() // before Close: Close kills a 7z that was not read to its end
 	closeErr := src.Close()
@@ -424,13 +479,10 @@ func importInput(path string, opts *runOptions, sink articleSink, stop <-chan st
 	case strings.HasSuffix(path, ".done"):
 		log.Printf("[MBOX-IMPORT] file=%q already named .done: not renamed", path)
 	default:
-		if err := markDone(path); err != nil {
-			log.Printf("[MBOX-IMPORT] file=%q not marked done: %v", path, err)
-			if !errors.Is(err, os.ErrExist) {
-				inputErr = true
-			}
-		} else {
-			c.MarkedDone = true
+		marked, renameErr := markDoneInput(path, opts.tracked)
+		c.MarkedDone = marked
+		if renameErr {
+			inputErr = true
 		}
 	}
 
@@ -441,6 +493,26 @@ func importInput(path string, opts *runOptions, sink articleSink, stop <-chan st
 		log.Printf("[MBOX-IMPORT]   near-miss file=%q line=%d %q", path, nm.line, nm.text)
 	}
 	return c, inputErr, stopped
+}
+
+// markDoneInput renames a fully imported input to INPUT.done. It reports whether the rename
+// happened and whether the failure is an input error. An existing INPUT.done is never one.
+// With the tracking DB on (tracked), a rename the file system refuses is not one either: the
+// DB holds the import state, so a read-only input tree (the archive.org mirror) is fine.
+func markDoneInput(path string, tracked bool) (marked, inputErr bool) {
+	err := markDone(path)
+	if err == nil {
+		return true, false
+	}
+	log.Printf("[MBOX-IMPORT] file=%q not marked done: %v", path, err)
+	switch {
+	case errors.Is(err, os.ErrExist):
+	case tracked && errors.Is(err, fs.ErrPermission):
+		log.Printf("[MBOX-IMPORT] file=%q rename not permitted: the tracking database holds the import state", path)
+	default:
+		return false, true
+	}
+	return false, false
 }
 
 // nearMiss is one logged near-miss sample.

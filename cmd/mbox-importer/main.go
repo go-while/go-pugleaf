@@ -66,6 +66,12 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		maxBatch        = fs.Int("max-batch", 1000, "articles the batch writer commits per group database transaction (100-1000)")
 		maxArtSize      = fs.Int("max-article-size", defaultMaxArticleSize, "skip articles larger than this many bytes, header and body, counted as too-big (0 = no limit)")
 		maxQueue        = fs.Int("max-queue", 0, "articles the batch writer may hold queued over all groups (16-100000; 0 = 2 x parallel x max-batch, at least 1280)")
+		trackDBFlag     = fs.String("trackdb", "", "import tracking database (\"\" = <data>/cfg/"+trackDBName+", \"off\" = no tracking); never opened in a dry run")
+		reimport        = fs.Bool("reimport", false, "import an input the tracking database knows as done again")
+		logDB           = fs.Bool("log-db", true, "write the log output of the run into the tracking database as well")
+		logKeepRuns     = fs.Int("log-keep-runs", 0, "at start, delete the log rows of all but the newest N runs (0 = keep all)")
+		statusFlag      = fs.Bool("status", false, "print what the tracking database knows and exit, importing nothing")
+		jsonFlag        = fs.Bool("json", false, "print -status as JSON")
 	)
 	fs.Usage = func() { usage(fs) }
 	if err := fs.Parse(args); err != nil {
@@ -78,6 +84,22 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 	if *showHelp {
 		fs.Usage()
 		return 0
+	}
+	trackPath := trackDBPath(*trackDBFlag, *dataDir)
+	if *statusFlag {
+		if trackPath == "" {
+			fmt.Fprintln(fs.Output(), "mbox-importer: -status needs a tracking database (-trackdb off)")
+			return 2
+		}
+		if err := writeStatus(os.Stdout, trackPath, *jsonFlag); err != nil {
+			log.Printf("[MBOX-IMPORT] -status %q: %v", trackPath, err)
+			return 1
+		}
+		return 0
+	}
+	if *logKeepRuns < 0 {
+		fmt.Fprintf(fs.Output(), "mbox-importer: -log-keep-runs %d is negative\n", *logKeepRuns)
+		return 2
 	}
 	if fs.NArg() == 0 {
 		fmt.Fprintln(fs.Output(), "mbox-importer: no input given")
@@ -145,7 +167,6 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 	}
 	history.ENABLE_HISTORY = opts.history // read once by NewHistory
 	database.GlobalDateParser = processor.ParseNNTPDate
-	log.Printf("[MBOX-IMPORT] Starting go-pugleaf mbox-importer (version %s) parallel=%d max-batch=%d max-queue=%d", config.AppVersion, *parallel, *maxBatch, queueSize)
 
 	stop := stopChan
 	if stop == nil {
@@ -155,13 +176,33 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 	}
 
 	files, expandErrs := expandInputs(fs.Args())
+	// the inputs of this run; wave 2 of plan mbox-import-tracking adds the rows of
+	// iafetch's database here (-from-iafetch), the import loop below takes them as they are
+	planned := plannedFromPaths(files)
+
+	// The tracking database is opened before the run is logged: its log tee catches every
+	// line of the run, and its close (deferred before the database shutdown, so it runs
+	// after it) catches the shutdown lines too. A run with nothing to import does not
+	// create it (and a dry run never touches it).
+	var track *tracker
+	if trackPath != "" && !opts.dryRun && len(planned) > 0 {
+		t, err := openTracker(trackPath, args, *reimport, *logDB, *logKeepRuns)
+		if err != nil {
+			log.Printf("[MBOX-IMPORT] tracking database %q: %v", trackPath, err)
+			return 1
+		}
+		track = t
+		opts.tracked = true
+		defer func() { track.close(lastRun, code) }()
+	}
+	log.Printf("[MBOX-IMPORT] Starting go-pugleaf mbox-importer (version %s) parallel=%d max-batch=%d max-queue=%d", config.AppVersion, *parallel, *maxBatch, queueSize)
 	for _, err := range expandErrs {
 		log.Printf("[MBOX-IMPORT] input error: %v", err)
 	}
 
 	if opts.dryRun {
 		sink := newCountingSink()
-		res := importInputs(files, opts, sink, stop)
+		res := importPlanned(planned, opts, sink, stop, nil)
 		res.InputErrors += len(expandErrs)
 		res.Inputs += len(expandErrs)
 		logDryRunGroups(sink.groups)
@@ -170,7 +211,7 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		return res.exitCode()
 	}
 
-	if len(files) == 0 {
+	if len(planned) == 0 {
 		// nothing to import (empty directory, every input already .done, or only missing paths)
 		log.Printf("[MBOX-IMPORT] no inputs to import")
 		res := &runSummary{Inputs: len(expandErrs), InputErrors: len(expandErrs)}
@@ -214,7 +255,7 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		return 1
 	}
 
-	res := importInputs(files, opts, newProcessorSink(db, proc), stop)
+	res := importPlanned(planned, opts, newProcessorSink(db, proc), stop, track)
 	res.InputErrors += len(expandErrs)
 	res.Inputs += len(expandErrs)
 	logTotals(res)
@@ -316,6 +357,7 @@ func batchQueueSize(parallel, maxBatch, maxQueue int) int {
 func usage(fs *flag.FlagSet) {
 	out := fs.Output()
 	fmt.Fprintln(out, "Usage: mbox-importer [flags] INPUT...")
+	fmt.Fprintln(out, "       mbox-importer [flags] -status [-json]   (prints the tracking database, imports nothing)")
 	fmt.Fprintln(out, "  INPUT: NAME.mbox, NAME.bag, NAME.mbox.gz, NAME.mbox.zip, NAME.mbox.7z (via -7z),")
 	fmt.Fprintln(out, "         UAT archives NAME.usenet, NAME.usenet.xz (via -xz), NAME.usenet.7z (via -7z), all via -zstd,")
 	fmt.Fprintln(out, "         or a directory (its *.mbox* / *.bag* / *.usenet* files not ending in .done, sorted by name)")
@@ -326,6 +368,7 @@ func usage(fs *flag.FlagSet) {
 	fmt.Fprintln(out, "  mbox-importer -data ./data-test-mbox -tmpdir /big/tmp pl.comp.lang.c.usenet.xz")
 	fmt.Fprintln(out, "  mbox-importer -data ./data-test-mbox -parallel 4 -max-batch 500 /archive/usenet/")
 	fmt.Fprintln(out, "  mbox-importer -data ./data-test-mbox -group-from-name -parallel 4 /archive/uat-mbox/   # de.comm.foo.mbox.gz -> de.comm.foo")
+	fmt.Fprintln(out, "  mbox-importer -data ./data-test-mbox -status                                         # what the tracking database knows")
 	fmt.Fprintln(out, "Exit codes: 0 ok, 1 input, article, commit or database error, 2 bad command line, 130 stopped by a signal")
 	fmt.Fprintln(out, "Flags:")
 	fs.PrintDefaults()
