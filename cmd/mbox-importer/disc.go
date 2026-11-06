@@ -395,7 +395,7 @@ func (s *sevenZipErrors) logDangerous(image string) {
 	s.mu.Unlock()
 	if n > 0 {
 		log.Printf("[MBOX-IMPORT] file=%q: %d dangerous link(s) skipped by 7z: a symbolic link with \"..\" in its target "+
-			"image is left as an empty file, everything else was extracted", image, n)
+			"is left as an empty file, everything else was extracted", image, n)
 	}
 }
 
