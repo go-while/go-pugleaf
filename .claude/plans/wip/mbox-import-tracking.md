@@ -99,20 +99,24 @@ The user asked (2026-11-06): read the downloader's tracking, keep our own import
 - CD images and other unsupported formats are out of scope (they are listed, not imported).
 
 ## Waves
+### Wave 0 (inline, 517b177)
+`cmd/mbox-importer/planned.go`: `plannedInput` (Path, Source, Identifier, Name, Size, Mtime, MD5, Supported, Reason)
+and the source constants `sourceCLI`, `sourceIAFetch`. Both wave-1 slices use it; neither edits it. The suffix rule
+is the existing `isInputName` in `inputs.go` (no slice owns `inputs.go`). New files in `cmd/mbox-importer/` need
+`git add -f` (the `.gitignore` entry for the binary matches the folder).
 ### Wave 1 (parallel)
 - slice `trackdb`: owns `cmd/mbox-importer/track.go`, `track_test.go` (new), `import.go`, `uat.go`, `main.go`,
   `README.md` (sections tracking/status/logs). Hooks: run start/end, input begin/end with counters, done-skip,
   rename-permission rule, interrupted rows, log tee, `-trackdb`, `-reimport`, `-log-db`, `-log-keep-runs`,
-  `-status [-json]`. Expose `func (t *tracker) recordPlanned(in plannedInput)` for wave 2 with
-  `plannedInput{Path, Source, Identifier, Name string; Size, Mtime int64; MD5 string; Supported bool; Reason string}`
-  defined in `track.go`.
+  `-status [-json]`. Expose `func (t *tracker) recordPlanned(in plannedInput) error` for wave 2 (`plannedInput`
+  from wave 0).
   Tests: schema created and versioned; done-skip on same size/mtime, reimport on change and with `-reimport`;
   `importing` left by a crash becomes `failed/interrupted`; permission-denied rename is no input error with the DB and
   stays one without; log rows written with run and input ids; a blocked DB does not block the import (drop count);
   shutdown drains and closes (no goroutine left: `goleak`-style count via `runtime.NumGoroutine` before/after is a
   timing test: don't; check the writer's done channel instead); `-status` output; `-trackdb off` = today.
-- slice `iasource`: owns `cmd/mbox-importer/iasource.go`, `iasource_test.go` (new), `inputs.go` (suffix list function
-  only). Returns `[]plannedInput` in import order for `-from-iafetch`.
+- slice `iasource`: owns `cmd/mbox-importer/iasource.go`, `iasource_test.go` (new); uses `isInputName` from
+  `inputs.go` unchanged. Returns `[]plannedInput` in import order for `-from-iafetch`.
   Tests: a fixture DB created with iafetch's schema (copy the DDL from `../mbox2nntp/cmd/iafetch/db.go` into the test
   with a comment naming the source commit) in WAL mode: items with statuses done/incomplete/dark and their files
   (mbox.zip, mbox.gz, .usenet.xz, .iso, .txt), absolute and relative paths → `ord` order, files of an incomplete
