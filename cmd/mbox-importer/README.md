@@ -11,6 +11,10 @@ with IHAVE.
   program) archives, streamed: nothing beyond one article is held in memory
 - Reads Usenet Archive Toolkit archives (`.usenet`, `.usenet.xz`, `.usenet.7z`; via the installed
   `zstd` program, plus `xz` or `7z`), see [UAT archives](#uat-archives)
+- Reads CD/DVD images and news spools: `.iso`, `.cdr`, `.sqsh` and `.img` images are unpacked into
+  `-tmpdir` with the `7z` program and walked article by article, and with `-spool` a directory (a
+  mounted image, an unpacked tree) or a `SPOOL.zip` is walked as it is, see
+  [Disc images and news spools](#disc-images-and-news-spools)
 - Several inputs per run; a directory argument imports its mbox files and UAT archives in name order,
   one after the other or `-parallel N` at a time (CSV files such as archive.org's `NAME.mbox.csv.gz` index are never inputs)
 - Files every article like a fetched one, through the processor in bulk mode (message-id history,
@@ -88,6 +92,19 @@ mbox-importer -data ./data-test-mbox -status -json    # the same for scripts
 
 Import UAT archives after the mbox collections of the same groups, see [UAT archives](#uat-archives).
 
+### Disc images and `-spool`
+
+```bash
+./build/mbox-importer -dry-run -tmpdir /big/tmp NN_1992_16.iso          # analyse the image first
+./build/mbox-importer -data ./data -tmpdir /big/tmp NN_1992_16.iso      # unpacked with 7z, then walked
+./build/mbox-importer -data ./data -tmpdir /big/tmp utzoo.sqsh          # 5.2 GB in 2.08M files
+./build/mbox-importer -data ./data -spool /mnt/netnews-cd               # an image mounted by hand
+./build/mbox-importer -data ./data -spool NN_1992_25.zip                # a zipped spool, not unpacked
+```
+
+`-tmpdir` must have room for the whole unpacked image, so give it a real directory on a big file
+system. See [Disc images and news spools](#disc-images-and-news-spools).
+
 ### Force every article into one group
 
 ```bash
@@ -111,7 +128,8 @@ renamed; the copy of a `.usenet.xz`/`.usenet.7z` unpacked into `-tmpdir` is remo
 | `-7z` | `7z` | Program used to unpack `.7z` and `.usenet.7z` inputs (name in `PATH` or a full path); also unpacks `.usenet.xz` when `-xz` is not found |
 | `-zstd` | `zstd` | The zstd program (name in `PATH` or a full path), needed for every UAT input (`.usenet`, `.usenet.xz`, `.usenet.7z`) |
 | `-xz` | `xz` | Program used to unpack `.usenet.xz` inputs; when it is not found, 7-Zip (`-7z`) is used with `-txz` |
-| `-tmpdir` | (system temp dir) | Where `.usenet.xz` and `.usenet.7z` inputs are unpacked, into a private subdirectory that is removed afterwards, and where the zstd dictionary is written. A `.usenet.xz` or `.usenet.7z` needs free space there for its whole unpacked `.usenet` file |
+| `-tmpdir` | (system temp dir) | Where `.usenet.xz`, `.usenet.7z` and disc image inputs are unpacked, into a private subdirectory that is removed afterwards, and where the zstd dictionary is written. A `.usenet.xz` or `.usenet.7z` needs free space there for its whole unpacked `.usenet` file; a disc image for its whole unpacked contents (`utzoo.sqsh`: 5.2 GB in 2.08M files) |
+| `-spool` | `false` | Read a positional **directory** or **`.zip`** input as a news spool (one article per file) instead of scanning the directory for `*.mbox*` files: one input per argument, walked article by article like an unpacked disc image. Disc images (`.iso`, `.cdr`, `.sqsh`, `.img`) are read that way without the flag. Not together with `-from-iafetch` (which has no positional inputs). With `-spool` **every** `.zip` argument is a spool, so import mbox zips in a run of their own. See [Disc images and news spools](#disc-images-and-news-spools) |
 | `-dry-run` | `false` | Parse and count only: no database is opened, no input is renamed |
 | `-keep-binary` | `false` | Import yEnc binary articles (`=ybegin`) instead of skipping them |
 | `-mark-done` | `true` | Rename a fully imported input to `INPUT.done` (see below) |
@@ -147,13 +165,21 @@ Positional arguments are the inputs; at least one is required (except with `-sta
 | `NAME.usenet` | a [UAT archive](#uat-archives), one newsgroup per file: the messages are decompressed by one run of the zstd program (`-zstd`) over the whole message store |
 | `NAME.usenet.xz` | a UAT archive compressed with xz, as published on [usenet.nereid.pl](https://usenet.nereid.pl/): unpacked with `xz -dc -- ARCHIVE` (`-xz`; if xz is not found, `7z e -so -bd -txz -- ARCHIVE`) to `NAME.usenet` in a private subdirectory of `-tmpdir`, then read like `NAME.usenet` |
 | `NAME.usenet.7z` | a UAT archive in 7z, as published on archive.org ([`usenet-uat-pc-games`](https://archive.org/details/usenet-uat-pc-games)): the entry `NAME.usenet` is unpacked with the 7z program (`-7z`) to a private subdirectory of `-tmpdir`, then read like `NAME.usenet` |
+| `IMAGE.iso`, `IMAGE.cdr`, `IMAGE.sqsh`, `IMAGE.img` | a [disc image](#disc-images-and-news-spools) holding a news spool: unpacked with the 7z program (`-7z`) into a private subdirectory of `-tmpdir` (`7z x -y -bd -o<dir> -- IMAGE`), walked article by article, and the directory is removed again |
 | `DIR` | its files whose names contain `.mbox`, `.bag` or `.usenet` and do not end in `.done`, sorted by name; subdirectories are not entered |
+| `DIR` with `-spool` | the directory itself is one input: a [news spool](#disc-images-and-news-spools), walked article by article (a mounted image, an unpacked tree) |
+| `SPOOL.zip` with `-spool` | the zip itself is one input: a news spool read through `archive/zip`, nothing is unpacked |
 
 A missing path, an archive that cannot be opened or unpacked, a 7z program that cannot be found and
 an archive without an mbox member are input errors: the input is reported, the other inputs are
 still imported, and the run exits with code 1. An empty (0-byte) mbox input counts as fully imported.
 A non-empty input that is not an mbox is an input error too. A 7z that fails only at the end (for
 example a CRC error) leaves the articles already imported in place and the input is not marked done.
+
+A disc image whose 7z run fails (not an image, a format this 7z cannot read, no space in `-tmpdir`)
+is an input error too, and so is a `.zip` spool that cannot be opened; the unpack directory is
+removed in every case. A disc image is an input only when it is named on the command line or comes
+from `-from-iafetch`: a directory scan still looks for mbox files, not for images.
 
 For UAT inputs these are input errors as well: a zstd program that cannot be found (checked before
 anything is unpacked), an xz or 7z that cannot be found (for `.usenet.xz`: neither of them), fails
@@ -167,7 +193,9 @@ processor stay stored.
 | Input | Programs |
 |-------|----------|
 | `.mbox`, `.bag`, `.mbox.gz`, `.mbox.zip` | none |
+| a `-spool` directory or `.zip` | none |
 | `.mbox.7z` | 7-Zip (`-7z`) |
+| `.iso`, `.cdr`, `.sqsh`, `.img` | 7-Zip (`-7z`); a build that reads squashfs is needed for `.sqsh` (the `7zip`/`7zz` packages do, the old `p7zip` may not: `7z l utzoo.sqsh` says) |
 | `.usenet` | zstd (`-zstd`) |
 | `.usenet.xz` | zstd, and xz (`-xz`) or else 7-Zip (`-7z`) |
 | `.usenet.7z` | zstd and 7-Zip (`-7z`) |
@@ -208,6 +236,13 @@ message store without an error or a size mismatch. The archive given on the comm
 gets renamed (`X.usenet.xz` becomes `X.usenet.xz.done`); the copy unpacked into `-tmpdir` is always
 removed, whether or not the input was marked done.
 
+For a news spool input it means that the walk reached the end of the tree. A **disc image** is
+renamed like any other input (`NN_1992_16.iso` becomes `NN_1992_16.iso.done`), and its unpack
+directory under `-tmpdir` is removed in every case (success, input error, signal). A **spool
+directory** (`-spool DIR`) is **never** renamed — it is a tree, often a mount point, not the thing
+that was imported — and one line says so; only the [tracking database](#tracking-database)
+remembers it. A `-spool SPOOL.zip` is a file and is renamed like any other input.
+
 Skipped and rejected articles do not block the rename: they are counted and logged, and a second
 run would skip them again. Nothing is ever renamed in a dry run or with `-mark-done=false`. An input
 whose name already ends in `.done` (a re-run of a renamed input) keeps its name, and an existing
@@ -222,8 +257,8 @@ Exit codes:
 | Code | Meaning |
 |------|---------|
 | `0` | every input was read without an article error (marked done or not, see the log; also when there was nothing to import) |
-| `1` | an input could not be opened or read (open, unpack, 7z exit status, close or rename error; for a UAT input also a missing zstd, a zstd failure or a size mismatch), an article could not be stored (`errors` > 0), or the commit wait failed; a database/processor/hostname error, or the tracking database could not be opened |
-| `2` | bad command line (unknown flag, no input, invalid `-group` name, `-group` with `-group-from-name`, `-useshorthashlen` outside 2-7, negative `-commit-timeout`, `-parallel` outside 1-32, `-max-batch` outside 100-1000, `-max-queue` outside 16-100000, negative `-max-article-size`, negative `-log-keep-runs`, `-status` with `-trackdb off`, `-from-iafetch` with positional inputs or with `-trackdb off`, negative `-follow`, `-from-iafetch-base`/`-verify-md5`/`-follow` without `-from-iafetch`, and the first scan of `-from-iafetch` failing: a database that cannot be read or a relative path without `-from-iafetch-base`) |
+| `1` | an input could not be opened or read (open, unpack, 7z exit status, close or rename error; for a UAT input also a missing zstd, a zstd failure or a size mismatch; for a disc image a failed `7z x`, for a spool a failed walk), an article could not be stored (`errors` > 0), or the commit wait failed; a database/processor/hostname error, or the tracking database could not be opened |
+| `2` | bad command line (unknown flag, no input, invalid `-group` name, `-group` with `-group-from-name`, `-spool` with `-from-iafetch`, `-useshorthashlen` outside 2-7, negative `-commit-timeout`, `-parallel` outside 1-32, `-max-batch` outside 100-1000, `-max-queue` outside 16-100000, negative `-max-article-size`, negative `-log-keep-runs`, `-status` with `-trackdb off`, `-from-iafetch` with positional inputs or with `-trackdb off`, negative `-follow`, `-from-iafetch-base`/`-verify-md5`/`-follow` without `-from-iafetch`, and the first scan of `-from-iafetch` failing: a database that cannot be read or a relative path without `-from-iafetch-base`) |
 | `130` | stopped by SIGINT/SIGTERM while an input was being imported. A signal that reaches a `-follow` run between two inputs ends it with `0`: while it waits for the next scan, while it scans, and while it was hashing an input for `-verify-md5` (that input is left `stopped` in the tracking database) |
 
 ## Tracking database
@@ -255,7 +290,7 @@ An input row has one of these states:
 | `done` | imported |
 | `failed` | an input error, article errors or a failed commit wait; `reason` says which |
 | `stopped` | SIGINT/SIGTERM ended the import of this input |
-| `unsupported` | the importer cannot read this file at all; `reason` says why (`iso`, `sqsh`, `tar`, `txt`, `ufs`, `img`, `xml`, `torrent`, `csv`, `unsupported-suffix`). These are final: no scan tries them again |
+| `unsupported` | the importer cannot read this file at all; `reason` says why (`tar`, `txt`, `ufs`, `xml`, `torrent`, `csv`, `unsupported-suffix`). These are final: no scan tries them again. Disc images (`iso`, `sqsh`, `img`, `.cdr`) were in this list until the importer learned to read them |
 
 **An input is imported once.** At the start of an input the run compares the file with its row: a
 row that is `done` for the same size and mtime (and the same md5, when the row and the source both
@@ -392,25 +427,35 @@ not the same:
 
 | | Status | Reasons | On the next scan |
 |---|--------|---------|------------------|
-| the importer has no reader for the name | `unsupported` | `iso` (CD images), `sqsh`, `tar`, `ufs`, `img`, `txt` (OCR derivatives), `xml` (`_files.xml`, `_meta.xml`), `torrent`, `csv` (`NAME.mbox.csv.gz`, the offset index next to each `NAME.mbox.gz`), `unsupported-suffix` | nothing: they are listed for later tools, never imported |
+| the importer has no reader for the name | `unsupported` | `tar`, `ufs` (spool trees in formats 7z does not unpack for us), `txt` (OCR derivatives), `xml` (`_files.xml`, `_meta.xml`), `torrent`, `csv` (`NAME.mbox.csv.gz`, the offset index next to each `NAME.mbox.gz`), `unsupported-suffix` (everything else, among it the `.7z` of a raw `.bin`/`.cue` CD dump: it holds no `.mbox` member and no file system to walk) | nothing: they are listed for later tools, never imported |
 | the file is not ready on disk | `pending` | `missing`, `size-changed`, `stat-error`, and with `-verify-md5` `md5-mismatch` or `md5-error` | tried again (a `md5-mismatch` that is unchanged is not hashed again) |
 
 Supported names are the ones the importer reads anyway (`.mbox`, `.bag`, `.mbox.gz`, `.mbox.zip`,
-`.mbox.7z`, `.usenet`, `.usenet.xz`, `.usenet.7z`), decided by the file's base name. Every scan logs
-what it found and what it did with it:
+`.mbox.7z`, `.usenet`, `.usenet.xz`, `.usenet.7z`, and the disc images `.iso`, `.cdr`, `.sqsh`,
+`.img`), decided by the file's base name. A `.done` name is not an input, for an image either.
+Every scan logs what it found and what it did with it:
 
 ```
-[MBOX-IMPORT] scan 1: 2613 planned input(s): supported=2470 pending=3 unsupported=140
+[MBOX-IMPORT] scan 1: 2613 planned input(s): supported=2495 pending=3 unsupported=115
 [MBOX-IMPORT] scan 1: pending missing=3
-[MBOX-IMPORT] scan 1: unsupported iso=97 txt=38 xml=5
-[MBOX-IMPORT] scan 1 done: imported=2470 already-imported=0 pending=3 unsupported=140 held-by-another-run=0 md5-stopped=0 input-errors=0 read=… stored=… present=… errors=0
+[MBOX-IMPORT] scan 1: unsupported txt=38 xml=5 unsupported-suffix=72
+[MBOX-IMPORT] scan 1 done: imported=2495 already-imported=0 pending=3 unsupported=115 held-by-another-run=0 md5-stopped=0 input-errors=0 read=… stored=… present=… errors=0
 ```
+
+**The disc images come first.** Within a scan every image (`.iso`, `.cdr`, `.sqsh`, `.img`) is
+planned before every other input, each half still in iafetch's own order (`items.ord`, then
+identifier and file name). That is deliberate: the images hold the oldest articles of the mirror,
+and unpacking one takes long enough that it should not wait behind thousands of mbox files. A
+zipped spool such as `NN_1992_25.zip` is **not** detected automatically (its name looks like an
+mbox zip): import it by hand with `-spool`, see
+[Disc images and news spools](#disc-images-and-news-spools).
 
 `-verify-md5` compares an input with the md5 iafetch recorded for it (iafetch verified it when it
 downloaded it, so this is off by default: it reads the file a second time). The check happens
 **after** the run has taken the input from the tracking database and before it reads it, so only a
 file that is really going to be imported is hashed — an input that is already `done`, one another
-run holds and an `.iso` are never read for a sum. A mismatch is not an input error: the row goes
+run holds and an unsupported name such as an `_djvu.txt` are never read for a sum (a disc image is
+supported, so it is hashed like any other input: that reads a multi-gigabyte file twice). A mismatch is not an input error: the row goes
 back to `pending` with the reason `md5-mismatch` and the sum that was read in `md5_seen`, and one
 line is logged:
 
@@ -583,6 +628,105 @@ The `.done` rule applies to the archive given on the command line (see
 opens no database and renames nothing, but zstd (and xz or 7z) still run, so a compressed archive is
 still unpacked into `-tmpdir`.
 
+## Disc images and news spools
+
+A news spool is the oldest shape of a Usenet archive: **one article per file** in a directory tree
+named after the group (`SPOOL/alt/sources/1234`, `news/comp/lang/c/42`, `utzoo/net.games/17.txt`).
+The CD-ROMs of the early nineties and the tape archives are spools, not mboxes, so the importer
+walks such a tree directly instead of expecting a separator-delimited file.
+
+| Input | How it is read |
+|-------|----------------|
+| `IMAGE.iso` | ISO 9660 (Rock Ridge and Joliet included): unpacked with `7z x -y -bd -o<dir> -- IMAGE`, then walked |
+| `IMAGE.cdr` | a raw CD dump (`CDROM_March92.cdr`), the same way |
+| `IMAGE.sqsh` | a squashfs image (`utzoo.sqsh`), the same way |
+| `IMAGE.img` | a raw FAT floppy image (the `DOUG.*` Amiga floppies), the same way |
+| `-spool DIR` | the directory is walked as it is: a mounted image, an unpacked tree, a copy from a tape |
+| `-spool SPOOL.zip` | the zip is walked through `archive/zip`, nothing is unpacked (`NN_1992_25.zip`) |
+
+The suffix decides, case-insensitively, with a trailing `.done` ignored like for every other input.
+A disc image never needs `-spool`; `-spool` is for the two inputs whose name says nothing about
+their contents. With `-spool`, **every** `.zip` argument is a spool, so a run with `-spool` should
+not mix in `NAME.mbox.zip` files.
+
+**Space in `-tmpdir`.** An image is unpacked in full, into a private subdirectory of `-tmpdir` that
+is removed again on every path (success, input error, Ctrl-C). It needs room for the whole unpacked
+contents — `utzoo.sqsh` unpacks to **5.2 GB in 2.08M files**, a NetNews CD to about 600 MB in
+~190k files — and a file system that is happy with millions of small files. The default (the system
+temp directory) is usually not that, so pass `-tmpdir /big/tmp`. The unpack is logged:
+
+```
+[MBOX-IMPORT] unpacking disc file="…/NN_1992_16.iso" (650117120 bytes) to "/big/tmp/mbox-importer-disc-123" with 7z
+[MBOX-IMPORT] unpacked disc file="…/NN_1992_16.iso" to "/big/tmp/mbox-importer-disc-123"
+```
+
+A **mounted image** is the way around the unpack when the space is not there (and the only way for
+a format this `7z` cannot read):
+
+```bash
+fuseiso NN_1992_16.iso /mnt/x          # ISO only; squashfuse for .sqsh, mount -o loop as root
+mbox-importer -data ./data -spool /mnt/x
+fusermount -u /mnt/x
+```
+
+**7z runs in its own process group.** Ctrl-C therefore does not reach it directly: the importer
+kills it (and its children), removes the unpack directory and ends the input as stopped, exit code
+130. A failed `7z x` is an input error (exit code 1) and the directory goes too.
+
+### What the walk counts
+
+A spool tree holds much more than articles — `LIB/ACTIVE`, `BIN/`, `.overview` files, `YMTRANS.TBL`,
+tarballs, `.Z` files — so every file is classified by its first bytes, not by its name, and the
+per-input summary line gains four counters:
+
+```
+[MBOX-IMPORT] file="…/NN_1992_16.iso" read=… stored=… present=… skipped=… (…) rejected=… errors=… … files=191203 not-article=4821 xref-pointers=12044 anews-batches=0
+```
+
+- `files`: regular files walked;
+- `not-article`: files that are no article, no A-news batch and no mbox (binaries, archives,
+  `README`, `.overview`, `YMTRANS.TBL`);
+- `xref-pointers`: the `<n>.XRF` files of the NetNews CDs, a crosspost pointer to another group's
+  article (`alt/cad/autocad/1005`), counted and not read — the article itself is in the group the
+  pointer names, and crossposts are not processed by this importer anyway;
+- `anews-batches`: files in the old A-news batch format (several articles in one file), as in the
+  earliest utzoo tapes.
+
+An mbox file inside a spool (the `DOUG.*` floppies are plain mboxes without a suffix) is read with
+the normal mbox reader, so its articles are counted in `read`/`stored` like any other.
+
+### Message-IDs of the old formats
+
+Most spool articles carry full RFC 1036 headers and keep their own `Message-ID`. Two older shapes
+do not, and the IDs the importer gives them are **Google Groups' form**, so the same article from
+another archive is recognised as a duplicate:
+
+| Article | Message-ID |
+|---------|------------|
+| A-news (`Aalice.154`, no header names, newsgroups/path/date/title lines) | `<anews.Aalice.154>` |
+| early B-news with `Article-I.D.: decvax.123` and no `Message-ID` | `<bnews.decvax.123>` (the `Article-I.D.` line stays) |
+| a stripped `comp.sources` posting (`Subject`/`Newsgroups`/`Approved` only, no `Message-ID`) | none: it is skipped as `no-msgid` |
+
+The A-news header is rebuilt from the batch: `Path` and `From: <site>!<user>` from the path line,
+`Newsgroups`, `Subject` from the title and `Date` from the ctime line (converted to RFC 5322,
+`+0000`).
+
+### Analyse every image before importing it
+
+A dry run opens no database, stores nothing and renames nothing, but it unpacks the image and walks
+it, so it is the cheap way to see what a disc holds (and whether the counters look sane) before an
+import writes to the group databases:
+
+```bash
+for i in /tank0/archive.org/*/*.iso /tank0/archive.org/*/*.sqsh; do
+  mbox-importer -dry-run -trackdb off -tmpdir /big/tmp "$i"
+done
+```
+
+Read the `files=… not-article=… xref-pointers=… anews-batches=…` counter line, the target groups
+(`dry-run group="…" articles=…`) and the [skip reasons](#skip-reasons) of each image. A disc whose
+`not-article` is most of its `files` is a disc of software, not of articles.
+
 ## Log output
 
 Every line has the prefix `[MBOX-IMPORT]`. A progress line is logged every 10000 messages, a summary
@@ -620,6 +764,8 @@ database) is stored in the `log` table of that database as well.
 - `stopped-early=true`: the parser lost its place before the end of the file
 - `unread=true`: the stream ended before the underlying file did
 - `marked-done`: whether the input was renamed to `INPUT.done`
+- `files`, `not-article`, `xref-pointers`, `anews-batches`: only for a news spool input (a disc
+  image or `-spool`), see [What the walk counts](#what-the-walk-counts)
 
 ## Notes
 
@@ -637,6 +783,6 @@ database) is stored in the `log` table of that database as well.
 - [github.com/go-while/go-lib-mbox2nntp](https://github.com/go-while/go-lib-mbox2nntp) - the mbox parser
 - [github.com/go-while/mbox2nntp/uat](https://github.com/go-while/mbox2nntp) - the UAT archive reader
 - github.com/mattn/go-sqlite3
-- the `7z` program, only for `.7z` and `.usenet.7z` inputs (and `.usenet.xz` without `xz`)
+- the `7z` program, only for `.7z`, `.usenet.7z` and disc image inputs (and `.usenet.xz` without `xz`)
 - the `zstd` program, only for UAT inputs; the `xz` program, only for `.usenet.xz` inputs
 - go-pugleaf internal packages
