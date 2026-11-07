@@ -525,3 +525,21 @@ func TestMboxDiscImportDispatch(t *testing.T) {
 		t.Error("the spool directory was renamed")
 	}
 }
+
+// TestMboxDiscGroupFromNameIgnored: -group-from-name does not apply to a spool input. A spool
+// holds many groups, and "spool.zip" names none, so with the flag every article still goes
+// to the group of its own Newsgroups header and the input is no input error.
+func TestMboxDiscGroupFromNameIgnored(t *testing.T) {
+	zipPath := writeZip(t, "spool.zip", map[string]string{
+		"SPOOL/a/1": miArticle(miID1, miAlpha, "one"),
+		"SPOOL/b/1": miArticle(miID2, miBeta, "two"),
+	}, []string{"SPOOL/a/1", "SPOOL/b/1"})
+	sink := newCountingSink()
+	res := importInputs([]string{zipPath}, &runOptions{spool: true, groupFromName: true}, sink, nil)
+	if res.InputErrors != 0 || res.Total.Stored != 2 {
+		t.Fatalf("input-errors=%d stored=%d, want 0 and 2", res.InputErrors, res.Total.Stored)
+	}
+	if sink.groups[miAlpha] != 1 || sink.groups[miBeta] != 1 {
+		t.Errorf("groups %v, want one article each in %s and %s", sink.groups, miAlpha, miBeta)
+	}
+}

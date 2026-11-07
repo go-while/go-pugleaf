@@ -86,6 +86,13 @@ func spoolDirSizes(inputs []plannedInput) {
 // A disc image is renamed to IMAGE.done like any other input; a spool directory is never
 // renamed (it is not the thing that was imported, and -spool is also used on a mount point).
 func importSpool(path string, kind spoolKind, opts *runOptions, sink articleSink, stop <-chan struct{}) (c *counters, inputErr, stopped bool) {
+	if opts.groupFromName {
+		// a spool holds many groups: its articles go by their own Newsgroups header
+		in := *opts
+		in.groupFromName = false
+		opts = &in
+		log.Printf("[MBOX-IMPORT] file=%q: -group-from-name does not apply to a disc image or spool (it holds many groups): the articles go by their Newsgroups header", path)
+	}
 	opts, err := inputOptions(path, opts)
 	if err != nil {
 		log.Printf("[MBOX-IMPORT] input error: %v", err)

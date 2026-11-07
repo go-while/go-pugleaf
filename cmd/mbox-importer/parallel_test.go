@@ -163,6 +163,12 @@ func TestMboxCmdGroupFromFileName(t *testing.T) {
 		{"pl.comp.lang.c.usenet.xz", "pl.comp.lang.c"},
 		{"pl.comp.lang.c.usenet.7z.done", "pl.comp.lang.c"},
 		{"alt.test.MBOX.ZIP", "alt.test"},
+		// archive.org's collections: a dump date or a file count before .mbox
+		{"0.akita-inu.20140617.mbox.gz", "0.akita-inu"},
+		{"alt.drugs.chemistry.20150103.mbox.gz", "alt.drugs.chemistry"},
+		{"pitt.mac-users.(9).mbox.7z", "pitt.mac-users"},
+		{"alt.2600.mbox.gz", "alt.2600"},                         // a short number is a group component
+		{"alt.binaries.1234567.mbox.gz", "alt.binaries.1234567"}, // 7 digits: not a date
 		{".mbox", ""},
 		{"bad name!.mbox", ""},
 		{"nosuffix", ""},

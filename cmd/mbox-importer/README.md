@@ -124,7 +124,7 @@ renamed; the copy of a `.usenet.xz`/`.usenet.7z` unpacked into `-tmpdir` is remo
 | `-useshorthashlen` | `7` | Legacy short hash length (2-7). The value of the first run is stored in the database; later runs use the stored value and warn if it differs. No effect on the history index |
 | `-history` | `true` | Maintain and use the message-id history index in `<data>/history` |
 | `-group` | (none) | File every article of the run into this group instead of the first group of its `Newsgroups:` header |
-| `-group-from-name` | `false` | File every article of an input into the group named by the input's file name: the base name cut before the first `.mbox`, `.bag` or `.usenet` (`de.comm.foo.mbox.gz` becomes `de.comm.foo`, `pl.comp.lang.c.usenet.xz` becomes `pl.comp.lang.c`). A file whose name gives no valid group is an input error. Not together with `-group`. This is what `mbox-import.sh` in the repository root uses for a directory of per-group archives |
+| `-group-from-name` | `false` | File every article of an input into the group named by the input's file name: the base name cut before the first `.mbox`, `.bag` or `.usenet` (`de.comm.foo.mbox.gz` becomes `de.comm.foo`, `pl.comp.lang.c.usenet.xz` becomes `pl.comp.lang.c`); a dump date or a file count right before the suffix is cut off as well, as archive.org's collections name their files (`0.akita-inu.20140617.mbox.gz` and `pitt.mac-users.(9).mbox.7z` become `0.akita-inu` and `pitt.mac-users`). A file whose name gives no valid group is an input error. A disc image or `-spool` input ignores the flag (it holds many groups; one log line says so). Not together with `-group`. This is what `mbox-import.sh` in the repository root uses for a directory of per-group archives |
 | `-7z` | `7z` | Program used to unpack `.7z` and `.usenet.7z` inputs (name in `PATH` or a full path); also unpacks `.usenet.xz` when `-xz` is not found |
 | `-zstd` | `zstd` | The zstd program (name in `PATH` or a full path), needed for every UAT input (`.usenet`, `.usenet.xz`, `.usenet.7z`) |
 | `-xz` | `xz` | Program used to unpack `.usenet.xz` inputs; when it is not found, 7-Zip (`-7z`) is used with `-txz` |
@@ -407,8 +407,13 @@ On arc1-ca, where the ~10 TB mirror is downloaded into `/tank0/archive.org` whil
 ```bash
 mbox-importer -data /tank0/go-pugleaf/data \
   -from-iafetch /tank0/archive.org/.iafetch/iafetch.sqlite \
-  -group-from-name -parallel 4 -follow 10m
+  -tmpdir /tank0/go-pugleaf/tmp -parallel 4 -follow 10m
 ```
+
+No `-group-from-name` here: every article of the mirror carries its `Newsgroups` header, the
+message-id history stores each article once whichever file it comes from, and the disc images
+(imported first) hold many groups anyway. `-tmpdir` is where the disc images are unpacked
+(`-parallel 4` × the largest image: about 21 GB with `utzoo.sqsh`).
 
 Run it as the user that owns the go-pugleaf data (`go-pugleaf`) in a `screen`, or from a oneshot
 unit with a timer. Check iafetch's database file name before the first run, and whether iafetch ran

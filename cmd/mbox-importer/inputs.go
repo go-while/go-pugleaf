@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -390,6 +391,16 @@ func markDone(path string) error {
 // (-group-from-name): the base name without a trailing ".done", cut before the first
 // ".mbox", ".bag" or ".usenet" (de.comm.internet.commerce.mbox.gz -> de.comm.internet.commerce,
 // pl.comp.lang.c.usenet.xz -> pl.comp.lang.c). The result must be a valid newsgroup name.
+// archiveNameSuffix matches what archive.org's Usenet collections put between the group and
+// ".mbox": a dump date (Google Groups' weekly dumps, "0.akita-inu.20140617.mbox.gz") or a
+// file count in parentheses (FULL-USENET-BACKUP, "pitt.mac-users.(9).mbox.7z").
+var archiveNameSuffix = regexp.MustCompile(`\.(?:(?:19|20)[0-9]{6}|\([0-9]+\))$`)
+
+// trimArchiveNameSuffix cuts one archiveNameSuffix off a group name taken from a file name.
+func trimArchiveNameSuffix(group string) string {
+	return archiveNameSuffix.ReplaceAllString(group, "")
+}
+
 func groupFromFileName(path string) (string, error) {
 	name := filepath.Base(path)
 	if strings.HasSuffix(strings.ToLower(name), ".done") {
@@ -405,7 +416,7 @@ func groupFromFileName(path string) (string, error) {
 	if cut == len(name) {
 		return "", fmt.Errorf("file %q: no .mbox, .bag or .usenet in the name, no group to derive (-group-from-name)", path)
 	}
-	group := name[:cut]
+	group := trimArchiveNameSuffix(name[:cut])
 	if group == "" || !common.IsValidGroupName(group) {
 		return "", fmt.Errorf("file %q: %q is not a valid newsgroup name (-group-from-name)", path, group)
 	}
