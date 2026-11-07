@@ -157,3 +157,23 @@ Counters Files/NotArticle/XrefPointers/ANewsBatches + spoolDetail, readSpool/par
   strict for the merged walker).
 Deferred: a present-but-unreadable Date with a good Posted is still rejected by the processor
 (internal/nntp.ParseHeaders drops the fallback fields) — outside this plan.
+
+### Verification
+- Local E2E (pugleaf-verifier, 2d1bfcb): all steps PASS — ISO/sqsh/zip/dir equal counts, <anews.*>/<bnews.*>
+  stored, Posted → 1981 Date, rerun already-imported, -reimport present, SIGINT in unpack and walk → 130 with
+  no unpack dir left, README-only spool → exit 1, -from-iafetch imports the ISO before an earlier-ord mbox,
+  .mbox.csv.gz → unsupported csv. README gaps fixed in e250403/d6d63ad (file-errors, 7z refuses every `..` link).
+- arc1-ca read-only dry runs (`-dry-run -trackdb off`, build 2d1bfcb), all exit 0, file-errors=0:
+  | image | read | stored | main skips | secs |
+  |---|---|---|---|---|
+  | NN_1992_16.iso | 171,564 | 171,247 | no-body 315 | 205 |
+  | NN_1992_25.zip (-spool) | 164,928 | 164,566 | no-body 358 | 16 |
+  | NetNews Offline Vol 1 | 226,456 | 225,958 | no-body 459 | 54 |
+  | InfoMagic 1993-07 | 12,323 | 8,314 | no-msgid 3,950 (stripped postings) | 10 |
+  | CDROM_March92.cdr | 7,523 | 5,635 | no-msgid 1,855 | 9 |
+  | utzoo.sqsh | 2,084,943 | 2,038,585 | no-subject 39,918, no-body 6,188 | 3171 |
+  | DOUG disk1 .img | 243 | 182 | parser-skipped 139, no-msgid 61 | 0 |
+- utzoo no-subject: early B-news `Title:` instead of `Subject:` (38,592 in a 249k-file sample) → fixed in
+  6af2edf (Title gives the Subject, line kept); expect ~+39k stored on utzoo.
+- DOUG floppies: the text was hard-wrapped when written (separators and Newsgroups lines split), so the
+  parser skips are damage in the data; left as is.
