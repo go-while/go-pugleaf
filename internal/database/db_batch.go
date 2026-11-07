@@ -15,8 +15,28 @@ import (
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
-// SQLite safety limits: split large batches to avoid parameter/length limits
+// BatchInterval is the longest a queued article waits for the timer flush of the batch
+// orchestrator (orchestrator 1). With more articles queued it flushes sooner: flushDue.
 var BatchInterval = 3 * time.Second
+
+// minFlushInterval is the shortest gap between two timer flushes (the orchestrator's tick).
+const minFlushInterval = time.Second / 8
+
+// flushDue is how long after the last timer flush the next one is due, with queued articles
+// waiting over all groups. Orchestrator 2 writes a group as soon as it alone has maxDBbatch
+// articles; everything below that waited for the full BatchInterval, so an intake spread over
+// thousands of small groups (old spools, a fetcher on many quiet groups) stalled for 3 s
+// between flushes while articles kept coming. The interval now shrinks with the backlog:
+// up to maxDBbatch/4 queued it is BatchInterval, at maxDBbatch a quarter of it, and it never
+// drops below minFlushInterval (3 s, 750 ms, 250 ms at 3x, 125 ms from 6x maxDBbatch).
+func flushDue(queued, maxDBbatch int, interval time.Duration) time.Duration {
+	quarter := max(maxDBbatch/4, 1)
+	if queued <= quarter {
+		return interval
+	}
+	due := time.Duration(int64(interval) * int64(quarter) / int64(queued))
+	return max(due, minFlushInterval)
+}
 
 // Cache for placeholder strings to avoid rebuilding them repeatedly
 var placeholderCache sync.Map // map[int]string
@@ -1778,7 +1798,12 @@ wait:
 		}
 		if !wantShutdown {
 			// flushReq: a WaitCommitted caller waits for the pending batches (commit barrier)
-			if time.Since(lastFlush) > o.BatchInterval || o.batch.flushReq.Swap(false) {
+			// the more is queued, the sooner the timer flush is due (flushDue)
+			o.batch.GMux.RLock()
+			queued := o.batch.queued
+			o.batch.GMux.RUnlock()
+			due := flushDue(queued, o.batch.maxDBbatch, o.BatchInterval)
+			if (queued > 0 && time.Since(lastFlush) > due) || time.Since(lastFlush) > o.BatchInterval || o.batch.flushReq.Swap(false) {
 				lastFlush = time.Now()
 				//log.Printf("[ORCHESTRATOR1] Timer triggered - processing all pending batches smaller than sq.maxDBbatch")
 			loop:
