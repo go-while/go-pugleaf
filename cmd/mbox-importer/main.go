@@ -54,6 +54,7 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		forceGroup      = fs.String("group", "", "file every article into this group instead of the first group of its Newsgroups header")
 		groupFromName   = fs.Bool("group-from-name", false, "file every article of an input into the group named by its file name (de.comm.foo.mbox.gz -> de.comm.foo); not with -group")
 		sevenZip        = fs.String("7z", "7z", "program used to unpack .7z inputs (name in PATH or a full path)")
+		discReader      = fs.String("disc-reader", discReaderAuto, "how a disc image is read: mount (fuseiso for .iso/.cdr, squashfuse for .sqsh, read in place), 7z (unpack into -tmpdir), auto (mount when the tool is installed and the mount works, else 7z)")
 		zstdProg        = fs.String("zstd", "zstd", "program used to read UAT archives (.usenet, .usenet.xz, .usenet.7z; name in PATH or a full path)")
 		xzProg          = fs.String("xz", "xz", "program used to unpack .usenet.xz inputs; when it is not found, -7z is used (7z e -txz)")
 		tmpDir          = fs.String("tmpdir", "", "directory for the unpacked copy of a .usenet.xz / .usenet.7z input or of a disc image (as large as the unpacked contents) and the zstd dictionary (\"\" = system temp dir)")
@@ -90,6 +91,12 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 	if *showHelp {
 		fs.Usage()
 		return 0
+	}
+	switch *discReader {
+	case discReaderAuto, discReaderMount, discReader7z:
+	default:
+		fmt.Fprintf(fs.Output(), "mbox-importer: -disc-reader %q is not auto, mount or 7z\n", *discReader)
+		return 2
 	}
 	if *pprofAddr != "" {
 		stopPprof := startPprof(*pprofAddr)
@@ -166,6 +173,7 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		hostname:        *nntpHostname,
 		group:           *forceGroup,
 		sevenZip:        *sevenZip,
+		discReader:      *discReader,
 		zstd:            *zstdProg,
 		xz:              *xzProg,
 		tmpDir:          *tmpDir,

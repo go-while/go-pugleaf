@@ -543,3 +543,59 @@ func TestMboxDiscGroupFromNameIgnored(t *testing.T) {
 		t.Errorf("groups %v, want one article each in %s and %s", sink.groups, miAlpha, miBeta)
 	}
 }
+
+// TestMboxDiscMountTool: squashfuse for a squashfs, fuseiso for ISO 9660 images, nothing for
+// a FAT floppy (which is unpacked with 7z).
+func TestMboxDiscMountTool(t *testing.T) {
+	for name, want := range map[string]string{
+		"utzoo.sqsh": "squashfuse", "NN_1992_16.iso": "fuseiso", "X.ISO": "fuseiso",
+		"CDROM_March92.cdr": "fuseiso", "cd.iso.done": "fuseiso", "disk1.img": "", "a.mbox.gz": "",
+	} {
+		if got := discMountTool(name); got != want {
+			t.Errorf("discMountTool(%q) = %q, want %q", name, got, want)
+		}
+	}
+}
+
+// TestMboxDiscMounted imports an ISO and a squashfs through their FUSE readers
+// (-disc-reader mount): the same articles as the 7z path, nothing left under -tmpdir.
+// Skipped where fuseiso/squashfuse/fusermount or /dev/fuse are missing.
+func TestMboxDiscMounted(t *testing.T) {
+	if _, err := os.Stat("/dev/fuse"); err != nil {
+		t.Skip("no /dev/fuse")
+	}
+	dir := t.TempDir()
+	tree := dcSpoolTree(t, filepath.Join(dir, "tree"))
+	for _, c := range []struct {
+		tool  string
+		image func() string
+	}{
+		{"fuseiso", func() string { return dcMakeISO(t, tree, filepath.Join(dir, "spool.iso")) }},
+		{"squashfuse", func() string {
+			if _, err := exec.LookPath("mksquashfs"); err != nil {
+				t.Skip("mksquashfs not installed")
+			}
+			out := filepath.Join(dir, "spool.sqsh")
+			if b, err := exec.Command("mksquashfs", tree, out, "-quiet", "-noappend").CombinedOutput(); err != nil {
+				t.Fatalf("mksquashfs: %v %s", err, b)
+			}
+			return out
+		}},
+	} {
+		t.Run(c.tool, func(t *testing.T) {
+			if _, err := exec.LookPath(c.tool); err != nil {
+				t.Skipf("%s not installed", c.tool)
+			}
+			image := c.image()
+			tmp := t.TempDir()
+			opts := &runOptions{tmpDir: tmp, discReader: discReaderMount}
+			res := importInputs([]string{image}, opts, newCountingSink(), nil)
+			if res.InputErrors != 0 || len(res.PerInput) != 1 || res.PerInput[0].Read == 0 {
+				t.Fatalf("input-errors=%d per-input=%v", res.InputErrors, res.PerInput)
+			}
+			if entries, _ := os.ReadDir(tmp); len(entries) != 0 {
+				t.Errorf("left under -tmpdir: %v", entries)
+			}
+		})
+	}
+}

@@ -198,6 +198,17 @@ func openSpool(path string, kind spoolKind, opts *runOptions, stop <-chan struct
 			}
 		}, nil
 	case spoolDisc:
+		if opts.discReader == discReaderAuto || opts.discReader == discReaderMount {
+			fsys, release, err := mountDisc(path, opts)
+			switch {
+			case err == nil:
+				return fsys, release, nil
+			case opts.discReader == discReaderMount:
+				return nil, nil, err
+			case !errors.Is(err, errNoMountTool):
+				log.Printf("[MBOX-IMPORT] file=%q: mounting failed, unpacking with 7z instead: %v", path, err)
+			}
+		}
 		if opts.tmpDir == "" {
 			log.Printf("[MBOX-IMPORT] file=%q: -tmpdir is not set: the image is unpacked into the system "+
 				"temp directory, which is often small or a tmpfs (in memory); pass -tmpdir on a file system "+
@@ -437,4 +448,100 @@ func killGroup(cmd *exec.Cmd) {
 	if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
 		log.Printf("[MBOX-IMPORT] 7z: kill: %v", err)
 	}
+}
+
+// The values of -disc-reader.
+const (
+	discReaderAuto  = "auto"  // mount when the tool is installed and the mount works, else 7z (the flag default)
+	discReaderMount = "mount" // mount only: a missing tool or a failed mount is an input error
+	discReader7z    = "7z"    // always unpack with 7z into -tmpdir (also an empty runOptions.discReader)
+)
+
+// errNoMountTool: the image's suffix has no FUSE reader, or the reader or fusermount is not
+// installed. With -disc-reader auto the image is unpacked with 7z without a log line.
+var errNoMountTool = errors.New("no FUSE reader for this image")
+
+// discMountTool returns the FUSE program that mounts image read-only in place: squashfuse
+// for a squashfs, fuseiso for an ISO 9660 image (.iso, .cdr). A FAT floppy (.img) has none.
+func discMountTool(image string) string {
+	name := strings.TrimSuffix(strings.ToLower(filepath.Base(image)), ".done")
+	switch {
+	case strings.HasSuffix(name, ".sqsh"):
+		return "squashfuse"
+	case strings.HasSuffix(name, ".iso"), strings.HasSuffix(name, ".cdr"):
+		return "fuseiso"
+	}
+	return ""
+}
+
+// discMountTimeout bounds the mount program (it daemonizes once the mount is up).
+const discMountTimeout = time.Minute
+
+// mountDisc mounts the disc image read-only on a fresh directory under -tmpdir with its FUSE
+// reader (discMountTool) and returns the mounted tree: nothing is unpacked, so a 2M-file image
+// like utzoo.sqsh costs no writes and no cleanup on the disks. release unmounts it
+// (fusermount -u, lazily with -z if the mount is still busy) and removes the directory. A
+// process killed with SIGKILL leaves the mount behind: fusermount -u DIR removes it.
+func mountDisc(image string, opts *runOptions) (fs.FS, func(), error) {
+	tool := discMountTool(image)
+	if tool == "" {
+		return nil, nil, errNoMountTool
+	}
+	prog, err := exec.LookPath(tool)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: %s: %v", errNoMountTool, tool, err)
+	}
+	unmount, err := exec.LookPath("fusermount3")
+	if err != nil {
+		if unmount, err = exec.LookPath("fusermount"); err != nil {
+			return nil, nil, fmt.Errorf("%w: fusermount: %v", errNoMountTool, err)
+		}
+	}
+	dir, err := os.MkdirTemp(opts.tmpDir, "mbox-importer-mnt-")
+	if err != nil {
+		return nil, nil, err
+	}
+	mounted := false
+	release := func() {
+		if mounted {
+			if out, err := exec.Command(unmount, "-u", dir).CombinedOutput(); err != nil {
+				log.Printf("[MBOX-IMPORT] file=%q: %s -u %q: %v %s: unmounting lazily", image, unmount, dir, err, bytes.TrimSpace(out))
+				if out, err := exec.Command(unmount, "-u", "-z", dir).CombinedOutput(); err != nil {
+					log.Printf("[MBOX-IMPORT] file=%q: %s -u -z %q: %v %s", image, unmount, dir, err, bytes.TrimSpace(out))
+					return // a mount point cannot be removed
+				}
+			}
+		}
+		if err := os.Remove(dir); err != nil {
+			log.Printf("[MBOX-IMPORT] file=%q: removing the mount point %q: %v", image, dir, err)
+		}
+	}
+	cmd := exec.Command(prog, image, dir)
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	cmd.WaitDelay = discMountTimeout
+	if err := cmd.Start(); err != nil {
+		release()
+		return nil, nil, fmt.Errorf("%s: %w", tool, err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err = <-done:
+	case <-time.After(discMountTimeout):
+		_ = cmd.Process.Kill()
+		err = fmt.Errorf("no answer in %v", discMountTimeout)
+		<-done
+	}
+	// fuseiso answers 0 even for an image it cannot read: an empty mount is a failure too
+	mounted = err == nil || !dirIsEmpty(dir)
+	if err != nil || dirIsEmpty(dir) {
+		release()
+		if err == nil {
+			err = errors.New("the mounted tree is empty")
+		}
+		return nil, nil, fmt.Errorf("%s %q: %w %s", tool, image, err, bytes.TrimSpace(out.Bytes()))
+	}
+	log.Printf("[MBOX-IMPORT] file=%q: mounted read-only with %s on %q", image, tool, dir)
+	return os.DirFS(dir), release, nil
 }

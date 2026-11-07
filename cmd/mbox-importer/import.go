@@ -184,6 +184,7 @@ type inputSink interface {
 // runOptions are the parsed flags of one run.
 type runOptions struct {
 	dataDir, hostname, group, sevenZip string
+	discReader                         string // -disc-reader: auto, mount or 7z (discReaderAuto when empty)
 	zstd, xz, tmpDir                   string // UAT archives: programs and the unpack directory ("" = system temp)
 	useShortHashLen                    int
 	parallel                           int  // inputs imported at the same time (<= 1: one after the other)

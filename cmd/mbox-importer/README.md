@@ -125,6 +125,8 @@ renamed; the copy of a `.usenet.xz`/`.usenet.7z` unpacked into `-tmpdir` is remo
 | `-history` | `true` | Maintain and use the message-id history index in `<data>/history` |
 | `-group` | (none) | File every article of the run into this group instead of the first group of its `Newsgroups:` header |
 | `-group-from-name` | `false` | File every article of an input into the group named by the input's file name: the base name cut before the first `.mbox`, `.bag` or `.usenet` (`de.comm.foo.mbox.gz` becomes `de.comm.foo`, `pl.comp.lang.c.usenet.xz` becomes `pl.comp.lang.c`); a dump date or a file count right before the suffix is cut off as well, as archive.org's collections name their files (`0.akita-inu.20140617.mbox.gz` and `pitt.mac-users.(9).mbox.7z` become `0.akita-inu` and `pitt.mac-users`). A file whose name gives no valid group is an input error. A disc image or `-spool` input ignores the flag (it holds many groups; one log line says so). Not together with `-group`. This is what `mbox-import.sh` in the repository root uses for a directory of per-group archives |
+| `-disc-reader` | `auto` | How a disc image is read: `mount` (`fuseiso` for `.iso`/`.cdr`, `squashfuse` for `.sqsh`, read in place), `7z` (unpack into `-tmpdir`), `auto` (mount when possible, else 7z), see [Disc images and news spools](#disc-images-and-news-spools) |
+| `-pprof` | (off) | Debug: serve `net/http/pprof` on this address (`127.0.0.1:6061`) with block and mutex profiling on |
 | `-7z` | `7z` | Program used to unpack `.7z` and `.usenet.7z` inputs (name in `PATH` or a full path); also unpacks `.usenet.xz` when `-xz` is not found |
 | `-zstd` | `zstd` | The zstd program (name in `PATH` or a full path), needed for every UAT input (`.usenet`, `.usenet.xz`, `.usenet.7z`) |
 | `-xz` | `xz` | Program used to unpack `.usenet.xz` inputs; when it is not found, 7-Zip (`-7z`) is used with `-txz` |
@@ -662,14 +664,23 @@ walks such a tree directly instead of expecting a separator-delimited file.
 
 | Input | How it is read |
 |-------|----------------|
-| `IMAGE.iso` | ISO 9660 (Rock Ridge and Joliet included): unpacked with `7z x -y -bd -bso0 -bsp0 -o<dir> -- IMAGE`, then walked |
+| `IMAGE.iso` | ISO 9660: mounted read-only with `fuseiso` and walked in place; without it unpacked with `7z x -y -bd -bso0 -bsp0 -o<dir> -- IMAGE`, then walked |
 | `IMAGE.cdr` | a raw CD dump (`CDROM_March92.cdr`), the same way |
-| `IMAGE.sqsh` | a squashfs image (`utzoo.sqsh`), the same way |
-| `IMAGE.img` | a raw FAT floppy image (the `DOUG.*` Amiga floppies), the same way |
+| `IMAGE.sqsh` | a squashfs image (`utzoo.sqsh`): mounted with `squashfuse`, else unpacked with 7z |
+| `IMAGE.img` | a raw FAT floppy image (the `DOUG.*` Amiga floppies): unpacked with 7z (no FUSE reader) |
 | `-spool DIR` | the directory is walked as it is: a mounted image, an unpacked tree, a copy from a tape |
 | `-spool SPOOL.zip` | the zip is walked through `archive/zip`, nothing is unpacked (`NN_1992_25.zip`) |
 
 The suffix decides, case-insensitively, with a trailing `.done` ignored like for every other input.
+
+**Mount, don't unpack** (`-disc-reader`, default `auto`). Unpacking writes every file of the image
+to `-tmpdir` and deletes it again afterwards — for `utzoo.sqsh` 2.08 million small files, which on
+spinning disks takes longer than the import and starves everything else on the pool. A FUSE mount
+(`fuseiso`, `squashfuse`, `fusermount`; the user needs `/dev/fuse`) reads the image in place with no
+writes at all. `auto` mounts when the reader is installed and the mount works and falls back to 7z
+otherwise (one log line says why); `mount` makes a failed mount an input error; `7z` always unpacks.
+The mount point is a fresh `mbox-importer-mnt-*` directory under `-tmpdir`, unmounted when the image
+is done; a process killed with SIGKILL leaves it mounted (`fusermount -u DIR`).
 A disc image never needs `-spool`; `-spool` is for the two inputs whose name says nothing about
 their contents. With `-spool`, **every** `.zip` argument is a spool, so a run with `-spool` should
 not mix in `NAME.mbox.zip` files.
