@@ -41,6 +41,25 @@ type counters struct {
 	Skipped                                                            map[skipReason]int
 	StoppedEarly, Unread, MarkedDone                                   bool
 	CommitFailed                                                       bool // the commit wait of the input failed
+	// news spool inputs (-spool, disc images; plan mbox-import-discs), 0 for an mbox input:
+	Files        int // regular files walked
+	NotArticle   int // files that are no article, A-news batch or mbox (binaries, tar, README, ...)
+	XrefPointers int // NetNews/CD "<n>.XRF" crosspost pointer files (not read)
+	ANewsBatches int // A-news batch files (several articles each)
+	// FileErrors are the files and directories of the spool that could not be opened or
+	// read (a scratched disc image). They are no article errors: the input is still marked
+	// done and the exit code is unchanged, because a re-walk of a read-only image would
+	// only read the same bad blocks again (and -follow would do it on every scan).
+	FileErrors int
+}
+
+// spoolDetail is the spool part of the per-input log line ("" for an mbox input).
+func (c *counters) spoolDetail() string {
+	if c.Files == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" files=%d not-article=%d xref-pointers=%d anews-batches=%d file-errors=%d",
+		c.Files, c.NotArticle, c.XrefPointers, c.ANewsBatches, c.FileErrors)
 }
 
 func newCounters(file string) *counters {
@@ -79,6 +98,11 @@ func (c *counters) add(o *counters) {
 	c.Errors += o.Errors
 	c.ParserSkipped += o.ParserSkipped
 	c.NearMisses += o.NearMisses
+	c.Files += o.Files
+	c.NotArticle += o.NotArticle
+	c.XrefPointers += o.XrefPointers
+	c.ANewsBatches += o.ANewsBatches
+	c.FileErrors += o.FileErrors
 	for r, n := range o.Skipped {
 		c.Skipped[r] += n
 	}
@@ -164,6 +188,7 @@ type runOptions struct {
 	useShortHashLen                    int
 	parallel                           int  // inputs imported at the same time (<= 1: one after the other)
 	groupFromName                      bool // -group-from-name: the target group of an input is its file name (inputOptions)
+	spool                              bool // -spool: a positional directory or .zip input is a news spool (disc.go)
 	history, dryRun, keepBinary        bool
 	markDone, strictMsgID              bool
 	tracked                            bool          // the tracking DB is on: it, not the rename, holds the import state
@@ -383,9 +408,13 @@ func importPlanned(inputs []plannedInput, opts *runOptions, sink articleSink, st
 					}
 				}
 				o.started = true
-				if uatSuffix(in.Path) != "" {
+				switch spool := spoolInput(in.Path, opts); {
+				case uatSuffix(in.Path) != "":
 					o.c, o.inputErr, o.stopped = importUAT(in.Path, opts, sink, stop)
-				} else {
+				case spool != spoolNone:
+					// a disc image, or a directory or zip file of -spool (disc.go)
+					o.c, o.inputErr, o.stopped = importSpool(in.Path, spool, opts, sink, stop)
+				default:
 					o.c, o.inputErr, o.stopped = importInput(in.Path, opts, sink, stop)
 				}
 				track.finishInput(id, o.c, o.inputErr, o.stopped)
@@ -801,9 +830,9 @@ func importInput(path string, opts *runOptions, sink articleSink, stop <-chan st
 		}
 	}
 
-	log.Printf("[MBOX-IMPORT] file=%q read=%d stored=%d present=%d skipped=%d (%s) rejected=%d errors=%d parser-skipped=%d near-misses=%d stopped-early=%t unread=%t marked-done=%t",
+	log.Printf("[MBOX-IMPORT] file=%q read=%d stored=%d present=%d skipped=%d (%s) rejected=%d errors=%d parser-skipped=%d near-misses=%d stopped-early=%t unread=%t marked-done=%t%s",
 		path, c.Read, c.Stored, c.Present, c.skippedTotal(), c.skippedDetail(), c.Rejected, c.Errors,
-		c.ParserSkipped, c.NearMisses, c.StoppedEarly, c.Unread, c.MarkedDone)
+		c.ParserSkipped, c.NearMisses, c.StoppedEarly, c.Unread, c.MarkedDone, c.spoolDetail())
 	for _, nm := range samples {
 		log.Printf("[MBOX-IMPORT]   near-miss file=%q line=%d %q", path, nm.line, nm.text)
 	}

@@ -21,9 +21,11 @@ import (
 
 // Reasons iasource puts in plannedInput.Reason. The suffix reasons name the formats of the
 // archive.org mirror the importer cannot read yet, so -status can list what is left for
-// later tools: "iso" (CD images), "sqsh", "tar", "ufs", "img" (spool trees and images),
+// later tools: "tar", "ufs" (spool trees in formats 7z does not unpack for us),
 // "txt" (OCR derivatives, plain text), "xml" (archive.org's _files.xml / _meta.xml),
-// "torrent" (_archive.torrent) and iaReasonUnsupported for any other name.
+// "torrent" (_archive.torrent) and iaReasonUnsupported for any other name. The disc image
+// suffixes (.iso, .cdr, .sqsh, .img) used to be among them and are supported now: they are
+// unpacked with 7z and read as news spools (plan mbox-import-discs, disc.go).
 const (
 	iaReasonMissing     = "missing"            // recorded, but not on disk (any more)
 	iaReasonSizeChanged = "size-changed"       // on disk with another size than iafetch recorded
@@ -50,13 +52,11 @@ func iafetchPending(reason string) bool {
 var iaReadableSuffixes = []string{".mbox", ".bag", ".gz", ".zip", ".7z"}
 
 // iaUnsupportedSuffixes maps the suffixes worth naming in -status to their short reason.
+// The disc image suffixes are not in here any more (iafetchSupported takes them first).
 var iaUnsupportedSuffixes = map[string]string{
-	".iso":     "iso",
-	".sqsh":    "sqsh",
 	".tar":     "tar",
 	".txt":     "txt",
 	".ufs":     "ufs",
-	".img":     "img",
 	".xml":     "xml",
 	".torrent": "torrent",
 }
@@ -119,7 +119,30 @@ func iafetchInputs(dbPath, base string) ([]plannedInput, error) {
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iafetch DB %q: %w", dbPath, err)
 	}
-	return inputs, nil
+	return iafetchDiscsFirst(inputs), nil
+}
+
+// iafetchDiscsFirst puts the disc images of a scan before every other input, each half in
+// the order the query gave (a stable partition, so items.ord / identifier / name still
+// decides among the discs and among the rest). The user wants the CD images of the mirror
+// imported first (plan mbox-import-discs): they are the oldest articles, and unpacking one
+// takes long enough that it should not wait behind thousands of mbox files.
+func iafetchDiscsFirst(inputs []plannedInput) []plannedInput {
+	out := make([]plannedInput, 0, len(inputs))
+	for _, in := range inputs {
+		if isDiscImage(in.Path) {
+			out = append(out, in)
+		}
+	}
+	if len(out) == 0 || len(out) == len(inputs) {
+		return inputs // nothing to move
+	}
+	for _, in := range inputs {
+		if !isDiscImage(in.Path) {
+			out = append(out, in)
+		}
+	}
+	return out
 }
 
 // iafetchDSN is the read-only DSN of iafetch's DB. The path is URI-escaped (as iafetch
@@ -187,14 +210,22 @@ func iafetchInput(identifier, name string, size int64, md5, recorded, base strin
 // and, if it is not, the short reason for -status. An archive.org file name can hold a
 // subfolder ("sub/dir/NAME"), so only its base name decides.
 //
-// A name has to pass both halves of the importer's own rule: isInputName (the rule of the
-// directory scan in inputs.go) and a suffix openSource has a reader for (iaReadableSuffixes
-// or a UAT archive) — isInputName only looks for ".mbox"/".bag" anywhere in the name, so a
-// mirror file like "x.mbox.bz2" or "x.mbox.zst" would pass it and then fail to open.
-// isInputName is case-sensitive like the directory scan, so an upper-case "X.MBOX.ZIP" is
-// not an input here either.
+// A disc image (.iso, .cdr, .sqsh, .img; isDiscImage, case-insensitive) is supported: it is
+// unpacked with the 7z program and read as a news spool. Every other name has to pass both
+// halves of the importer's own rule: isInputName (the rule of the directory scan in
+// inputs.go) and a suffix openSource has a reader for (iaReadableSuffixes or a UAT archive)
+// — isInputName only looks for ".mbox"/".bag" anywhere in the name, so a mirror file like
+// "x.mbox.bz2" or "x.mbox.zst" would pass it and then fail to open. isInputName is
+// case-sensitive like the directory scan, so an upper-case "X.MBOX.ZIP" is not an input
+// here either (an upper-case "F.ISO" is, because a disc image is decided case-insensitively).
 func iafetchSupported(name string) (bool, string) {
 	base := filepath.Base(filepath.FromSlash(name))
+	if isDiscImage(base) && !strings.HasSuffix(strings.ToLower(base), ".done") {
+		// isDiscImage ignores a trailing ".done" (a positional input can be imported
+		// again), but a ".done" name in the mirror is not an input, as for an mbox. The
+		// check is case-insensitive like isDiscImage itself ("CD1.ISO.DONE").
+		return true, ""
+	}
 	if isInputName(base) && iafetchReadable(base) {
 		return true, ""
 	}

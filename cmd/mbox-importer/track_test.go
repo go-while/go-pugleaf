@@ -298,6 +298,8 @@ func TestMboxTrackFinishStatus(t *testing.T) {
 	errs.Errors = 2
 	commit := newCounters("/c")
 	commit.CommitFailed = true
+	fileErrs := newCounters("/fe")
+	fileErrs.FileErrors = 2 // unreadable spool files do not block done
 	cases := []struct {
 		path       string
 		c          *counters
@@ -312,6 +314,7 @@ func TestMboxTrackFinishStatus(t *testing.T) {
 		{"/notopened", nil, false, false, trackFailed, "not opened"},
 		{"/e", errs, false, false, trackFailed, "article error"},
 		{"/c", commit, false, false, trackFailed, "commit"},
+		{"/fe", fileErrs, false, false, trackDone, "unreadable"},
 	}
 	for _, tc := range cases {
 		in := plannedInput{Path: tc.path, Source: sourceCLI, Supported: true}
