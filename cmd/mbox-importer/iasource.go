@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	_ "github.com/mattn/go-sqlite3" // SQLite3 driver ("sqlite3"), as the other cmd/ tools use it
 )
@@ -61,6 +62,9 @@ var iaUnsupportedSuffixes = map[string]string{
 	".torrent": "torrent",
 }
 
+// iafetchStatWorkers is the number of files a scan stats at the same time (iafetchInputs).
+const iafetchStatWorkers = 32
+
 // iafetchFilesQuery lists every file iafetch recorded, in the order the items were
 // selected: items.ord, then identifier and name. Files whose item has no items row, or an
 // items row without an ord, come last (by identifier and name); the status of the item is
@@ -83,9 +87,10 @@ const iafetchFilesQuery = `SELECT files.identifier, files.name, files.size, file
 // iaReasonSizeChanged, both iafetchPending: worth another look on the next scan). The size
 // is only compared when iafetch recorded one (> 0; it stores -1 for an unknown and 0 for an
 // empty file), and when it did not, Size is taken from disk. MD5 comes from the DB, Mtime
-// from disk (0 when the file is missing or cannot be stat'ed).
+// from disk (0 when the file is missing or cannot be stat'ed). An unsupported name is never
+// stat'ed (it is never imported); the supported ones are stat'ed iafetchStatWorkers at a time.
 //
-// The DB is opened read-only with one short query; it is closed before the call returns.
+// The DB is opened read-only with one short query; it is closed before the stats start.
 func iafetchInputs(dbPath, base string) ([]plannedInput, error) {
 	if dbPath == "" {
 		return nil, errors.New("iafetch DB: no path given")
@@ -103,21 +108,50 @@ func iafetchInputs(dbPath, base string) ([]plannedInput, error) {
 	}
 	defer rows.Close()
 
-	var inputs []plannedInput
+	type filesRow struct {
+		identifier, name, md5, path string
+		size                        int64
+	}
+	var recs []filesRow
 	for rows.Next() {
-		var identifier, name, md5, path string
-		var size int64
-		if err := rows.Scan(&identifier, &name, &size, &md5, &path); err != nil {
+		var r filesRow
+		if err := rows.Scan(&r.identifier, &r.name, &r.size, &r.md5, &r.path); err != nil {
 			return nil, fmt.Errorf("iafetch DB %q: %w", dbPath, err)
 		}
-		in, err := iafetchInput(identifier, name, size, md5, path, base)
-		if err != nil {
-			return nil, err
-		}
-		inputs = append(inputs, in)
+		recs = append(recs, r)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iafetch DB %q: %w", dbPath, err)
+	}
+	_ = rows.Close()
+	_ = db.Close() // the query is done: iafetch's DB is not held during the stats
+
+	// The stats are the slow part of a scan: hundreds of thousands of files on a pool that
+	// iafetch is writing to, with a cold metadata cache. They run iafetchStatWorkers at a
+	// time; the order of the inputs stays the query's.
+	inputs := make([]plannedInput, len(recs))
+	errs := make([]error, len(recs))
+	next := make(chan int)
+	var wg sync.WaitGroup
+	for w := 0; w < min(iafetchStatWorkers, len(recs)); w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range next {
+				r := recs[i]
+				inputs[i], errs[i] = iafetchInput(r.identifier, r.name, r.size, r.md5, r.path, base)
+			}
+		}()
+	}
+	for i := range recs {
+		next <- i
+	}
+	close(next)
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			return nil, err // the first bad row in query order
+		}
 	}
 	return iafetchDiscsFirst(inputs), nil
 }
@@ -180,6 +214,9 @@ func iafetchInput(identifier, name string, size int64, md5, recorded, base strin
 		MD5:        strings.ToLower(strings.TrimSpace(md5)),
 	}
 	in.Supported, in.Reason = iafetchSupported(name)
+	if !in.Supported {
+		return in, nil // never imported, so its state on disk does not matter: no stat
+	}
 
 	fi, err := os.Stat(path)
 	switch {
