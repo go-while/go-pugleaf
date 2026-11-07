@@ -38,6 +38,15 @@ func flushDue(queued, maxDBbatch int, interval time.Duration) time.Duration {
 	return max(due, minFlushInterval)
 }
 
+// kick wakes the orchestrator waiting on ch without ever blocking the sender: ch has room for
+// one wake-up, and a pending one already covers this one.
+func kick(ch chan struct{}) {
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
+}
+
 // Cache for placeholder strings to avoid rebuilding them repeatedly
 var placeholderCache sync.Map // map[int]string
 
@@ -148,6 +157,14 @@ type SQ3batch struct {
 	commits  map[string]*commitCounters
 	flushReq atomic.Bool
 
+	// Wake-ups of the orchestrators (cap 1, sent without blocking by BatchDivider): kickFull
+	// when a group's BATCHchan is full (orchestrator 2 writes it now instead of after its
+	// adaptive sleep; while the channel is full the divider, and every producer behind it,
+	// waits), kickVolume each time the total queued crosses another maxDBbatch (orchestrator 1
+	// flushes the small groups then instead of waiting for flushDue).
+	kickFull   chan struct{}
+	kickVolume chan struct{}
+
 	// testAfterInsertCommit, when set (tests only), runs in processOverviewBatch after the
 	// insert transaction committed and before the article numbers are selected; an error it
 	// returns takes the path of a failed SELECT (retry1 with the inserted rows remembered).
@@ -194,6 +211,8 @@ func NewSQ3batch(db *Database) *SQ3batch {
 		LimitChan:          make(chan struct{}, db.dbconfig.MaxDBthreads),
 		LPending:           make(chan struct{}, 1),
 		dividerChan:        make(chan *models.Article, 128),
+		kickFull:           make(chan struct{}, 1),
+		kickVolume:         make(chan struct{}, 1),
 		groupNames:         make(map[string]*string, 128),
 	}
 	batch.orchestrator = NewBatchOrchestrator(batch)
@@ -1772,9 +1791,17 @@ func (o *BatchOrchestrator) StartOrch() {
 	var wgProcessAllBatches sync.WaitGroup
 	ShutDownCounter := DefaultShutDownCounter
 	wantShutdown := false
+	tick := time.NewTimer(minFlushInterval)
+	defer tick.Stop()
+	kicked := false // BatchDivider reported another maxDBbatch queued (kickVolume)
 wait:
 	for {
-		time.Sleep(time.Second / 8) // 125 ms
+		tick.Reset(minFlushInterval) // 125 ms, or sooner when kicked
+		select {
+		case <-o.batch.kickVolume:
+			kicked = true
+		case <-tick.C:
+		}
 	nosleep:
 		if o.batch.db.IsDBshutdown() {
 			if ShutDownCounter == DefaultShutDownCounter || ShutDownCounter%10 == 0 {
@@ -1803,7 +1830,9 @@ wait:
 			queued := o.batch.queued
 			o.batch.GMux.RUnlock()
 			due := flushDue(queued, o.batch.maxDBbatch, o.BatchInterval)
-			if (queued > 0 && time.Since(lastFlush) > due) || time.Since(lastFlush) > o.BatchInterval || o.batch.flushReq.Swap(false) {
+			volume := kicked && queued >= o.batch.maxDBbatch
+			kicked = false
+			if volume || (queued > 0 && time.Since(lastFlush) > due) || time.Since(lastFlush) > o.BatchInterval || o.batch.flushReq.Swap(false) {
 				lastFlush = time.Now()
 				//log.Printf("[ORCHESTRATOR1] Timer triggered - processing all pending batches smaller than sq.maxDBbatch")
 			loop:
@@ -1826,9 +1855,16 @@ func (o *BatchOrchestrator) StartOrchestrator() {
 	ShutDownCounter := DefaultShutDownCounter
 	wantShutdown := false
 	newSleep := sleep
+	wake := time.NewTimer(time.Duration(sleep/2) * time.Microsecond)
+	defer wake.Stop()
 	for {
 		// Sleep briefly to avoid busy waiting
-		time.Sleep(time.Duration(sleep/2) * time.Microsecond)
+		// the adaptive sleep, cut short when a group's batch is full (kickFull)
+		wake.Reset(time.Duration(sleep/2) * time.Microsecond)
+		select {
+		case <-o.batch.kickFull:
+		case <-wake.C:
+		}
 		// Check all channels for threshold breaches
 		hasWork := o.checkThresholds()
 		//log.Printf("[ORCHESTRATOR2] Current sleep interval: (%d ms) hasWork=%t", sleep, hasWork)
@@ -2012,15 +2048,28 @@ func (sq *SQ3batch) BatchDivider() {
 		// subtract it before it was added.
 		sq.GMux.Lock()
 		sq.queued++
+		volume := sq.queued%sq.maxDBbatch == 0
 		sq.GMux.Unlock()
+		if volume {
+			kick(sq.kickVolume)
+		}
 		select {
 		case tasks.BATCHchan <- article:
-		case <-stop:
-			sq.GMux.Lock()
-			sq.queued--
-			sq.GMux.Unlock()
-			sq.settleArticles(newsgroupPtr, 1, true) // commit barrier: never stored
-			return
+		default:
+			// the group's channel is full: wake orchestrator 2, then wait for room
+			kick(sq.kickFull)
+			select {
+			case tasks.BATCHchan <- article:
+			case <-stop:
+				sq.GMux.Lock()
+				sq.queued--
+				sq.GMux.Unlock()
+				sq.settleArticles(newsgroupPtr, 1, true) // commit barrier: never stored
+				return
+			}
+		}
+		if len(tasks.BATCHchan) >= sq.maxDBbatch {
+			kick(sq.kickFull) // a full batch is waiting: write it now
 		}
 	}
 }
