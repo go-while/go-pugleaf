@@ -568,10 +568,10 @@ func TestMboxDiscMounted(t *testing.T) {
 	tree := dcSpoolTree(t, filepath.Join(dir, "tree"))
 	for _, c := range []struct {
 		tool  string
-		image func() string
+		image func(t *testing.T) string
 	}{
-		{"fuseiso", func() string { return dcMakeISO(t, tree, filepath.Join(dir, "spool.iso")) }},
-		{"squashfuse", func() string {
+		{"fuseiso", func(t *testing.T) string { return dcMakeISO(t, tree, filepath.Join(dir, "spool.iso")) }},
+		{"squashfuse", func(t *testing.T) string {
 			if _, err := exec.LookPath("mksquashfs"); err != nil {
 				t.Skip("mksquashfs not installed")
 			}
@@ -586,7 +586,7 @@ func TestMboxDiscMounted(t *testing.T) {
 			if _, err := exec.LookPath(c.tool); err != nil {
 				t.Skipf("%s not installed", c.tool)
 			}
-			image := c.image()
+			image := c.image(t)
 			tmp := t.TempDir()
 			opts := &runOptions{tmpDir: tmp, discReader: discReaderMount}
 			res := importInputs([]string{image}, opts, newCountingSink(), nil)
