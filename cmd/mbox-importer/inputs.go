@@ -88,12 +88,27 @@ func (t *tailBuffer) String() string {
 }
 
 // isInputName reports whether a directory entry is an input: it does not end in ".done",
-// and its name contains ".mbox" or ".bag", or ends in a UAT suffix (uatSuffix).
+// is not a CSV index (isCSVIndexName), and its name contains ".mbox" or ".bag", or ends in a
+// UAT suffix (uatSuffix).
 func isInputName(name string) bool {
-	if strings.HasSuffix(name, ".done") {
+	if strings.HasSuffix(name, ".done") || isCSVIndexName(name) {
 		return false
 	}
 	return strings.Contains(name, ".mbox") || strings.Contains(name, ".bag") || uatSuffix(name) != ""
+}
+
+// isCSVIndexName reports whether name is a CSV file, plain or compressed (.gz, .zip, .7z):
+// archive.org's Usenet items ship "NAME.mbox.csv.gz" (an index of offsets into
+// NAME.mbox.gz) next to each mbox, and ".mbox" in its name must not make it an input.
+func isCSVIndexName(name string) bool {
+	lower := strings.ToLower(name)
+	for _, s := range []string{".gz", ".zip", ".7z"} {
+		if strings.HasSuffix(lower, s) {
+			lower = strings.TrimSuffix(lower, s)
+			break
+		}
+	}
+	return strings.HasSuffix(lower, ".csv")
 }
 
 // expandInputs turns the positional arguments into the list of files to import:
