@@ -761,6 +761,14 @@ The A-news header is rebuilt from the batch: `Path` and `From: <site>!<user>` fr
 `Newsgroups`, `Subject` from the title and `Date` from the ctime line (converted to RFC 5322,
 `+0000`).
 
+Early B-news (1981-83) also names two fields differently, and the importer fills in the
+standard ones, keeping the originals:
+
+- no `Subject` but a `Title:` → `Subject:` with the Title's text (about 39,000 articles of the
+  utzoo tapes would otherwise be skipped as `no-subject`);
+- no `Date` but `Posted:`, `Date-Received:`, `NNTP-Posting-Date:` or `Injection-Date:` (first
+  one found, a full date in ctime or RFC 822/5322 form, 1980 or later) → `Date:` in RFC 5322.
+
 ### Analyse every image before importing it
 
 A dry run opens no database, stores nothing and renames nothing, but it unpacks the image and walks

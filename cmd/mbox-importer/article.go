@@ -319,9 +319,11 @@ func hasNonBlankContinuation(head []string, i int) bool {
 // a header with an empty value and no continuation is dropped; "Key:value" and
 // "Key :value" become "Key: value"; every Message-ID header is replaced by one
 // "Message-ID: <msgid>" line at the position of the first (appended when there is none).
-// More than maxHeaderLines lines or no Subject skip the article; an article without a Date
-// header gets one from a B-news date field when it has a readable one (fallbackDateLine),
-// else it is skipped as no-date.
+// More than maxHeaderLines lines skip the article. An article without a Subject header gets
+// one from the "Title:" field of early B-news (1981-83, as on the utzoo tapes), else it is
+// skipped as no-subject; an article without a Date header gets one from a B-news date field
+// when it has a readable one (fallbackDateLine), else it is skipped as no-date. The Title and
+// date fields stay in the header block.
 func rewriteHead(msgid string, head []string) (newhead []string, reason skipReason) {
 	if len(head) > maxHeaderLines {
 		return nil, skipTooManyHeaders
@@ -400,7 +402,12 @@ func rewriteHead(msgid string, head []string) (newhead []string, reason skipReas
 	}
 
 	if !hasSubject {
-		return nil, skipNoSubject
+		title, _ := headerField(head, "Title")
+		title = strings.TrimSpace(cleanHeadline(title))
+		if title == "" {
+			return nil, skipNoSubject
+		}
+		newhead = append(newhead, "Subject: "+title)
 	}
 	if !hasDate {
 		line, ok := fallbackDateLine(head)

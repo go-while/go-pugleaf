@@ -3,6 +3,7 @@ package main
 import (
 	"io"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -668,5 +669,62 @@ func TestMboxArtArticleIDFallback(t *testing.T) {
 	}
 	if !strings.Contains(art.HeadersJSON, "Article-I.D.: decvax.123") {
 		t.Errorf("stored block lost the Article-I.D. line:\n%s", art.HeadersJSON)
+	}
+}
+
+// TestMboxArtTitleFallback: early B-news (utzoo news005f2/b13/general/86.txt, verbatim
+// header) has "Title:" instead of "Subject:" and "Posted:" instead of "Date:". The article
+// is stored with a Subject from the Title, a Date from Posted and <bnews.utzoo.2932>; the
+// Title line stays. Without Title and Subject it is still skipped as no-subject, and a
+// real Subject wins over a Title.
+func TestMboxArtTitleFallback(t *testing.T) {
+	head := []string{
+		"From: utzoo!doc",
+		"Newsgroups: general",
+		"Title: Beginner's Course on UNIX ",
+		"Article-I.D.: utzoo.2932",
+		"Posted: Wed Apr 27 09:49:47 1983",
+		"Received: Wed Apr 27 09:49:47 1983",
+	}
+	c := newCounters("utzoo.2932")
+	sink := newCaptureSink()
+	handleLines(c, head, []string{"We will be offering a beginner's course on UNIX."}, false, &runOptions{}, sink)
+	art := sink.arts["<bnews.utzoo.2932>"]
+	if art == nil {
+		t.Fatalf("not stored: skipped=%s", c.skippedDetail())
+	}
+	lines := strings.Split(art.HeadersJSON, "\n")
+	for _, want := range []string{"Subject: Beginner's Course on UNIX", "Title: Beginner's Course on UNIX ", // the Title line stays verbatim
+		"Date: Wed, 27 Apr 1983 09:49:47 +0000", "Message-ID: <bnews.utzoo.2932>"} {
+		if !slices.Contains(lines, want) {
+			t.Errorf("stored block has no %q:\n%s", want, art.HeadersJSON)
+		}
+	}
+	if _, err := common.CheckHeaderBlock(lines, common.HeaderBlockFetch); err != nil {
+		t.Errorf("CheckHeaderBlock: %v", err)
+	}
+
+	// neither Subject nor a usable Title: no-subject
+	for _, title := range []string{"", "Title:", "Title:   "} {
+		h := []string{"From: utzoo!doc", "Newsgroups: general", "Date: 6 Dec 90 14:06:05 GMT", "Message-ID: <a@b>"}
+		if title != "" {
+			h = append(h, title)
+		}
+		if _, reason := rewriteHead("<a@b>", h); reason != skipNoSubject {
+			t.Errorf("title %q: reason %v, want no-subject", title, reason)
+		}
+	}
+
+	// a Subject wins, no second Subject line is added
+	h := []string{"Subject: real", "Title: other", "Newsgroups: general", "Date: 6 Dec 90 14:06:05 GMT"}
+	got, reason := rewriteHead("<a@b>", h)
+	n := 0
+	for _, l := range got {
+		if strings.HasPrefix(l, "Subject:") {
+			n++
+		}
+	}
+	if reason != skipNone || n != 1 || common.HeaderValue(got, "Subject") != "real" {
+		t.Errorf("Subject and Title: %q %v", got, reason)
 	}
 }
