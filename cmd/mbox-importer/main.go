@@ -77,6 +77,7 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		fromIAFetchBase = fs.String("from-iafetch-base", "", "iafetch's working directory: a relative path in its database is resolved against it (needs -from-iafetch)")
 		verifyMD5       = fs.Bool("verify-md5", false, "check the md5 iafetch recorded before an input is imported (needs -from-iafetch)")
 		follow          = fs.Duration("follow", 0, "after the inputs of a scan are done, wait this long and scan again, until a signal stops the run (0 = one scan; needs -from-iafetch)")
+		pprofAddr       = fs.String("pprof", "", "debug: serve net/http/pprof on this address (e.g. 127.0.0.1:6061), with block and mutex profiling on")
 	)
 	fs.Usage = func() { usage(fs) }
 	if err := fs.Parse(args); err != nil {
@@ -89,6 +90,10 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 	if *showHelp {
 		fs.Usage()
 		return 0
+	}
+	if *pprofAddr != "" {
+		stopPprof := startPprof(*pprofAddr)
+		defer stopPprof()
 	}
 	trackPath := trackDBPath(*trackDBFlag, *dataDir)
 	if *statusFlag {
