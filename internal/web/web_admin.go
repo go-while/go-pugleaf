@@ -22,6 +22,7 @@ type SpamArticleInfo struct {
 // AdminPageData represents data for admin page
 type AdminPageData struct {
 	TemplateData
+	Maintenance                   MaintenanceStatus // global FNA/FTA job of the CFG tab
 	Users                         []*models.User
 	UserSearch                    string                     // Added for user search functionality
 	Nonce                         string                     // Added for nonce input in hash search
