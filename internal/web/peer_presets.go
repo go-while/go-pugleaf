@@ -99,3 +99,22 @@ func innPresetForm(pats string) (form string, defaultVar, noBinaryVar bool) {
 	}
 	return pats, false, false
 }
+
+// patternsShortMax is how many characters of a pattern list the peers table shows.
+const patternsShortMax = 60
+
+// patternsShort is a pattern list for the peers table: the preset's name when the list is
+// exactly a newsdeef preset, else the list cut at patternsShortMax characters (the full list
+// is in the cell's title and the edit form).
+func patternsShort(pats string) string {
+	norm := strings.Join(strings.Fields(strings.ReplaceAll(pats, ",", " ")), ",")
+	for _, pr := range peerPatternPresets() {
+		if pr.INN != "" && pr.Patterns == norm {
+			return pr.INN
+		}
+	}
+	if r := []rune(pats); len(r) > patternsShortMax {
+		return string(r[:patternsShortMax]) + "…"
+	}
+	return pats
+}
