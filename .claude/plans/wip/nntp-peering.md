@@ -210,6 +210,39 @@ other's peer (`hosts 127.0.0.1`, path tokens = hostnames), same test group on bo
   cmd/nntp-server adapter and both nntp test fakes, which record `rejected`). peer-acl calls
   `c.server.Processor.RememberReject` for loop and in_patterns refusals.
 
+### Wave 1 — done (merged into plan-nntp-peering)
+- 61f2665 (inline, wave 0 follow-up): ValidatePeer needs hosts or in_username; InsertPeer refuses a
+  login password without a login name.
+- peers-admin `worktree-agent-abca3d5198f613fa4` (e5b8b24, 7c37a40) → merge e73104b, test fix afc0623.
+  /admin/peers is its own page (nav link in admin_modular.html), not an /admin tab. Passwords
+  write-only (empty keeps, clear checkbox), deleting an enabled peer refused, empty number fields keep
+  the stored value, typed UNIQUE check, httpx route table 142. Queue/counter columns show n/a until
+  wave 3 (PeerFeedStats ready). Not done: usermgr-style CLI flags for peers.
+- peer-acl `worktree-agent-a2d5828036dd9a723` (80469a0, 8959fd3, b5f5017) → merge 66d3cfd.
+  PeerRegistry (internal/nntp/nntp-peers.go): no goroutine; peer list cached 30 s (failed read
+  retried after 5 s, query outside the mutex, fail closed), DNS cache 5 min with single flight,
+  NXDOMAIN drops at once, other DNS faults keep the answer 15 min. Peer login sets peer state, not
+  c.authenticated (no POST; with -readauth no reading). 502 when AUTHINFO is impossible
+  (-plaintextauth refuse on plaintext). Path loop keywords only as whole components. Remembered by
+  the NNTP layer: loop, in_patterns, too large, unparsable, Message-ID mismatch. A peer row without
+  path_token is skipped. nntp-peering.go deleted. docs/TRANSFER.md: a go-pugleaf target needs a peers
+  row; scripts/test-nntp-server.sh seeds one. Peers.Invalidate() exists but the web process cannot
+  reach it (edits apply within 30 s).
+- history-rejects `worktree-agent-ae34918d8147ac350` (f37c0ac, 9c9a8df, 3fe1e07, 7b10e44, 6e7a695,
+  44e2f54) → merge 7591a50. Token r<unixday>; parseLocations skips it; accept replaces it. Partial
+  index `<tbl>_rej ... WHERE substr(newsgroups,1,1)='r'` on new tables, created lazily per table by
+  the prune on existing ones. Prune in its own goroutine (1 s tick, 20 ms budget checked before every
+  table/batch), one owner per history dir via flock reject-prune.lock (no-op lock on !unix);
+  expire-news -trim-history prunes without the lock, interruptible. Retention re-read every batch,
+  0 stops the walk; a refused-again id refreshes its day. Processor remembers feed-path
+  CaseError+ErrIntakeRejected (incl. a per-group max_art_size-only refusal on the feed path) and
+  article-level bulk refusals; not POST, not web-queue site posts (Posted:true), not temporary, not
+  duplicates. Bulk path refuses Control (logged once per group per run, cap 4096). history-rebuild
+  -trim skips reject tokens (RejectsSkipped). The bulk path does no history dupe check, so a
+  remembered reject never blocks a fetch/import.
+- Deferred: an index for rejects older than the upgrade is built during the first prune cycle
+  (one CREATE INDEX per step, may exceed 20 ms on HDD; busy_timeout 30 s covers the writer).
+
 ## Open questions (answered 2026-11-08 with the recommendations, user said "run the peering plan")
 1. Control: (a) refuse everywhere now; PGP-verified newgroup/rmgroup is a later plan.
 2. Waves 2-3 stay in this plan.
