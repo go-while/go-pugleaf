@@ -225,6 +225,10 @@ func NewHistory(cfg *HistoryConfig, mainWG *sync.WaitGroup) (*History, error) {
 		mainWG.Add(1)
 	}
 	go h.writerWorker() // mainWG.Done() when finished
+	// the reject prune runs outside the writer goroutine so a cycle never delays a flush
+	// (plan nntp-peering); Close waits for it
+	h.pruneDone = make(chan struct{})
+	go h.pruneWorker()
 	return h, nil
 }
 
@@ -614,6 +618,9 @@ func (h *History) Close() error {
 		if h.writerAlive {
 			<-h.writerDone
 		}
+		if h.pruneDone != nil {
+			<-h.pruneDone // the reject prune releases its lock and stops on closeChan
+		}
 		h.dbClosed.Store(true)
 		if h.db != nil {
 			err = h.db.Close()
@@ -665,9 +672,6 @@ func (h *History) writerWorker() {
 			h.flushBatch(batch)
 			batch = batch[:0]
 		}
-
-		// daily prune of expired rejects, bounded per step (plan nntp-peering)
-		h.pruneRejectStep()
 
 		// check closed BEFORE pending (see enqueue)
 		if !h.closed.Load() || h.pending.Load() != 0 {

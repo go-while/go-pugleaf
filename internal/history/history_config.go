@@ -87,12 +87,15 @@ type History struct {
 	closedWarned atomic.Bool
 
 	// Remembered rejects (plan nntp-peering): the retention in days read through the function
-	// the owner wires (nil = the writer never prunes), the clock of the reject days (nil =
-	// time.Now, replaced by tests) and the state of the daily prune, which belongs to the
-	// writer goroutine alone.
+	// the owner wires (nil = nothing is pruned automatically) and the clock of the reject days
+	// (nil = time.Now, replaced by tests). The prune state, its advisory lock and pruneDone
+	// belong to the prune goroutine alone (pruneWorker); Close waits for pruneDone before it
+	// touches them.
 	rejectDaysFn atomic.Pointer[func() int]
 	clock        atomic.Pointer[func() time.Time]
 	prune        rejectPruneState
+	pruneLock    *os.File      // advisory flock of the prune owner (nil: not held)
+	pruneDone    chan struct{} // closed by the prune goroutine when it stopped
 
 	// Statistics
 	stats historyCounters

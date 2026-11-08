@@ -5,9 +5,15 @@ package history
 // expired rejects. The reject day comes from the injected clock (setClock), never from a sleep.
 
 import (
+	"bytes"
+	"database/sql"
 	"fmt"
+	"log"
+	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -23,6 +29,15 @@ const rejTestClockAhead = 4000
 func rejTestSetDay(h *History, days int) {
 	t := rejTestNow.AddDate(0, 0, days)
 	h.setClock(func() time.Time { return t })
+}
+
+// rejTestFastPrune makes the prune goroutine wake up often, so one cycle over the 4096 tables
+// takes about a second instead of minutes. Must be called before the instance is created.
+func rejTestFastPrune(t *testing.T) {
+	t.Helper()
+	old := rejectPruneTick
+	rejectPruneTick = 5 * time.Millisecond
+	t.Cleanup(func() { rejectPruneTick = old })
 }
 
 // rejTestAddAndWait remembers messageID as rejected and waits for the commit
@@ -115,14 +130,10 @@ func TestRejectRoundTrip(t *testing.T) {
 	if len(batch) != 1 {
 		t.Errorf("LookupLocationsBatch = %v, want only the known id", batch)
 	}
-	// the bulk path must not treat it as a duplicate
-	exists, rejectOnly, err := h.LookupReject(m)
-	if err != nil || !exists || !rejectOnly {
-		t.Errorf("LookupReject = %v, %v, %v; want true, true, nil", exists, rejectOnly, err)
-	}
-	exists, rejectOnly, err = h.LookupReject("<reject-roundtrip-unknown@test.invalid>")
-	if err != nil || exists || rejectOnly {
-		t.Errorf("LookupReject(unknown) = %v, %v, %v; want false, false, nil", exists, rejectOnly, err)
+	// the row is recognisable as a reject from the CSV alone (IsRejectToken is what readers
+	// outside this package use)
+	if !IsRejectToken(rejTestRow(t, dir, m)) {
+		t.Errorf("IsRejectToken(%q) = false", rejTestRow(t, dir, m))
 	}
 	// an empty id is never queued
 	h.AddReject("")
@@ -158,10 +169,6 @@ func TestRejectRefreshAndAccept(t *testing.T) {
 		}
 		if ids := histTestGroups(t, h, m); !reflect.DeepEqual(ids, []int64{5}) {
 			t.Fatalf("LookupGroups = %v, want [5]", ids)
-		}
-		_, rejectOnly, err := h.LookupReject(m)
-		if err != nil || rejectOnly {
-			t.Fatalf("LookupReject rejectOnly = %v, %v; want false, nil", rejectOnly, err)
 		}
 	})
 
@@ -281,16 +288,17 @@ func TestRejectPruneManyBatches(t *testing.T) {
 	}
 }
 
-func TestRejectWriterPrune(t *testing.T) {
+func TestRejectBackgroundPrune(t *testing.T) {
+	rejTestFastPrune(t)
 	h, dir := histTestNew(t, nil)
 	h.SetRejectDaysFunc(func() int { return 30 })
 	const m = "<reject-writer-prune@test.invalid>"
 	rejTestSetDay(h, -40)
 	rejTestAddAndWait(t, h, m)
 
-	// The writer schedules its first cycle rejectPruneFirstDelay after its start, measured on
-	// the clock it saw then (the real one until the test replaced it): a clock far enough ahead
-	// of both is past that schedule without any sleep.
+	// The prune goroutine schedules its first cycle rejectPruneFirstDelay after its start,
+	// measured on the clock it saw then (the real one until the test replaced it): a clock far
+	// enough ahead of both is past that schedule without any sleep.
 	rejTestSetDay(h, rejTestClockAhead)
 	deadline := time.Now().Add(testWait)
 	for {
@@ -298,16 +306,16 @@ func TestRejectWriterPrune(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("the writer did not prune the expired reject")
+			t.Fatalf("the prune goroutine did not remove the expired reject")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	if ok, err := h.Exists(m); err != nil || ok {
-		t.Errorf("Exists = %v, %v; want false (pruned by the writer)", ok, err)
+		t.Errorf("Exists = %v, %v; want false (pruned in the background)", ok, err)
 	}
 }
 
-func TestRejectWriterPruneKeepsRejectsWithoutRetention(t *testing.T) {
+func TestRejectBackgroundPruneKeepsRejectsWithoutRetention(t *testing.T) {
 	h, dir := histTestNew(t, nil)
 	const m = "<reject-writer-keep@test.invalid>"
 	rejTestSetDay(h, -400)
@@ -319,7 +327,7 @@ func TestRejectWriterPruneKeepsRejectsWithoutRetention(t *testing.T) {
 		histTestWaitIdle(t, h)
 	}
 	if _, found := histTestRawRow(t, dir, m); !found {
-		t.Fatalf("the writer pruned a reject although no retention is wired")
+		t.Fatalf("a reject was pruned although no retention is wired")
 	}
 }
 
@@ -333,10 +341,6 @@ func TestRejectDisabledHistory(t *testing.T) {
 	h.AddReject("<reject-disabled@test.invalid>")
 	if ok, err := h.Exists("<reject-disabled@test.invalid>"); err != nil || ok {
 		t.Errorf("Exists = %v, %v; want false, nil", ok, err)
-	}
-	exists, rejectOnly, err := h.LookupReject("<reject-disabled@test.invalid>")
-	if err != nil || exists || rejectOnly {
-		t.Errorf("LookupReject = %v, %v, %v; want false, false, nil", exists, rejectOnly, err)
 	}
 	if n, err := h.PruneRejects(30, nil); err != nil || n != 0 {
 		t.Errorf("PruneRejects = %d, %v; want 0, nil", n, err)
@@ -353,5 +357,137 @@ func TestRejectDeleteQuery(t *testing.T) {
 	}
 	if !strings.Contains(q, sqlRejectOnlyRow) {
 		t.Errorf("query without the reject-only condition: %q", q)
+	}
+}
+
+// TestRejectPartialIndex: every table carries the partial index over the reject tokens, the
+// expired-reject select uses it, and the prune re-creates it on an index written before this
+// plan (lazily, one table per step).
+func TestRejectPartialIndex(t *testing.T) {
+	h, dir := histTestNew(t, nil)
+	raw := rejTestRawDB(t, dir, 0)
+
+	if !rejTestIndexExists(t, raw, "_00") {
+		t.Fatalf("a newly created table has no reject index")
+	}
+	plan := rejTestQueryPlan(t, raw, fmt.Sprintf(sqlSelectExpiredRejects, "_00"), 1, pruneRejectBatch)
+	if !strings.Contains(plan, "_00_rej") {
+		t.Errorf("the expired-reject select does not use the partial index:\n%s", plan)
+	}
+
+	// an index written before this plan has no reject index: the prune creates it
+	if _, err := raw.Exec("DROP INDEX _00_rej"); err != nil {
+		t.Fatalf("DROP INDEX: %v", err)
+	}
+	if rejTestIndexExists(t, raw, "_00") {
+		t.Fatalf("the reject index is still there after DROP INDEX")
+	}
+	if _, err := h.PruneRejectsBefore(unixDay(rejTestNow), nil); err != nil {
+		t.Fatalf("PruneRejectsBefore: %v", err)
+	}
+	if !rejTestIndexExists(t, raw, "_00") {
+		t.Errorf("the prune walk did not create the reject index of _00")
+	}
+}
+
+// rejTestRawDB opens one history database file with its own connection
+func rejTestRawDB(t *testing.T, dir string, dbIndex int) *sql.DB {
+	t.Helper()
+	path := filepath.Join(dir, fmt.Sprintf("hashdb_%x.sqlite3", dbIndex))
+	db, err := sql.Open(historyDriverName, path+"?_busy_timeout=5000")
+	if err != nil {
+		t.Fatalf("open %s: %v", path, err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return db
+}
+
+func rejTestIndexExists(t *testing.T, db *sql.DB, tableName string) bool {
+	t.Helper()
+	var n int
+	err := db.QueryRow("SELECT count(*) FROM sqlite_master WHERE type='index' AND name=?", tableName+"_rej").Scan(&n)
+	if err != nil {
+		t.Fatalf("sqlite_master: %v", err)
+	}
+	return n == 1
+}
+
+func rejTestQueryPlan(t *testing.T, db *sql.DB, query string, args ...any) string {
+	t.Helper()
+	rows, err := db.Query("EXPLAIN QUERY PLAN "+query, args...)
+	if err != nil {
+		t.Fatalf("EXPLAIN QUERY PLAN: %v", err)
+	}
+	defer rows.Close()
+	var plan strings.Builder
+	for rows.Next() {
+		var id, parent, notused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+			t.Fatalf("scan plan: %v", err)
+		}
+		plan.WriteString(detail + "\n")
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("plan rows: %v", err)
+	}
+	return plan.String()
+}
+
+// rejTestLogBuf captures the standard logger (the prune goroutine logs from its own goroutine)
+type rejTestLogBuf struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (l *rejTestLogBuf) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.Write(p)
+}
+
+func (l *rejTestLogBuf) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.String()
+}
+
+func rejTestCaptureLog(t *testing.T) *rejTestLogBuf {
+	t.Helper()
+	l := &rejTestLogBuf{}
+	prev := log.Writer()
+	log.SetOutput(l)
+	t.Cleanup(func() { log.SetOutput(prev) })
+	return l
+}
+
+// TestRejectBackgroundPruneStopsAtZeroRetention: the retention is read again before every batch,
+// so setting HistoryRejectDays to 0 ends the running walk and keeps the remaining rejects.
+func TestRejectBackgroundPruneStopsAtZeroRetention(t *testing.T) {
+	rejTestFastPrune(t)
+	logs := rejTestCaptureLog(t)
+	h, _ := histTestNew(t, nil)
+	// 30 days when the cycle starts, 0 from the first batch on
+	var calls atomic.Int64
+	h.SetRejectDaysFunc(func() int {
+		if calls.Add(1) == 1 {
+			return 30
+		}
+		return 0
+	})
+	const m = "<reject-zero-retention@test.invalid>"
+	rejTestSetDay(h, -40)
+	rejTestAddAndWait(t, h, m)
+	rejTestSetDay(h, rejTestClockAhead)
+
+	deadline := time.Now().Add(testWait)
+	for !strings.Contains(logs.String(), "retention is 0") {
+		if time.Now().After(deadline) {
+			t.Fatalf("the walk did not stop on a retention of 0:\n%s", logs.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if ok, err := h.Exists(m); err != nil || !ok {
+		t.Errorf("Exists = %v, %v; want true (the stopped walk keeps the reject)", ok, err)
 	}
 }
