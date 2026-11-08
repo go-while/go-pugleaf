@@ -162,6 +162,9 @@ type hServerOpts struct {
 	// Hostname is Config.Hostname, the server's Path identity ("" = none, so no Path is
 	// written and POST is refused).
 	Hostname string
+	// MaxArtSize is Config.NNTP.MaxArtSize (0: the config default). It is set before
+	// Serve, so no connection goroutine can see the write.
+	MaxArtSize int
 }
 
 // hServer wraps a running NNTPServer bound to 127.0.0.1:0.
@@ -181,6 +184,7 @@ func newTestServer(t *testing.T, opts hServerOpts) *hServer {
 	t.Helper()
 	db := hTestDB(t)
 	cfg := &config.ServerConfig{Hostname: opts.Hostname}
+	cfg.NNTP.MaxArtSize = opts.MaxArtSize
 	cfg.NNTP.MaxConns = opts.MaxConns
 	if cfg.NNTP.MaxConns <= 0 {
 		cfg.NNTP.MaxConns = 100

@@ -153,6 +153,7 @@ func (c *ClientConnection) handleIHave(args []string) error {
 		log.Printf("[NNTP] IHAVE %s: article too large to drain, closing the connection", messageID)
 		return c.closeAfterReply(400, "Article too large, closing connection")
 	case errors.Is(err, ErrArticleTooLarge):
+		c.rememberReject(messageID) // permanent for this article (plan nntp-peering)
 		c.rateLimitOnError()
 		return c.sendResponse(437, "Rejected (article too large)")
 	case err != nil:
@@ -162,7 +163,7 @@ func (c *ClientConnection) handleIHave(args []string) error {
 	// the id is remembered as rejected, so the peer stops offering it (plan nntp-peering).
 	if reason := c.feedCheck(head); reason != "" {
 		log.Printf("[NNTP-PEER] IHAVE %s from peer %q refused: %s", messageID, c.peerName(), reason)
-		c.server.Processor.RememberReject(messageID)
+		c.rememberReject(messageID)
 		return c.sendResponse(437, "Rejected ("+reason+")")
 	}
 	head = c.feedPath(head)
@@ -170,11 +171,13 @@ func (c *ClientConnection) handleIHave(args []string) error {
 	article, err := c.buildIncomingArticle(head, body)
 	if err != nil {
 		log.Printf("[NNTP] IHAVE %s: invalid article: %v", messageID, err)
+		c.rememberReject(messageID)
 		c.rateLimitOnError()
 		return c.sendResponse(437, "Rejected (invalid article)")
 	}
 	if !reconcileMessageID(article, messageID) {
 		log.Printf("IHAVE message-id mismatch: command '%s' article '%s'", messageID, article.MessageID)
+		c.rememberReject(messageID)
 		return c.sendResponse(437, "Rejected (Message-ID mismatch)")
 	}
 
@@ -271,6 +274,7 @@ func (c *ClientConnection) handleTakeThis(args []string) error {
 		return reply(439, "Rejected (invalid message-id)")
 	}
 	if tooLarge {
+		c.rememberReject(id) // permanent for this article (plan nntp-peering)
 		c.rateLimitOnError()
 		return reply(439, "Rejected (article too large)")
 	}
@@ -290,7 +294,7 @@ func (c *ClientConnection) handleTakeThis(args []string) error {
 	// Loop and in_patterns, as in IHAVE (plan nntp-peering)
 	if reason := c.feedCheck(head); reason != "" {
 		log.Printf("[NNTP-PEER] TAKETHIS %s from peer %q refused: %s", id, c.peerName(), reason)
-		c.server.Processor.RememberReject(id)
+		c.rememberReject(id)
 		return reply(439, "Rejected ("+reason+")")
 	}
 	head = c.feedPath(head)
@@ -298,10 +302,12 @@ func (c *ClientConnection) handleTakeThis(args []string) error {
 	article, err := c.buildIncomingArticle(head, body)
 	if err != nil {
 		log.Printf("Failed to parse TAKETHIS article data: %v", err)
+		c.rememberReject(id)
 		return reply(439, "Rejected (invalid article)")
 	}
 	if !reconcileMessageID(article, id) {
 		log.Printf("TAKETHIS message-id mismatch: command '%s' article '%s'", id, article.MessageID)
+		c.rememberReject(id)
 		return reply(439, "Transfer failed (Message-ID mismatch)")
 	}
 

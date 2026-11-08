@@ -113,6 +113,12 @@ q "INSERT INTO newsgroups(name,description,last_article,message_count,active,hie
 q "INSERT INTO newsgroups(name,description,last_article,message_count,active,hierarchy,status,low_water,high_water)
    VALUES('e2e.intake.gen','',0,0,1,'e2e','y',1,0),('e2e.intake.mod','',0,0,1,'e2e','m',1,0)" \
   || setup_fail "seeding the intake groups in $DB failed"
+# 2b. the peer: since plan nntp-peering only a peer may feed (IHAVE/CHECK/TAKETHIS/MODE STREAM),
+#     so the steps N09/N10/N44/N46/N55 need this row. It matches 127.0.0.1 without a login, and
+#     its path_token is the leftmost Path element the test articles write (no .MISMATCH).
+q "INSERT INTO peers(name,path_token,hosts,in_patterns,max_conns,enabled)
+   VALUES('e2e-peer','e2e.client.invalid','127.0.0.1','*',4,1)" \
+  || setup_fail "seeding the peer in $DB failed"
 # 3. the posting user (nntpmgr no longer echoes a given password: N28 checks it; scratch data only)
 ( cd "$RUN" && exec "$MGR_ABS" -data "$DATA_ABS" -create -username "$E2E_USER" -password "$E2E_PASS" -posting -maxconns 4 ) \
   >"$DATA/nntpmgr.log" 2>&1 || setup_fail "nntpmgr -create failed: $(tail -3 "$DATA/nntpmgr.log")"

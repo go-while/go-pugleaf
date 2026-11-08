@@ -446,6 +446,13 @@ func TestIntkPathLoop(t *testing.T) {
 		{"peer.invalid!news.intk.invalid.SEEN.192.0.2.1!origin.invalid", true},
 		{"peer.invalid!other.news.intk.invalid!origin.invalid", false},
 		{"peer.invalid!news.intk.invalid.example!origin.invalid", false},
+		// only a whole ".SEEN"/".MISMATCH"/".POSTED" component is a keyword suffix
+		{"peer.invalid!news.intk.invalid.seenix.example!origin.invalid", false},
+		{"peer.invalid!news.intk.invalid.mismatched!origin.invalid", false},
+		{"peer.invalid!news.intk.invalid.postedly!origin.invalid", false},
+		{"peer.invalid!news.intk.invalid.seen!origin.invalid", true},
+		{"peer.invalid!news.intk.invalid.SEEN.192.0.2.1!origin.invalid", true},
+		{"peer.invalid!news.intk.invalid.posted!origin.invalid", true},
 	} {
 		if got := pathHasIdentity(tc.path, host); got != tc.want {
 			t.Errorf("pathHasIdentity(%q, %q) = %v, want %v", tc.path, host, got, tc.want)
@@ -453,6 +460,24 @@ func TestIntkPathLoop(t *testing.T) {
 	}
 	if pathHasIdentity("news.intk.invalid!not-for-mail", "") {
 		t.Error("an empty identity must never be a loop")
+	}
+	for _, tc := range []struct{ element, want string }{
+		{"", ""},
+		{"ours", "ours"},
+		{"ours.MISMATCH", "ours"},
+		{"ours.mismatch", "ours"},
+		{"ours.SEEN.192.0.2.1", "ours"},
+		{".POSTED", ""},
+		{"ours.POSTED", "ours"},
+		{"ours.seenix.example", "ours.seenix.example"},
+		{"ours.mismatched", "ours.mismatched"},
+		{"ours.postedly", "ours.postedly"},
+		{"seen.example", "seen.example"}, // a keyword must follow a dot
+		{" ours.SEEN ", "ours"},
+	} {
+		if got := pathElementHost(tc.element); got != tc.want {
+			t.Errorf("pathElementHost(%q) = %q, want %q", tc.element, got, tc.want)
+		}
 	}
 }
 

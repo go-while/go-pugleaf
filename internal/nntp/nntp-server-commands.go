@@ -73,9 +73,15 @@ func (c *ClientConnection) feedAllowed() bool {
 
 // feedDeniedCode is the reply code for a feed command on a connection that may not
 // feed: 480 while a peer login could still help (an enabled peer with a login whose
-// hosts hold this address, or that has no hosts, and no AUTHINFO yet), else 502.
+// hosts hold this address, or that has no hosts, no AUTHINFO yet, and AUTHINFO is
+// possible on this connection at all), else 502. Asking for authentication that this
+// connection cannot send would leave the peer with nothing to try (RFC 4643 §2.2:
+// a plaintext connection may be refused outright).
 func (c *ClientConnection) feedDeniedCode() int {
 	if c.server == nil || c.loggedIn() {
+		return 502
+	}
+	if !c.isTLS && c.server.PlaintextAuth == PlaintextAuthRefuse {
 		return 502
 	}
 	if c.server.Peers.LoginPossible(c.remoteIP()) {

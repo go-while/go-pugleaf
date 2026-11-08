@@ -14,6 +14,7 @@ package nntp
 
 import (
 	"context"
+	"errors"
 	"log"
 	"net"
 	"strings"
@@ -29,11 +30,22 @@ import (
 const (
 	// peerListTTL is how long the enabled-peer list is reused before it is read again.
 	peerListTTL = 30 * time.Second
+	// peerListErrorTTL is the shorter window after a failed read: the main DB may be
+	// locked for a moment, but a failing read must not run on every connection.
+	peerListErrorTTL = 5 * time.Second
+	// peerLogEvery rate-limits the "cannot read"/"cannot resolve" log lines, so a lasting
+	// fault costs one line per minute instead of one per connection.
+	peerLogEvery = time.Minute
 	// peerDNSTTL is how long a resolved hosts entry is reused.
 	peerDNSTTL = 5 * time.Minute
-	// peerDNSRetry bounds how often one host name is resolved again after a miss, so an
-	// address that matches no peer cannot turn into one DNS lookup per connection.
+	// peerDNSRetry bounds how often one host name is resolved again after a miss, and is
+	// also the single-flight window: while one resolution runs (or just ran) every other
+	// connection answers from the cached addresses instead of resolving too.
 	peerDNSRetry = 10 * time.Second
+	// peerDNSGrace is how long the last successful answer still decides a match while the
+	// resolver keeps failing. An authoritative "no such host" is not a failure: it clears
+	// the addresses at once.
+	peerDNSGrace = 3 * peerDNSTTL
 	// peerDNSTimeout bounds one resolution, so a command never waits long on DNS.
 	peerDNSTimeout = 2 * time.Second
 )
@@ -50,9 +62,11 @@ type PeerStore interface {
 
 // peerDNSEntry is one cached hosts host name.
 type peerDNSEntry struct {
-	ips        []net.IP  // the addresses of the last successful resolution
-	resolvedAt time.Time // when that resolution happened (zero: never)
-	triedAt    time.Time // when a resolution was last attempted (also on failure)
+	ips         []net.IP  // the addresses of the last successful resolution
+	resolvedAt  time.Time // when that resolution happened (zero: none known)
+	triedAt     time.Time // when a resolution was last started (also when it failed)
+	resolving   bool      // a resolution of this name is running right now
+	errLoggedAt time.Time
 }
 
 // PeerRegistry answers "is this connection a peer?" from the peers table. Its methods are
@@ -60,12 +74,15 @@ type peerDNSEntry struct {
 type PeerRegistry struct {
 	store PeerStore
 
-	mu       sync.Mutex
-	peers    []*models.Peer // the last loaded enabled peers (read-only for callers)
-	loaded   bool
-	loadedAt time.Time
-	names    string // the loaded peer names, to log only real changes
-	dns      map[string]*peerDNSEntry
+	mu          sync.Mutex
+	peers       []*models.Peer // the last successfully loaded usable peers (read-only)
+	loadedAt    time.Time      // when the last read was attempted, successful or not
+	loadFailed  bool           // that attempt failed: retry after peerListErrorTTL
+	loading     bool           // a read is running; other callers use the last good list
+	errLoggedAt time.Time      // rate limit of the read-error log line
+	names       string         // the loaded peer names, to log only real changes
+	skipped     string         // the names skipped as unusable, likewise
+	dns         map[string]*peerDNSEntry
 
 	// Injection points for the tests (same package). resolve and now are never nil after
 	// NewPeerRegistry.
@@ -93,37 +110,63 @@ func (r *PeerRegistry) Invalidate() {
 		return
 	}
 	r.mu.Lock()
-	r.loaded = false
+	r.loadFailed = false
+	r.loadedAt = time.Time{}
 	r.mu.Unlock()
 }
 
-// Enabled returns the enabled peers, reading the table again when the cache is stale. The
-// result and the peers it holds are shared and read-only (a startup log line, the admin UI).
+// Enabled returns the enabled peers, reading the table again when the cache is stale, as a
+// new slice (a startup log line, the admin UI). The models.Peer values it points at are
+// shared with the live registry and must only be read.
 func (r *PeerRegistry) Enabled() []*models.Peer {
-	return r.enabledPeers()
+	peers := r.enabledPeers()
+	if len(peers) == 0 {
+		return nil
+	}
+	return append(make([]*models.Peer, 0, len(peers)), peers...)
 }
 
-// enabledPeers returns the cached enabled peers, reloading them when the cache is older than
-// peerListTTL. The result and the peers it holds are shared: callers only read them. A failed
-// read keeps the previous list and is retried after peerListTTL.
+// enabledPeers returns the cached usable peers, reading the table again when the cache is
+// stale (peerListTTL, or peerListErrorTTL after a failed read). The returned slice and the
+// peers it holds are shared: callers only read them. The read runs outside the mutex, and
+// only one at a time: every other caller meanwhile answers from the last good list (nil
+// until the first successful read, so nothing may feed until the table could be read).
 func (r *PeerRegistry) enabledPeers() []*models.Peer {
 	if r == nil || r.store == nil {
 		return nil
 	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	now := r.now()
-	if r.loaded && now.Sub(r.loadedAt) < peerListTTL {
+	ttl := peerListTTL
+	if r.loadFailed {
+		ttl = peerListErrorTTL
+	}
+	if r.loading || (!r.loadedAt.IsZero() && now.Sub(r.loadedAt) < ttl) {
+		peers := r.peers
+		r.mu.Unlock()
+		return peers
+	}
+	r.loading = true
+	r.mu.Unlock()
+
+	peers, err := r.store.GetEnabledPeers()
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.loading = false
+	r.loadedAt = r.now()
+	if err != nil {
+		r.loadFailed = true
+		if r.errLoggedAt.IsZero() || r.loadedAt.Sub(r.errLoggedAt) >= peerLogEvery {
+			r.errLoggedAt = r.loadedAt
+			log.Printf("[NNTP-PEER] cannot read the peer list, keeping %d known peer(s): %v", len(r.peers), err)
+		}
 		return r.peers
 	}
-	peers, err := r.store.GetEnabledPeers()
-	r.loadedAt = now
-	if err != nil {
-		log.Printf("[NNTP-PEER] failed to read the peer list: %v", err)
-		return r.peers // nil until the first successful read
-	}
-	r.peers, r.loaded = peers, true
-	if names := peerNames(peers); names != r.names {
+	r.loadFailed = false
+	usable, skipped := peerUsable(peers)
+	r.peers = usable
+	if names := peerNames(usable); names != r.names {
 		r.names = names
 		if names == "" {
 			log.Printf("[NNTP-PEER] no enabled peers: nothing may feed this server")
@@ -131,10 +174,33 @@ func (r *PeerRegistry) enabledPeers() []*models.Peer {
 			log.Printf("[NNTP-PEER] enabled peers: %s", names)
 		}
 	}
+	if names := peerNames(skipped); names != r.skipped {
+		r.skipped = names
+		if names != "" {
+			log.Printf("[NNTP-PEER] peer(s) ignored, no path_token in their row: %s", names)
+		}
+	}
 	return r.peers
 }
 
-// peerNames joins the peer names for the log line of enabledPeers.
+// peerUsable splits the loaded peers into the ones that may be matched and the ones whose
+// row cannot be used. A peer without a path_token is skipped: there would be nothing to
+// compare the incoming Path against and nothing to write into it, so it could never be fed
+// correctly. database.ValidatePeer refuses such a row, so it can only come from a
+// hand-edited table; skipping it (instead of guessing) keeps it out of the feed and the log
+// line of enabledPeers tells the admin why.
+func peerUsable(peers []*models.Peer) (usable, skipped []*models.Peer) {
+	for _, p := range peers {
+		if strings.TrimSpace(p.PathToken) == "" {
+			skipped = append(skipped, p)
+			continue
+		}
+		usable = append(usable, p)
+	}
+	return usable, skipped
+}
+
+// peerNames joins the peer names for the log lines of enabledPeers.
 func peerNames(peers []*models.Peer) string {
 	names := make([]string, 0, len(peers))
 	for _, p := range peers {
@@ -236,25 +302,31 @@ func (r *PeerRegistry) hostsMatch(p *models.Peer, ip net.IP) bool {
 }
 
 // nameHasIP reports whether the host name name resolves to ip. A cached answer younger than
-// peerDNSTTL is used; a miss on it resolves again (at most once per peerDNSRetry per name),
-// so an address change is picked up without a restart. A failed resolution keeps the last
-// addresses, so a DNS outage does not cut a peer off.
+// peerDNSTTL decides at once; otherwise one connection resolves the name again and every
+// other one answers from the cached addresses meanwhile (single flight, bounded by
+// peerDNSRetry), so a burst of connections costs one lookup and only one of them can wait
+// on the resolver. An address change is therefore picked up without a restart, and a
+// resolver outage neither stalls the accept path nor cuts the peer off at once.
 func (r *PeerRegistry) nameHasIP(name string, ip net.IP) bool {
 	r.mu.Lock()
 	now := r.now()
-	e := r.dns[name]
-	if e != nil {
-		fresh := !e.resolvedAt.IsZero() && now.Sub(e.resolvedAt) < peerDNSTTL
-		if fresh && peerIPsHave(e.ips, ip) {
-			r.mu.Unlock()
-			return true
-		}
-		if now.Sub(e.triedAt) < peerDNSRetry {
-			have := peerIPsHave(e.ips, ip)
-			r.mu.Unlock()
-			return have // too soon to ask again
-		}
+	if r.dns == nil {
+		r.dns = make(map[string]*peerDNSEntry)
 	}
+	e := r.dns[name]
+	if e == nil {
+		e = &peerDNSEntry{}
+		r.dns[name] = e
+	}
+	have := peerDNSHas(e, ip, now)
+	fresh := !e.resolvedAt.IsZero() && now.Sub(e.resolvedAt) < peerDNSTTL
+	// Claim the resolution under the lock (resolving plus triedAt): from here on every
+	// other caller takes the branch below until this one is done.
+	if (fresh && have) || e.resolving || (!e.triedAt.IsZero() && now.Sub(e.triedAt) < peerDNSRetry) {
+		r.mu.Unlock()
+		return have
+	}
+	e.resolving, e.triedAt = true, now
 	r.mu.Unlock()
 
 	// Resolved outside the lock: a slow resolver must not block other connections.
@@ -264,31 +336,59 @@ func (r *PeerRegistry) nameHasIP(name string, ip net.IP) bool {
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.dns == nil {
-		r.dns = make(map[string]*peerDNSEntry)
+	now = r.now()
+	e.resolving, e.triedAt = false, now
+	if err == nil {
+		e.ips, e.resolvedAt, e.errLoggedAt = ips, now, time.Time{}
+		return peerDNSHas(e, ip, now)
 	}
-	e = r.dns[name]
-	if e == nil {
-		e = &peerDNSEntry{}
-		r.dns[name] = e
+	// The log line of a lasting fault is rate-limited: the retry runs every peerDNSRetry
+	// as long as connections keep arriving.
+	logIt := e.errLoggedAt.IsZero() || now.Sub(e.errLoggedAt) >= peerLogEvery
+	if logIt {
+		e.errLoggedAt = now
 	}
-	e.triedAt = r.now()
-	if err != nil {
-		log.Printf("[NNTP-PEER] cannot resolve peer host %q: %v", name, err)
-		return peerIPsHave(e.ips, ip) // keep the last known addresses
+	if peerDNSNotFound(err) {
+		// Authoritative: the name has no address any more, so the peer has none either.
+		had := !e.resolvedAt.IsZero()
+		e.ips, e.resolvedAt = nil, time.Time{}
+		if logIt {
+			if had {
+				log.Printf("[NNTP-PEER] peer host %q no longer resolves, dropping its addresses: %v", name, err)
+			} else {
+				log.Printf("[NNTP-PEER] peer host %q does not resolve: %v", name, err)
+			}
+		}
+		return false
 	}
-	e.ips, e.resolvedAt = ips, e.triedAt
-	return peerIPsHave(e.ips, ip)
+	// A resolver fault (timeout, SERVFAIL, no network): keep the last answer, but only
+	// within peerDNSGrace, so a peer cannot stay matched by a stale address for ever.
+	if logIt {
+		log.Printf("[NNTP-PEER] cannot resolve peer host %q, using the last answer for at most %s: %v", name, peerDNSGrace, err)
+	}
+	return peerDNSHas(e, ip, now)
 }
 
-// peerIPsHave reports whether ips holds ip.
-func peerIPsHave(ips []net.IP, ip net.IP) bool {
-	for _, c := range ips {
+// peerDNSHas reports whether the cached answer of e may decide that ip is one of the name's
+// addresses: there has to be an answer, and it must not be older than peerDNSGrace (within
+// peerDNSTTL it is fresh; between the two it is only used while a re-resolution fails).
+func peerDNSHas(e *peerDNSEntry, ip net.IP, now time.Time) bool {
+	if e == nil || e.resolvedAt.IsZero() || now.Sub(e.resolvedAt) >= peerDNSGrace {
+		return false
+	}
+	for _, c := range e.ips {
 		if c.Equal(ip) {
 			return true
 		}
 	}
 	return false
+}
+
+// peerDNSNotFound reports whether err is an authoritative "no such host" (NXDOMAIN or a
+// name without addresses), as opposed to a resolver fault.
+func peerDNSNotFound(err error) bool {
+	var dnsErr *net.DNSError
+	return errors.As(err, &dnsErr) && dnsErr.IsNotFound
 }
 
 // ---------------------------------------------------------------------------
@@ -335,7 +435,9 @@ func (c *ClientConnection) peerName() string {
 // peer (INN convention): when the leftmost Path element is the peer's path_token the article
 // came the way the peer claims and only "<identity>!" is prepended; otherwise the token the
 // peer should have written is inserted as "<token>.MISMATCH!". Without an identity or without
-// a Path header the head is returned unchanged (RFC 5537 §3.6: no Path is invented).
+// a Path header the head is returned unchanged (RFC 5537 §3.6: no Path is invented). A peer
+// without a path_token never gets here: peerUsable keeps such a row out of the registry, so
+// it cannot feed at all.
 func (c *ClientConnection) feedPath(head []string) []string {
 	identity := c.pathIdentity()
 	if identity == "" || len(common.HeaderValues(head, "Path")) == 0 {
@@ -343,10 +445,18 @@ func (c *ClientConnection) feedPath(head []string) []string {
 	}
 	old := common.HeaderValue(head, "Path")
 	prefix := identity + "!"
-	if c.peer != nil && c.peer.PathToken != "" && !strings.EqualFold(pathLeftmost(old), c.peer.PathToken) {
-		prefix = identity + "!" + c.peer.PathToken + ".MISMATCH!"
+	if token := c.peerPathToken(); token != "" && !strings.EqualFold(pathLeftmost(old), token) {
+		prefix = identity + "!" + token + ".MISMATCH!"
 	}
 	return common.ReplaceHeader(head, "Path", prefix+old)
+}
+
+// peerPathToken is the matched peer's Path token, "" on a connection that is no peer.
+func (c *ClientConnection) peerPathToken() string {
+	if c.peer == nil {
+		return ""
+	}
+	return strings.TrimSpace(c.peer.PathToken)
 }
 
 // pathLeftmost returns the leftmost element of a Path header value ("" when there is none).
@@ -373,25 +483,50 @@ func pathHasIdentity(path, identity string) bool {
 	return false
 }
 
-// pathElementHost strips the RFC 5537 §3.2.1 keyword suffixes (".SEEN", ".MISMATCH",
-// ".POSTED", case-insensitive) and everything after them from one Path element.
+// pathElementHost strips the RFC 5537 §3.2.1 keyword suffix of one Path element: the first
+// dot-separated component that is exactly "SEEN", "MISMATCH" or "POSTED" (case-insensitive)
+// and everything after it, which covers both "ours.MISMATCH" and "ours!.SEEN.192.0.2.1".
+// Only a whole component counts, so a host named "ours.seenix.example" or "ours.mismatched"
+// keeps its name and is not read as this server.
 func pathElementHost(element string) string {
 	el := strings.TrimSpace(element)
-	up := strings.ToUpper(el)
-	cut := -1
-	for _, kw := range []string{".SEEN", ".MISMATCH", ".POSTED"} {
-		if i := strings.Index(up, kw); i >= 0 && (cut < 0 || i < cut) {
-			cut = i
+	start := 0
+	for i := 0; i <= len(el); i++ {
+		if i < len(el) && el[i] != '.' {
+			continue
 		}
-	}
-	if cut >= 0 {
-		el = el[:cut]
+		// el[start:i] is one component; start > 0 means it follows a '.'
+		if start > 0 && pathKeyword(el[start:i]) {
+			return el[:start-1]
+		}
+		start = i + 1
 	}
 	return el
 }
 
+// pathKeyword reports whether component is one of the RFC 5537 §3.2.1 Path keywords.
+func pathKeyword(component string) bool {
+	return strings.EqualFold(component, "SEEN") ||
+		strings.EqualFold(component, "MISMATCH") ||
+		strings.EqualFold(component, "POSTED")
+}
+
 // ---------------------------------------------------------------------------
 // Feed checks the NNTP layer decides (the processor never sees these articles)
+
+// rememberReject records messageID as permanently refused by this layer, so the peer stops
+// offering it (plan nntp-peering; the history index keeps it for HistoryRejectDays). It is
+// called for the refusals the NNTP layer decides on its own: the Path loop, the peer's
+// in_patterns, an article over MaxArticleBytes, an unparsable article and a Message-ID that
+// does not match the command. Not for the refusals the processor decides (it remembers
+// those itself), not for temporary failures (436/431/400) and not for a duplicate (history
+// already knows the id). messageID is always a valid message-id at the call sites.
+func (c *ClientConnection) rememberReject(messageID string) {
+	if c.server == nil || c.server.Processor == nil || messageID == "" {
+		return
+	}
+	c.server.Processor.RememberReject(messageID)
+}
 
 // feedCheck runs the checks on an article offered by IHAVE or TAKETHIS that this layer
 // decides: the Path loop check and the peer's in_patterns. It returns "" when the article is

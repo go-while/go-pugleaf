@@ -66,6 +66,18 @@ func (s *peerTestStore) counters() (loads, auths int) {
 	return s.loads, s.authCall
 }
 
+func (s *peerTestStore) setPeers(peers []*models.Peer) {
+	s.mu.Lock()
+	s.peers = peers
+	s.mu.Unlock()
+}
+
+func (s *peerTestStore) setErr(err error) {
+	s.mu.Lock()
+	s.loadErr = err
+	s.mu.Unlock()
+}
+
 // peerTestClock is a hand-driven clock for the registry.
 type peerTestClock struct {
 	mu sync.Mutex
@@ -196,7 +208,8 @@ func TestPeerNil(t *testing.T) {
 }
 
 // TestPeerListCache: the peer list is read once per peerListTTL, Invalidate makes the next
-// match read it again, and a failed read keeps the list that was there.
+// match read it again, a failed read keeps the list that was there and is retried after
+// peerListErrorTTL (not on every call), and the first read failing means nothing may feed.
 func TestPeerListCache(t *testing.T) {
 	store := &peerTestStore{peers: []*models.Peer{peerSpec("ip4", "192.0.2.10", "")}}
 	clock := peerTestClockAt()
@@ -213,9 +226,7 @@ func TestPeerListCache(t *testing.T) {
 	}
 
 	// an admin edit applies after the TTL, without a restart
-	store.mu.Lock()
-	store.peers = nil
-	store.mu.Unlock()
+	store.setPeers(nil)
 	clock.advance(peerListTTL)
 	if p := reg.MatchIP(ip); p != nil {
 		t.Fatalf("peer %q still matched after it was removed", p.Name)
@@ -225,9 +236,7 @@ func TestPeerListCache(t *testing.T) {
 	}
 
 	// Invalidate applies an edit at once
-	store.mu.Lock()
-	store.peers = []*models.Peer{peerSpec("ip4", "192.0.2.10", "")}
-	store.mu.Unlock()
+	store.setPeers([]*models.Peer{peerSpec("ip4", "192.0.2.10", "")})
 	if reg.MatchIP(ip) != nil {
 		t.Fatal("the cached empty list was not used")
 	}
@@ -236,51 +245,168 @@ func TestPeerListCache(t *testing.T) {
 		t.Fatal("Invalidate did not make the registry read the table again")
 	}
 
-	// a failed read keeps the peers that were loaded
-	store.mu.Lock()
-	store.loadErr = errors.New("main DB locked")
-	store.mu.Unlock()
+	// A failed read keeps the peers that were loaded and is not retried on every call:
+	// the next attempt comes after peerListErrorTTL, not after peerListTTL.
+	store.setErr(errors.New("main DB locked"))
 	clock.advance(peerListTTL)
+	before, _ := store.counters()
+	for i := 0; i < 4; i++ {
+		if reg.MatchIP(ip) == nil {
+			t.Fatalf("a failed read dropped the known peers (call %d)", i)
+		}
+	}
+	if loads, _ := store.counters(); loads != before+1 {
+		t.Fatalf("GetEnabledPeers called %d times for 4 matches after a failed read, want 1", loads-before)
+	}
+	clock.advance(peerListErrorTTL)
 	if reg.MatchIP(ip) == nil {
-		t.Fatal("a failed read dropped the known peers")
+		t.Fatal("the known peers were dropped")
+	}
+	if loads, _ := store.counters(); loads != before+2 {
+		t.Fatalf("GetEnabledPeers called %d times, want one retry after peerListErrorTTL", loads-before-1)
+	}
+	// and it recovers
+	store.setErr(nil)
+	clock.advance(peerListErrorTTL)
+	if reg.MatchIP(ip) == nil {
+		t.Fatal("the peer is gone after the read recovered")
 	}
 }
 
+// TestPeerListFirstReadFails: until the table could be read once, nothing may feed, and the
+// failing read is bounded by peerListErrorTTL as well.
+func TestPeerListFirstReadFails(t *testing.T) {
+	store := &peerTestStore{
+		peers:   []*models.Peer{peerSpec("ip4", "192.0.2.10", "")},
+		loadErr: errors.New("main DB locked"),
+	}
+	clock := peerTestClockAt()
+	reg := peerTestRegistry(store, clock, nil)
+	ip := net.ParseIP("192.0.2.10")
+
+	for i := 0; i < 3; i++ {
+		if p := reg.MatchIP(ip); p != nil {
+			t.Fatalf("peer %q matched although the peer list was never read", p.Name)
+		}
+		if reg.LoginPossible(ip) {
+			t.Fatal("LoginPossible although the peer list was never read")
+		}
+	}
+	if loads, _ := store.counters(); loads != 1 {
+		t.Fatalf("GetEnabledPeers called %d times, want 1 inside peerListErrorTTL", loads)
+	}
+	store.setErr(nil)
+	clock.advance(peerListErrorTTL)
+	if reg.MatchIP(ip) == nil {
+		t.Fatal("the peer is still not matched after the read succeeded")
+	}
+}
+
+// TestPeerSkipsRowWithoutPathToken: a peer row without a path_token (which
+// database.ValidatePeer refuses, so it can only be hand-edited into the table) can never
+// feed: there is nothing to compare the incoming Path against.
+func TestPeerSkipsRowWithoutPathToken(t *testing.T) {
+	broken := peerSpec("broken", "192.0.2.10", "")
+	broken.PathToken = "  "
+	withLogin := peerSpec("broken-login", "", "broken-login-in")
+	withLogin.PathToken = ""
+	store := &peerTestStore{peers: []*models.Peer{broken, withLogin}, logins: map[string]string{"broken-login-in": "secret"}}
+	reg := peerTestRegistry(store, peerTestClockAt(), nil)
+	ip := net.ParseIP("192.0.2.10")
+
+	if p := reg.MatchIP(ip); p != nil {
+		t.Errorf("peer %q without a path_token matched by address", p.Name)
+	}
+	if reg.LoginPossible(ip) {
+		t.Error("LoginPossible for a peer without a path_token")
+	}
+	if p, isPeer := reg.Login("broken-login-in", "secret", ip); p != nil || isPeer {
+		t.Errorf("Login = (%v, %v) for a peer without a path_token, want (nil, false)", p, isPeer)
+	}
+	if n := len(reg.Enabled()); n != 0 {
+		t.Errorf("Enabled() lists %d peers, want 0", n)
+	}
+}
+
+// TestPeerEnabledCopy: Enabled() hands out a new slice, so a caller cannot change what the
+// registry matches against.
+func TestPeerEnabledCopy(t *testing.T) {
+	store := &peerTestStore{peers: []*models.Peer{peerSpec("ip4", "192.0.2.10", ""), peerSpec("ip5", "192.0.2.11", "")}}
+	reg := peerTestRegistry(store, peerTestClockAt(), nil)
+	list := reg.Enabled()
+	if len(list) != 2 {
+		t.Fatalf("Enabled() = %d peers, want 2", len(list))
+	}
+	list[0] = nil
+	if again := reg.Enabled(); len(again) != 2 || again[0] == nil {
+		t.Fatalf("the registry list changed with the returned slice: %v", again)
+	}
+	if reg.MatchIP(net.ParseIP("192.0.2.10")) == nil {
+		t.Fatal("the peer is gone after its entry was overwritten in the returned slice")
+	}
+}
+
+// peerTestResolver is a scripted, counting resolver.
+type peerTestResolver struct {
+	mu      sync.Mutex
+	ips     []net.IP
+	err     error
+	calls   int
+	release chan struct{} // when set, a resolution blocks until it is closed
+	entered chan struct{} // closed by the first resolution that blocks
+}
+
+func (r *peerTestResolver) resolve(string) ([]net.IP, error) {
+	r.mu.Lock()
+	r.calls++
+	release, entered := r.release, r.entered
+	ips, err := r.ips, r.err
+	r.mu.Unlock()
+	if release != nil {
+		if entered != nil {
+			select {
+			case <-entered:
+			default:
+				close(entered)
+			}
+		}
+		<-release
+	}
+	return ips, err
+}
+
+func (r *peerTestResolver) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.calls
+}
+
+func (r *peerTestResolver) set(ips []net.IP, err error) {
+	r.mu.Lock()
+	r.ips, r.err = ips, err
+	r.mu.Unlock()
+}
+
 // TestPeerDNSCache: a resolved hosts name is cached for peerDNSTTL, a miss resolves again
-// at most once per peerDNSRetry, and a failed resolution keeps the last addresses.
+// at most once per peerDNSRetry, a resolver fault keeps the last addresses for at most
+// peerDNSGrace, and an authoritative "no such host" drops them at once.
 func TestPeerDNSCache(t *testing.T) {
 	store := &peerTestStore{peers: []*models.Peer{peerSpec("byname", "peer.test.invalid", "")}}
 	clock := peerTestClockAt()
-	var mu sync.Mutex
-	lookups := 0
-	ips := []net.IP{net.ParseIP("192.0.2.77")}
-	var lookupErr error
-	reg := peerTestRegistry(store, clock, func(string) ([]net.IP, error) {
-		mu.Lock()
-		defer mu.Unlock()
-		lookups++
-		if lookupErr != nil {
-			return nil, lookupErr
-		}
-		return ips, nil
-	})
-	count := func() int {
-		mu.Lock()
-		defer mu.Unlock()
-		return lookups
-	}
+	res := &peerTestResolver{ips: []net.IP{net.ParseIP("192.0.2.77")}}
+	reg := peerTestRegistry(store, clock, res.resolve)
 	hit, miss := net.ParseIP("192.0.2.77"), net.ParseIP("192.0.2.78")
 
 	if reg.MatchIP(hit) == nil {
 		t.Fatal("first match failed")
 	}
-	if n := count(); n != 1 {
+	if n := res.count(); n != 1 {
 		t.Fatalf("%d lookups for the first match, want 1", n)
 	}
 	// a hit inside the TTL costs no lookup
 	clock.advance(peerDNSTTL / 2)
-	if reg.MatchIP(hit) == nil || count() != 1 {
-		t.Fatalf("a cached hit cost %d lookups", count())
+	if reg.MatchIP(hit) == nil || res.count() != 1 {
+		t.Fatalf("a cached hit cost %d lookups", res.count())
 	}
 	// a miss resolves again, but not once per connection
 	for i := 0; i < 5; i++ {
@@ -288,7 +414,7 @@ func TestPeerDNSCache(t *testing.T) {
 			t.Fatal("an address that is not the peer's matched")
 		}
 	}
-	if n := count(); n != 2 {
+	if n := res.count(); n != 2 {
 		t.Fatalf("%d lookups for 5 misses, want 2 (one retry, then the retry window)", n)
 	}
 	// after the retry window a miss may ask again
@@ -296,24 +422,94 @@ func TestPeerDNSCache(t *testing.T) {
 	if reg.MatchIP(miss) != nil {
 		t.Fatal("miss matched")
 	}
-	if n := count(); n != 3 {
+	if n := res.count(); n != 3 {
 		t.Fatalf("%d lookups after the retry window, want 3", n)
 	}
 	// the peer moved: the new address is picked up without a restart
-	mu.Lock()
-	ips = []net.IP{miss}
-	mu.Unlock()
+	res.set([]net.IP{miss}, nil)
 	clock.advance(peerDNSRetry)
 	if reg.MatchIP(miss) == nil {
 		t.Fatal("the peer's new address was not picked up")
 	}
-	// a DNS failure keeps the last known addresses
-	mu.Lock()
-	lookupErr = errors.New("server misbehaving")
-	mu.Unlock()
+	// A resolver fault keeps the last answer, but only within peerDNSGrace.
+	res.set(nil, errors.New("server misbehaving"))
 	clock.advance(peerDNSTTL)
 	if reg.MatchIP(miss) == nil {
 		t.Fatal("a DNS failure cut the peer off although its last address was known")
+	}
+	clock.advance(peerDNSGrace)
+	if p := reg.MatchIP(miss); p != nil {
+		t.Fatalf("peer %q still matched by an answer older than peerDNSGrace", p.Name)
+	}
+	// An authoritative "no such host" drops the addresses, so the peer stops matching
+	// although the last answer is still inside peerDNSGrace. A cached answer that is
+	// still fresh is used without asking, so the name is re-resolved once its
+	// peerDNSTTL has passed.
+	res.set([]net.IP{miss}, nil)
+	clock.advance(peerDNSRetry)
+	if reg.MatchIP(miss) == nil {
+		t.Fatal("the peer was not matched again after the resolver recovered")
+	}
+	res.set(nil, &net.DNSError{Err: "no such host", Name: "peer.test.invalid", IsNotFound: true})
+	clock.advance(peerDNSTTL)
+	if p := reg.MatchIP(miss); p != nil {
+		t.Fatalf("peer %q still matched after an authoritative NXDOMAIN", p.Name)
+	}
+	// and it is not matched again from the old answer while the name stays gone
+	clock.advance(peerDNSRetry)
+	if reg.MatchIP(miss) != nil {
+		t.Fatal("the dropped addresses came back")
+	}
+}
+
+// TestPeerDNSSingleFlight: while one resolution runs, every other connection answers from
+// the cached addresses instead of resolving too, so a burst of connections costs one lookup
+// and only one of them can wait on the resolver.
+func TestPeerDNSSingleFlight(t *testing.T) {
+	store := &peerTestStore{peers: []*models.Peer{peerSpec("byname", "peer.test.invalid", "")}}
+	clock := peerTestClockAt()
+	res := &peerTestResolver{
+		ips:     []net.IP{net.ParseIP("192.0.2.77")},
+		release: make(chan struct{}),
+		entered: make(chan struct{}),
+	}
+	reg := peerTestRegistry(store, clock, res.resolve)
+	ip := net.ParseIP("192.0.2.77")
+
+	// one goroutine holds the resolver
+	done := make(chan *models.Peer, 1)
+	go func() { done <- reg.MatchIP(ip) }()
+	select {
+	case <-res.entered:
+	case <-time.After(hDeadline):
+		t.Fatal("the first resolution never started")
+	}
+	// every other caller returns at once, without resolving
+	for i := 0; i < 20; i++ {
+		if p := reg.MatchIP(ip); p != nil {
+			t.Fatalf("call %d matched %q although no answer is known yet", i, p.Name)
+		}
+	}
+	if n := res.count(); n != 1 {
+		t.Fatalf("%d lookups while one resolution was running, want 1", n)
+	}
+	close(res.release)
+	select {
+	case p := <-done:
+		if p == nil {
+			t.Fatal("the resolving caller did not match the peer")
+		}
+	case <-time.After(hDeadline):
+		t.Fatal("the resolving caller did not return")
+	}
+	// the answer is cached now: no further lookups
+	for i := 0; i < 5; i++ {
+		if reg.MatchIP(ip) == nil {
+			t.Fatalf("call %d did not match the resolved peer", i)
+		}
+	}
+	if n := res.count(); n != 1 {
+		t.Fatalf("%d lookups in total, want 1", n)
 	}
 }
 
@@ -544,6 +740,113 @@ func TestPeerInPatternsRefused(t *testing.T) {
 	}
 	if got := proc.rejectedIDs(); len(got) != 2 {
 		t.Errorf("remembered rejects %q, want only the two refused ids", got)
+	}
+}
+
+// TestPeerFeedRememberedRejects (plan nntp-peering): the permanent refusals this layer
+// decides on its own are remembered, so the peer stops offering the id: an article over
+// MaxArticleBytes, an unparsable one and a Message-ID that does not match the command.
+// Refusals with no valid id (TAKETHIS of a malformed message-id) and the temporary answers
+// are not remembered.
+func TestPeerFeedRememberedRejects(t *testing.T) {
+	g := hGroup(t, "t8.remember", 0, nil)
+	proc := &hFakeProcessor{checkResult: history.CasePass, processResult: history.CasePass}
+	reg, _ := hPeerIP("")
+	hs := newTestServer(t, hServerOpts{Proc: proc, Peers: reg, Hostname: peerFeedHost, MaxArtSize: 1024})
+	c := hs.dial(t)
+
+	big := strings.Repeat("x some filler to pass the byte limit\r\n", 100)
+	idBig := hMessageID(g, 1)
+	code, line := c.Cmd("IHAVE %s", idBig)
+	if err := client.ExpectCode(code, line, 335); err != nil {
+		t.Fatalf("IHAVE: %v", err)
+	}
+	if err := c.Send(strings.TrimSuffix(peerArticle(idBig, "upstream.invalid!x", g), ".\r\n") + big + ".\r\n"); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	code, line, err := c.ReadStatus()
+	if err != nil || code != 437 || !strings.Contains(line, "too large") {
+		t.Fatalf("IHAVE of an oversized article: code=%d line=%q err=%v, want 437 ... too large", code, line, err)
+	}
+
+	// IHAVE of an article whose Message-ID header is another one
+	idMismatch := hMessageID(g, 2)
+	code, line = c.Cmd("IHAVE %s", idMismatch)
+	if err := client.ExpectCode(code, line, 335); err != nil {
+		t.Fatalf("IHAVE: %v", err)
+	}
+	if err := c.Send(peerArticle(hMessageID(g, 3), "upstream.invalid!x", g)); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	code, line, err = c.ReadStatus()
+	if err != nil || code != 437 {
+		t.Fatalf("IHAVE with a mismatching Message-ID: code=%d line=%q err=%v, want 437", code, line, err)
+	}
+
+	// TAKETHIS of the same two faults
+	idBig2 := hMessageID(g, 4)
+	if err := c.Send("TAKETHIS " + idBig2 + "\r\n" + strings.TrimSuffix(peerArticle(idBig2, "upstream.invalid!x", g), ".\r\n") + big + ".\r\n"); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	code, line, err = c.ReadStatus()
+	if err != nil || code != 439 {
+		t.Fatalf("TAKETHIS of an oversized article: code=%d line=%q err=%v, want 439", code, line, err)
+	}
+	idMismatch2 := hMessageID(g, 5)
+	if err := c.Send("TAKETHIS " + idMismatch2 + "\r\n" + peerArticle(hMessageID(g, 6), "upstream.invalid!x", g)); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	code, line, err = c.ReadStatus()
+	if err != nil || code != 439 {
+		t.Fatalf("TAKETHIS with a mismatching Message-ID: code=%d line=%q err=%v, want 439", code, line, err)
+	}
+
+	// a malformed message-id is refused but never remembered (history keys on valid ids)
+	if err := c.Send("TAKETHIS not-an-id\r\n" + peerArticle(hMessageID(g, 7), "upstream.invalid!x", g)); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	code, line, err = c.ReadStatus()
+	if err != nil || code != 439 {
+		t.Fatalf("TAKETHIS of a malformed id: code=%d line=%q err=%v, want 439", code, line, err)
+	}
+
+	want := []string{idBig, idMismatch, idBig2, idMismatch2}
+	if got := proc.rejectedIDs(); strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("remembered rejects %q, want %q", got, want)
+	}
+	if n := len(proc.processedArticles()); n != 0 {
+		t.Errorf("%d refused articles reached the processor, want 0", n)
+	}
+}
+
+// TestPeerFeedDeniedWithoutAuthinfo (plan nntp-peering): with -plaintextauth refuse the
+// client cannot send AUTHINFO on a plaintext connection, so a feed command answers 502
+// there: asking for a login the peer cannot send would leave it with nothing to try.
+func TestPeerFeedDeniedWithoutAuthinfo(t *testing.T) {
+	reg, _, _ := hPeerLogin(t, "127.0.0.1")
+	proc := &hFakeProcessor{checkResult: history.CasePass}
+
+	// the control: with the default policy the same server answers 480
+	accept := newTestServer(t, hServerOpts{Proc: proc, Peers: reg})
+	code, line := accept.dial(t).Cmd("IHAVE <t8-denied-1@test.invalid>")
+	if err := client.ExpectCode(code, line, 480); err != nil {
+		t.Fatalf("IHAVE with AUTHINFO possible: %v", err)
+	}
+
+	refuse := newTestServer(t, hServerOpts{Proc: proc, Peers: reg})
+	refuse.S.PlaintextAuth = PlaintextAuthRefuse
+	c := refuse.dial(t)
+	code, line = c.Cmd("IHAVE <t8-denied-2@test.invalid>")
+	if err := client.ExpectCode(code, line, 502); err != nil {
+		t.Fatalf("IHAVE with AUTHINFO refused on plaintext: %v", err)
+	}
+	code, line = c.Cmd("CHECK <t8-denied-3@test.invalid>")
+	if err := client.ExpectCode(code, line, 502); err != nil {
+		t.Fatalf("CHECK: %v", err)
+	}
+	code, line = c.Cmd("MODE STREAM")
+	if err := client.ExpectCode(code, line, 502); err != nil {
+		t.Fatalf("MODE STREAM: %v", err)
 	}
 }
 
