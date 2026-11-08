@@ -270,6 +270,14 @@ func (proc *Processor) ProcessArticle(article *models.Article, legacyNewsgroup s
 	// the history index is written by the batch system after the article was committed (db_batch.go)
 	article.MsgIdItem = msgIdItem
 
+	// Outgoing transit feed (plan nntp-peering): only an article this server accepted on the
+	// NNTP feed (IHAVE/TAKETHIS) or through NNTP POST is queued for the peers, which is
+	// exactly the non-bulk path. Fetched and imported articles (bulkmode, including the
+	// web post queue's own copies) are never queued, so an archive import does not flood
+	// the peers. The batch writer reads the marker at its commit point (db_batch.go,
+	// database.feedSnapshot); it is set either way, never left over from the article pool.
+	article.FeedOut = !bulkmode
+
 	article.ArticleNums = make(map[*string]int64)
 	// One slot per possible target group plus one: the capture sends below must never block.
 	if maxCross == 0 {

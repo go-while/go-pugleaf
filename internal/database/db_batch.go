@@ -1013,6 +1013,12 @@ retry1:
 		}
 	}
 	var latestDate time.Time
+	// Outgoing transit feed (plan nntp-peering, slice feed-queue): one atomic load per
+	// batch, nil unless a server runs an outgoing feed. The snapshots are taken below,
+	// where the article's last group copy is done and before its fields are cleared, and
+	// handed over after the loop so no article mutex is held while the hook runs.
+	onCommitted := loadFeedHook()
+	var feedSnaps []FeedArticle
 	for _, article := range batches {
 		if article == nil {
 			continue
@@ -1064,6 +1070,12 @@ retry1:
 				continue
 			}
 		}
+		// The last group copy of this article is done and it is stored (a dropped batch
+		// returns long before this phase): take the feed snapshot before the fields below
+		// are cleared. Once per article, so a crossposted one is offered to a peer once.
+		if onCommitted != nil && article.FeedOut && messageID != "" {
+			feedSnaps = append(feedSnaps, feedSnapshot(article, *task.Newsgroup))
+		}
 		// clear values and unlink pointers to free memory
 		article.MessageID = ""
 		article.Subject = ""
@@ -1083,6 +1095,10 @@ retry1:
 		article.RefSlice = nil
 		article.Mux.Unlock()
 		article = nil
+	}
+	// Outgoing feed: handed over with no article mutex held. The hook never blocks.
+	for _, snap := range feedSnaps {
+		onCommitted(snap)
 	}
 	//historyDuration := time.Since(start)
 	//log.Printf("[BATCH] processNewsgroupBatch Completed history/cache updates for group '%s' in %v", *task.Newsgroup, historyDuration)

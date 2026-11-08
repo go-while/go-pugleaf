@@ -159,6 +159,7 @@ type Article struct {
 	NewsgroupsPtr []*string           `json:"-" db:"-"` // Parsed newsgroup for threading
 	ProcessQueue  chan *string        `json:"-" db:"-"` // newsgroup ptr for batching
 	Posted        bool                `json:"-" db:"-"` // set by the NNTP POST handler: injected here (proto-article)
+	FeedOut       bool                `json:"-" db:"-"` // plan nntp-peering: queue this article for the peers once it is committed (set by Processor.ProcessArticle for a non-bulk intake: IHAVE/TAKETHIS/POST; never for fetched, imported or web-queued articles)
 }
 
 var ArticlePool = make(chan *Article, 128*1024)
@@ -209,6 +210,7 @@ func RecycleArticle(art *Article) {
 	art.NewsgroupsPtr = nil
 	art.ProcessQueue = nil
 	art.Posted = false
+	art.FeedOut = false
 
 	select {
 	case ArticlePool <- art:
