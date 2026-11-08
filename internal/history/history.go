@@ -40,7 +40,8 @@ const (
 )
 
 const (
-	historyNumDBs = 16 // must match GetShardConfig
+	historyNumDBs      = 16  // must match GetShardConfig
+	historyTablesPerDB = 256 // must match GetShardConfig
 
 	// Begin retry on busy/locked (busy_timeout already waits 30s per attempt)
 	beginRetryBaseDelay = 100 * time.Millisecond
@@ -55,9 +56,11 @@ const (
 const (
 	opAdd    uint8 = 1
 	opRemove uint8 = 2
+	opReject uint8 = 3 // remember messageID as rejected (history_rejects.go)
 )
 
-// historyOp is one queued write: add or remove groupID for messageID
+// historyOp is one queued write: add or remove groupID for messageID, or remember messageID
+// as rejected (opReject: no group, the writer stamps the day)
 type historyOp struct {
 	op         uint8
 	messageID  string
@@ -89,14 +92,19 @@ type routedOp struct {
 // existing index fills in the numbers of old rows and fixes renumbered groups (recover-db).
 // An add without a number never appends a plain token next to an existing token of the group
 // and never downgrades "id:num".
+//
+// A row may instead hold one reject token "r<unixday>" and nothing else (history_rejects.go):
+// an add replaces it, every token parser skips it.
 const (
 	// add a token ("id:num" or plain "id"): skip if the row holds "id:<anything>" (prefix probe
-	// ",id:") or the plain "id" while the token has no number (exact probe ",id,"); upgrade a
-	// plain "id" in place to the numbered token; otherwise append. A skipped numbered add is
-	// followed by the renumber check in Go (executeDBTransaction, renumberGroupToken).
+	// ",id:") or the plain "id" while the token has no number (exact probe ",id,"); replace a
+	// remembered reject; upgrade a plain "id" in place to the numbered token; otherwise append.
+	// A skipped numbered add is followed by the renumber check in Go (executeDBTransaction,
+	// renumberGroupToken).
 	// args: ?1 messageID, ?2 token, ?3 groupID
 	sqlAddArticle = `INSERT INTO %s(message_id,newsgroups) VALUES(?1,?2) ON CONFLICT(message_id) DO UPDATE SET newsgroups = CASE` +
 		` WHEN coalesce(newsgroups,'')='' THEN excluded.newsgroups` +
+		` WHEN ` + sqlRejectOnlyRow + ` THEN excluded.newsgroups` +
 		` WHEN instr(','||newsgroups||',', ','||?3||',') > 0 THEN trim(replace(','||newsgroups||',', ','||?3||',', ','||excluded.newsgroups||','), ',')` +
 		` ELSE newsgroups||','||excluded.newsgroups END` +
 		` WHERE instr(','||coalesce(newsgroups,'')||',', ','||?3||':') = 0` +
@@ -217,6 +225,10 @@ func NewHistory(cfg *HistoryConfig, mainWG *sync.WaitGroup) (*History, error) {
 		mainWG.Add(1)
 	}
 	go h.writerWorker() // mainWG.Done() when finished
+	// the reject prune runs outside the writer goroutine so a cycle never delays a flush
+	// (plan nntp-peering); Close waits for it
+	h.pruneDone = make(chan struct{})
+	go h.pruneWorker()
 	return h, nil
 }
 
@@ -238,14 +250,7 @@ func (h *History) AddArticleAt(messageID string, groupID, articleNum int64) {
 	h.enqueue(opAdd, messageID, groupID, articleNum)
 }
 
-// AddReject queues "messageID was rejected" (INN remembertrash): the row gets a reject token
-// r<unixday> instead of a group token, so Exists reports it as known and peers stop offering it,
-// while LookupGroups/LookupLocations return nothing for it. Rejects expire after the
-// HistoryRejectDays config key. No-op if history is disabled.
-// Wave 0 stub of plan nntp-peering; slice history-rejects implements it.
-func (h *History) AddReject(messageID string) {
-	_ = messageID
-}
+// AddReject is in history_rejects.go (plan nntp-peering).
 
 // RemoveArticle queues "messageID is no longer stored in groupID" (trimming). The number is
 // unknown, so every token of groupID (plain or with a number) is removed.
@@ -498,13 +503,14 @@ func lookupLocationsChunk(db *sql.DB, items []historyBatchItem, out map[string][
 }
 
 // parseLocations parses a CSV of "groupID" or "groupID:articleNum" tokens, skipping
-// empty/invalid parts. A token without a number (or with an invalid one) gives ArticleNum 0.
+// empty/invalid parts and reject tokens (a remembered reject is no location, see
+// history_rejects.go). A token without a number (or with an invalid one) gives ArticleNum 0.
 // Never returns nil.
 func parseLocations(csv string) []Location {
 	locs := make([]Location, 0, strings.Count(csv, ",")+1)
 	for _, part := range strings.Split(csv, ",") {
 		part = strings.TrimSpace(part)
-		if part == "" {
+		if part == "" || isRejectToken(part) {
 			continue
 		}
 		idStr, numStr, hasNum := strings.Cut(part, ":")
@@ -559,6 +565,8 @@ func (h *History) GetStats() HistoryStats {
 		TotalLookups:   h.stats.lookups.Load(),
 		TotalAdds:      h.stats.adds.Load(),
 		TotalRemoves:   h.stats.removes.Load(),
+		TotalRejects:   h.stats.rejects.Load(),
+		RejectsPruned:  h.stats.pruned.Load(),
 		TotalCommitted: h.stats.committed.Load(),
 		Flushes:        h.stats.flushes.Load(),
 		Pending:        h.pending.Load(),
@@ -609,6 +617,9 @@ func (h *History) Close() error {
 		log.Printf("[HISTORY] Closing down history system (pending=%d)...", h.pending.Load())
 		if h.writerAlive {
 			<-h.writerDone
+		}
+		if h.pruneDone != nil {
+			<-h.pruneDone // the reject prune releases its lock and stops on closeChan
 		}
 		h.dbClosed.Store(true)
 		if h.db != nil {
@@ -811,7 +822,22 @@ func (h *History) executeDBTransaction(dbIndex int, ops []routedOp) error {
 	}
 
 	var stmt *sql.Stmt
+	rejectTok := "" // reject token of this transaction, built once (same day for the whole flush)
 	for _, rop := range ops {
+		if rop.op == opReject {
+			if rejectTok == "" {
+				rejectTok = rejectToken(unixDay(h.now()))
+			}
+			if stmt, err = getStmt(sqlAddReject, rop.tableName); err != nil {
+				err = fmt.Errorf("prepare reject %s: %v", rop.tableName, err)
+				return err
+			}
+			if _, err = stmt.Exec(rop.messageID, rejectTok); err != nil {
+				err = fmt.Errorf("reject messageID='%s' token=%s table=%s: %v", rop.messageID, rejectTok, rop.tableName, err)
+				return err
+			}
+			continue
+		}
 		groupID := strconv.FormatInt(rop.groupID, 10)
 		token := historyToken(rop.groupID, rop.articleNum)
 		switch rop.op {

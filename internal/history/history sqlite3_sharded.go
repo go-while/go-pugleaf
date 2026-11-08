@@ -210,6 +210,12 @@ func (s *SQLite3ShardedDB) createTablesForDB(dbIndex int) (created bool, err err
 			tx.Rollback()
 			return false, fmt.Errorf("failed to create table %s: %v", tableName, err)
 		}
+		// the partial index of the remembered rejects (plan nntp-peering): free on a new
+		// table, and the prune of an index written before that plan creates it lazily
+		if _, err = tx.Exec(fmt.Sprintf(sqlCreateRejectIndex, tableName)); err != nil {
+			tx.Rollback()
+			return false, fmt.Errorf("failed to create reject index of %s: %v", tableName, err)
+		}
 	}
 	if err = tx.Commit(); err != nil {
 		return false, fmt.Errorf("failed to commit create tables transaction: %v", err)
