@@ -300,11 +300,10 @@ func (pm *PosterManager) getArticleByMessageID(messageID, newsgroup string) (*mo
 	return article, nil
 }
 
-// postToProvider posts an article to a specific provider
+// postToProvider posts an article to a specific provider. A provider the post queue may use is
+// one with posting enabled; feeding a peer is not this path's job (the peers of plan
+// nntp-peering are fed by their own outgoing feed, not by the post queue).
 func (pm *PosterManager) postToProvider(article *models.Article, pool *nntp.Pool) error {
-
-	peering := false // TODO: pool.Backend.Provider.Peering
-
 	if pool.Backend.Provider.Posting {
 		conn, err := pool.GetContext(pm.ctx, nntp.MODE_READER_MV)
 		if err != nil {
@@ -337,13 +336,5 @@ func (pm *PosterManager) postToProvider(article *models.Article, pool *nntp.Pool
 		}
 	}
 
-	if peering { // TODO: pool.Backend.Provider.Peering
-		conn, err := pool.Get(nntp.MODE_STREAM_MV)
-		if err != nil {
-			return fmt.Errorf("failed to get connection: %v", err)
-		}
-		defer pool.Put(conn)
-	}
-
-	return fmt.Errorf("selected provider %s does not support posting or peering", pool.Backend.Provider.Name)
+	return fmt.Errorf("selected provider %s does not support posting", pool.Backend.Provider.Name)
 }

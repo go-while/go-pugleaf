@@ -159,6 +159,8 @@ type Article struct {
 	NewsgroupsPtr []*string           `json:"-" db:"-"` // Parsed newsgroup for threading
 	ProcessQueue  chan *string        `json:"-" db:"-"` // newsgroup ptr for batching
 	Posted        bool                `json:"-" db:"-"` // set by the NNTP POST handler: injected here (proto-article)
+	FeedOut       bool                `json:"-" db:"-"` // plan nntp-peering: queue this article for the peers once it is committed (set by Processor.ProcessArticle for a non-bulk intake: IHAVE/TAKETHIS/POST; never for fetched, imported or web-queued articles)
+	FeedStored    bool                `json:"-" db:"-"` // plan nntp-peering: some group's batch really inserted this article's row (db_batch.go); an article every group ignored as a stored duplicate is new to none of them and is not fed
 }
 
 var ArticlePool = make(chan *Article, 128*1024)
@@ -209,6 +211,8 @@ func RecycleArticle(art *Article) {
 	art.NewsgroupsPtr = nil
 	art.ProcessQueue = nil
 	art.Posted = false
+	art.FeedOut = false
+	art.FeedStored = false
 
 	select {
 	case ArticlePool <- art:
@@ -563,6 +567,32 @@ type NNTPUser struct {
 	UpdatedAt time.Time  `json:"updated_at" db:"updated_at"`
 	LastLogin *time.Time `json:"last_login" db:"last_login"`
 	IsActive  bool       `json:"is_active" db:"is_active"`
+}
+
+// Peer is a news server that may feed us and that we may feed (table peers, plan nntp-peering).
+// InPasswordHash is a bcrypt hash and never shown back; OutPassword is sent to the remote and
+// stored as given.
+type Peer struct {
+	ID             int64     `json:"id" db:"id"`
+	Name           string    `json:"name" db:"name"`
+	PathToken      string    `json:"path_token" db:"path_token"`   // the peer's Path identity
+	Hosts          string    `json:"hosts" db:"hosts"`             // comma list: hostname, IP, CIDR; empty = AUTHINFO only
+	InUsername     string    `json:"in_username" db:"in_username"` // optional AUTHINFO login of the peer
+	InPasswordHash string    `json:"-" db:"in_password_hash"`      // bcrypt
+	InPatterns     string    `json:"in_patterns" db:"in_patterns"` // wildmat list the peer may send us
+	OutEnabled     bool      `json:"out_enabled" db:"out_enabled"` // we feed this peer
+	OutHost        string    `json:"out_host" db:"out_host"`
+	OutPort        int       `json:"out_port" db:"out_port"`
+	OutTLS         bool      `json:"out_tls" db:"out_tls"`
+	OutUsername    string    `json:"out_username" db:"out_username"`
+	OutPassword    string    `json:"-" db:"out_password"`
+	OutPatterns    string    `json:"out_patterns" db:"out_patterns"` // wildmat list we send
+	OutFlags       string    `json:"out_flags" db:"out_flags"`       // INN newsfeeds flag subset
+	MaxConns       int       `json:"max_conns" db:"max_conns"`       // outgoing connections
+	Enabled        bool      `json:"enabled" db:"enabled"`
+	Notes          string    `json:"notes" db:"notes"`
+	CreatedAt      time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at" db:"updated_at"`
 }
 
 // NNTPSession represents an active NNTP connection session

@@ -99,6 +99,10 @@ func (w *PostQueueWorker) pre_processArticle(article *models.Article) error {
 			IsThrRoot:   article.IsThrRoot,
 			IsReply:     article.IsReply,
 			RefSlice:    article.RefSlice,
+			// injected here, like a POST: a refusal of this copy is never remembered as a
+			// reject (plan nntp-peering, rememberBulkReject). The bulk path of ProcessArticle
+			// applies no POST-only group policy, so nothing else changes.
+			Posted: true,
 		}
 		err := w.processArticleForNewsgroup(copiedArticle, newsgroup)
 		if err != nil {

@@ -13,6 +13,7 @@ import (
 
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/database"
+	"github.com/go-while/go-pugleaf/internal/feed"
 	"github.com/go-while/go-pugleaf/internal/history"
 	"github.com/go-while/go-pugleaf/internal/nntp"
 	"github.com/go-while/go-pugleaf/internal/processor"
@@ -28,6 +29,8 @@ var (
 	useShortHashLen int
 	maxConnections  int
 	dataDir         string
+	feedOut         bool
+	noPostThreads   bool
 	useHistory      bool
 
 	idleTimeout         time.Duration
@@ -71,6 +74,8 @@ func main() {
 	flag.DurationVar(&local430TTL, "local430ttl", nntp.DefaultLocal430TTL, "how long a message-id that answered 430 is answered from the negative cache without a new lookup")
 	flag.StringVar(&xrefMode, "xref", "partial", "Xref: header: off (none), partial (serving group only, no lookups) or full (all groups from the history index, one lookup per served article or per range chunk, see -xref-batched-lookup)")
 	flag.BoolVar(&xrefBatchedLookup, "xref-batched-lookup", true, "in -xref full, look up the Xref locations of each OVER/XOVER/HDR/XHDR range chunk (up to 1000 lines) with one history statement per shard database instead of one lookup per line")
+	flag.BoolVar(&noPostThreads, "disable-webserver-post-threads", false, "do not build the threads of stored articles (threads, thread_cache, reply_count): only the web view needs them; for a standalone NNTP server (recover-db -rebuild-threads builds them later)")
+	flag.BoolVar(&feedOut, "feed", true, "outgoing transit feed: queue accepted feed and POST articles for the peers with an outgoing feed (out_enabled) and send them (data/cfg/feed-queue.sq3)")
 	flag.DurationVar(&postCommitWait, "post-commit-wait", nntp.DefaultPostCommitWait, "wait for the batch writer to commit a POSTed article before answering 240 (0 = answer at once, the article is still stored)")
 	flag.Parse()
 	history.ENABLE_HISTORY = useHistory
@@ -148,6 +153,10 @@ func main() {
 	// Initialize database (this would normally come from your main application)
 	dbConfig := database.DefaultDBConfig()
 	dbConfig.DataDir = dataDir
+	dbConfig.DisableThreading = noPostThreads
+	if noPostThreads {
+		log.Printf("[NNTP]: -disable-webserver-post-threads: stored articles get no threads (web view only; recover-db -rebuild-threads builds them later)")
+	}
 
 	db, err := database.OpenDatabase(dbConfig)
 	if err != nil {
@@ -213,8 +222,37 @@ func main() {
 	nntpServer.SetPostCommitWait(postCommitWait)
 	log.Printf("[NNTP]: idletimeout=%s articledelay=%s groupdelay=%s errordelay=%s plaintextauth=%s readauth=%v enforce-user-maxconns=%v maxartsize=%d local430ttl=%s xref=%s xref-batched-lookup=%v bind=%q post-commit-wait=%s",
 		idleTimeout, articleDelay, groupDelay, errorDelay, plaintextAuth, readAuth, enforceUserMaxConns, nntpServer.MaxArticleBytes(), nntpServer.Local430TTL(), nntpServer.XrefMode(), nntpServer.XrefBatchedLookup(), mainConfig.Server.NNTP.Addr, nntpServer.PostCommitWait())
+	// Only a peer may feed this server (plan nntp-peering): read the peers table once here,
+	// so the log says at startup who that is (the registry logs the names and reads the
+	// table again every 30 s, so admin edits apply without a restart).
+	log.Printf("[NNTP]: peers that may feed (IHAVE/CHECK/TAKETHIS/MODE STREAM): %d", len(nntpServer.Peers.Enabled()))
 	// Set up the date parser adapter to use processor's ParseNNTPDate
 	database.GlobalDateParser = processor.ParseNNTPDate
+
+	// Outgoing transit feed (plan nntp-peering): the batch writer hands every committed feed
+	// or POST article to the enqueuer (database.SetFeedHook), the sender drains the queue to
+	// the peers with out_enabled. Without such a peer both stay idle.
+	var feedQueue *feed.SQLiteQueue
+	var feedEnq *feed.Enqueuer
+	var feedSender *feed.Sender
+	if feedOut {
+		q, err := feed.Open(feed.QueuePath(dataDir))
+		if err != nil {
+			log.Fatalf("[FEED] %v", err)
+		}
+		feedQueue = q
+		feedEnq = feed.NewEnqueuer(q, db, feed.EnqueuerConfig{})
+		feedEnq.Start()
+		database.SetFeedHook(feedEnq.Hook())
+		feedSender, err = feed.NewSender(feed.Config{Queue: q, Peers: db, Articles: db, Hostname: processor.LocalNNTPHostname})
+		if err != nil {
+			log.Fatalf("[FEED] %v", err)
+		}
+		feedSender.Start()
+		log.Printf("[FEED] outgoing feed on (queue %s)", q.Path())
+	} else {
+		log.Printf("[FEED] outgoing feed off (-feed=false)")
+	}
 
 	if err := nntpServer.Start(); err != nil {
 		log.Fatalf("Failed to start NNTP server: %v", err)
@@ -232,6 +270,10 @@ func main() {
 		log.Printf("Error shutting down NNTP server: %v", err)
 	}
 	wg.Wait()
+	// The sender reads articles from the group DBs: stop it before the database goes.
+	if feedSender != nil {
+		feedSender.Stop()
+	}
 	log.Printf("[NNTP]: Server stopped, initiating database shutdown...")
 
 	// Signal database background workers (batch orchestrators) to stop
@@ -247,6 +289,17 @@ func main() {
 	log.Printf("[NNTP]: Database: waiting for background tasks to finish...")
 	db.WG.Wait()
 	log.Printf("[NNTP]: Database: all background tasks completed")
+	// The last batches are committed now (they may still have queued articles): stop the
+	// enqueuer after them, then close the queue file.
+	if feedEnq != nil {
+		database.SetFeedHook(nil)
+		feedEnq.Stop()
+	}
+	if feedQueue != nil {
+		if err := feedQueue.Close(); err != nil {
+			log.Printf("[FEED] closing the queue: %v", err)
+		}
+	}
 
 	if err := db.Shutdown(); err != nil {
 		log.Printf("[NNTP]: Failed to shutdown database: %v", err)

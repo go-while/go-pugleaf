@@ -29,7 +29,7 @@ func authinfoArgument(line string) string {
 // client input.
 func (c *ClientConnection) handleAuthInfo(args []string, line string) error {
 	// RFC 4643 §2.3.2: any AUTHINFO after a successful login → 502
-	if c.authenticated {
+	if c.loggedIn() {
 		return c.sendResponse(502, "Already authenticated")
 	}
 	if len(args) == 0 {
@@ -64,6 +64,24 @@ func (c *ClientConnection) handleAuthInfo(args []string, line string) error {
 	}
 	username := c.authUsername
 	c.authUsername = ""
+
+	// A peer login (plan nntp-peering): when the name is an enabled peer's in_username it
+	// is checked against the peers table, never against nntp_users, and the reply is the
+	// same 481/281 as for a user, so the name does not say which table holds it.
+	if peer, isPeer := c.server.Peers.Login(username, argument, c.remoteIP()); isPeer {
+		if peer == nil {
+			c.server.Stats.AuthFailure()
+			c.rateLimitOnError()
+			return c.sendResponse(481, "Authentication failed")
+		}
+		c.peer = peer
+		c.peerLoggedIn = true
+		c.server.Stats.AuthSuccess()
+		log.Printf("[NNTP-PEER] %s may feed as peer %q (logged in)", c.conn.RemoteAddr(), peer.Name)
+		// c.authenticated stays false: a peer login grants the feed commands, not POST
+		// and not the reader commands behind ReadRequiresAuth.
+		return c.sendResponse(281, "Authentication accepted")
+	}
 
 	user, err := c.server.AuthManager.AuthenticateUser(username, argument)
 	if err != nil {

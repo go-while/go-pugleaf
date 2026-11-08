@@ -87,6 +87,12 @@ type DBConfig struct {
 	MaxDBthreads int    // maximum number of concurrent DB batch threads
 	MaxQueued    int    // maximum number of queued articles for batch processing
 
+	// DisableThreading skips the batch writer's threading phase (threads, thread_cache and
+	// articles.reply_count): only the web view reads them. For a standalone NNTP server
+	// (nntp-server -disable-webserver-post-threads). recover-db -rebuild-threads builds the
+	// threads later if a web server is put on the data; reply_count is not rebuilt.
+	DisableThreading bool
+
 	// Backup settings
 	BackupEnabled  bool
 	BackupInterval time.Duration

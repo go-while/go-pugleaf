@@ -33,6 +33,7 @@ func stmSession(t *testing.T, hs *hServer, extra map[string]func(cc *ClientConne
 		}
 		defer conn.Close()
 		cc := NewClientConnection(conn, hs.S, false)
+		cc.resolvePeer() // what Handle does before the greeting (plan nntp-peering)
 		cc.UpdateDeadlines()
 		if cc.sendWelcome() != nil {
 			return
@@ -89,14 +90,19 @@ func stmExtra() map[string]func(cc *ClientConnection, args []string) error {
 	}
 }
 
-// stmDial opens an stmSession and, when login is true, authenticates a fresh
-// active hUser with the given posting right (RFC 4643 §2.3: 381, then 281).
-func stmDial(t *testing.T, hs *hServer, login, posting bool) *client.Conn {
+// stmDial opens an stmSession. Whether the connection may stream is decided by the
+// server's peer registry (hServerOpts.Peers), as on a real connection.
+func stmDial(t *testing.T, hs *hServer) *client.Conn {
+	t.Helper()
+	return stmSession(t, hs, stmExtra())
+}
+
+// stmDialUser opens an stmSession and authenticates a fresh active hUser with the given
+// posting right (RFC 4643 §2.3: 381, then 281). Such a user is no peer: it may POST (with
+// posting) but never feed (plan nntp-peering).
+func stmDialUser(t *testing.T, hs *hServer, posting bool) *client.Conn {
 	t.Helper()
 	c := stmSession(t, hs, stmExtra())
-	if !login {
-		return c
-	}
 	user, pass := hUser(t, posting, true)
 	code, line := c.Cmd("AUTHINFO USER %s", user)
 	if err := client.ExpectCode(code, line, 381); err != nil {
@@ -129,12 +135,14 @@ func stmChecked(p *hFakeProcessor) []string {
 }
 
 // TestStmModeStream: RFC 4644 §2.3, MODE STREAM gives 203 iff streaming is
-// allowed (D5); 501 without a processor or with arguments, 502 for a user
-// without posting rights. MODE READER stays with the hardened handler.
+// allowed (D5), which since plan nntp-peering means "on a peer connection"; 501
+// without a processor or with arguments, 480 while a peer login could still help and
+// 502 for everyone else. MODE READER stays with the hardened handler.
 func TestStmModeStream(t *testing.T) {
-	t.Run("processor", func(t *testing.T) {
-		hs := newTestServer(t, hServerOpts{Proc: &hFakeProcessor{}})
-		c := stmDial(t, hs, false, false)
+	t.Run("peer", func(t *testing.T) {
+		reg, _ := hPeerIP("")
+		hs := newTestServer(t, hServerOpts{Proc: &hFakeProcessor{}, Peers: reg})
+		c := stmDial(t, hs)
 		code, line := c.Cmd("MODE STREAM")
 		if err := client.ExpectCode(code, line, 203); err != nil {
 			t.Fatalf("MODE STREAM: %v", err)
@@ -159,7 +167,7 @@ func TestStmModeStream(t *testing.T) {
 	})
 	t.Run("no-processor", func(t *testing.T) {
 		hs := newTestServer(t, hServerOpts{})
-		c := stmDial(t, hs, false, false)
+		c := stmDial(t, hs)
 		code, line := c.Cmd("MODE STREAM")
 		if err := client.ExpectCode(code, line, 501); err != nil {
 			t.Fatalf("MODE STREAM: %v", err)
@@ -169,19 +177,37 @@ func TestStmModeStream(t *testing.T) {
 			t.Errorf("MODE READER: %v", err)
 		}
 	})
-	t.Run("non-posting-user", func(t *testing.T) {
+	t.Run("no-peers", func(t *testing.T) {
 		hs := newTestServer(t, hServerOpts{Proc: &hFakeProcessor{}})
-		c := stmDial(t, hs, true, false)
+		c := stmDial(t, hs)
 		code, line := c.Cmd("MODE STREAM")
 		if err := client.ExpectCode(code, line, 502); err != nil {
-			t.Fatalf("MODE STREAM: %v", err)
+			t.Fatalf("MODE STREAM without peers: %v", err)
+		}
+	})
+	t.Run("login-pending", func(t *testing.T) {
+		reg, _, _ := hPeerLogin(t, "127.0.0.1")
+		hs := newTestServer(t, hServerOpts{Proc: &hFakeProcessor{}, Peers: reg})
+		c := stmDial(t, hs)
+		code, line := c.Cmd("MODE STREAM")
+		if err := client.ExpectCode(code, line, 480); err != nil {
+			t.Fatalf("MODE STREAM before the peer login: %v", err)
 		}
 	})
 	t.Run("posting-user", func(t *testing.T) {
+		// nntp_users.posting means POST and nothing else (plan nntp-peering)
 		hs := newTestServer(t, hServerOpts{Proc: &hFakeProcessor{}})
-		c := stmDial(t, hs, true, true)
+		c := stmDialUser(t, hs, true)
 		code, line := c.Cmd("MODE STREAM")
-		if err := client.ExpectCode(code, line, 203); err != nil {
+		if err := client.ExpectCode(code, line, 502); err != nil {
+			t.Fatalf("MODE STREAM as a posting user: %v", err)
+		}
+	})
+	t.Run("non-posting-user", func(t *testing.T) {
+		hs := newTestServer(t, hServerOpts{Proc: &hFakeProcessor{}})
+		c := stmDialUser(t, hs, false)
+		code, line := c.Cmd("MODE STREAM")
+		if err := client.ExpectCode(code, line, 502); err != nil {
 			t.Fatalf("MODE STREAM: %v", err)
 		}
 	})
@@ -196,30 +222,45 @@ func TestStmCheck(t *testing.T) {
 	results := map[string]int{
 		idPass: history.CasePass, idDupes: history.CaseDupes, idRetry: history.CaseRetry, idError: history.CaseError,
 	}
-	proc := &hFakeProcessor{checkFn: func(id string) int {
+	checkFn := func(id string) int {
 		if r, ok := results[id]; ok {
 			return r
 		}
 		return history.CasePass
-	}}
-	hs := newTestServer(t, hServerOpts{Proc: proc})
+	}
+	proc := &hFakeProcessor{checkFn: checkFn}
+	reg, _ := hPeerIP("")
+	hs := newTestServer(t, hServerOpts{Proc: proc, Peers: reg})
 
-	t.Run("unauthenticated", func(t *testing.T) {
-		c := stmDial(t, hs, false, false)
+	// A peer login is still pending: 480, not 502 (plan nntp-peering).
+	t.Run("login-pending", func(t *testing.T) {
+		loginReg, _, _ := hPeerLogin(t, "127.0.0.1")
+		hs0 := newTestServer(t, hServerOpts{Proc: &hFakeProcessor{checkFn: checkFn}, Peers: loginReg})
+		c := stmDial(t, hs0)
 		code, line := c.Cmd("CHECK %s", idUnauth)
 		if err := stmExpectID(code, line, 480, idUnauth); err != nil {
 			t.Fatal(err)
 		}
 	})
-	t.Run("non-posting", func(t *testing.T) {
-		c := stmDial(t, hs, true, false)
+	// A user, with or without posting rights, is no peer: 502.
+	t.Run("posting-user", func(t *testing.T) {
+		hs0 := newTestServer(t, hServerOpts{Proc: &hFakeProcessor{checkFn: checkFn}})
+		c := stmDialUser(t, hs0, true)
 		code, line := c.Cmd("CHECK %s", idReader)
 		if err := stmExpectID(code, line, 502, idReader); err != nil {
 			t.Fatal(err)
 		}
 	})
-	t.Run("posting", func(t *testing.T) {
-		c := stmDial(t, hs, true, true)
+	t.Run("no-peers", func(t *testing.T) {
+		hs0 := newTestServer(t, hServerOpts{Proc: &hFakeProcessor{checkFn: checkFn}})
+		c := stmDial(t, hs0)
+		code, line := c.Cmd("CHECK %s", idReader)
+		if err := stmExpectID(code, line, 502, idReader); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("peer", func(t *testing.T) {
+		c := stmDial(t, hs)
 		for _, tc := range []struct {
 			id   string
 			want int
@@ -251,8 +292,8 @@ func TestStmCheck(t *testing.T) {
 		}
 	})
 	t.Run("no-processor", func(t *testing.T) {
-		hs0 := newTestServer(t, hServerOpts{})
-		c := stmDial(t, hs0, false, false)
+		hs0 := newTestServer(t, hServerOpts{Peers: reg})
+		c := stmDial(t, hs0)
 		id := hMessageID(g, 7)
 		code, line := c.Cmd("CHECK %s", id)
 		if err := stmExpectID(code, line, 500, id); err != nil {
@@ -276,8 +317,9 @@ func TestStmCheck(t *testing.T) {
 func TestStmPipelined(t *testing.T) {
 	const n = 50
 	proc := &hFakeProcessor{checkFn: func(string) int { return history.CaseDupes }}
-	hs := newTestServer(t, hServerOpts{Proc: proc, ErrorDelay: 200 * time.Millisecond})
-	c := stmDial(t, hs, true, true)
+	reg, _ := hPeerIP("")
+	hs := newTestServer(t, hServerOpts{Proc: proc, Peers: reg, ErrorDelay: 200 * time.Millisecond})
+	c := stmDial(t, hs)
 
 	g := hGroupName("rc4.pipe")
 	ids := make([]string, n)
@@ -311,8 +353,9 @@ func TestStmPipelined(t *testing.T) {
 // the TAKETHIS of the same id (RFC 4644 §2.4, §2.5).
 func TestStmCheckThenTakethis(t *testing.T) {
 	proc := &hFakeProcessor{checkResult: history.CasePass, processResult: history.CasePass}
-	hs := newTestServer(t, hServerOpts{Proc: proc})
-	c := stmDial(t, hs, true, true)
+	reg, _ := hPeerIP("")
+	hs := newTestServer(t, hServerOpts{Proc: proc, Peers: reg})
+	c := stmDial(t, hs)
 
 	g := hGroupName("rc4.take")
 	id := hMessageID(g, 1)

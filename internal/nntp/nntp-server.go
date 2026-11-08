@@ -32,6 +32,9 @@ type ArticleProcessor interface {
 	// CheckMessageID returns history.CasePass (wanted), history.CaseDupes (have it),
 	// history.CaseRetry (in progress) or history.CaseError for an offered message-id
 	CheckMessageID(messageID string) int
+	// RememberReject records messageID as rejected in the history index (a permanent refusal
+	// decided in the NNTP layer: Path loop, peer pattern), so peers stop offering it again.
+	RememberReject(messageID string)
 	// FindArticleByMessageID looks in currentGroup first, then in the groups from the history index.
 	// A definite miss returns an error wrapping ErrArticleNotFound (nntp-backend-pool.go).
 	FindArticleByMessageID(messageID, currentGroup string) (*models.Article, error)
@@ -101,14 +104,18 @@ type NNTPServer struct {
 	AuthManager *AuthManager
 	Stats       *ServerStats
 	Processor   ArticleProcessor // For handling incoming articles (POST/IHAVE/TAKETHIS)
-	shutdown    chan struct{}
-	wg          *sync.WaitGroup // Use external waitgroup for coordination
-	mu          sync.RWMutex
-	local430    *Local430     // Cache for 430 responses
-	postWait    atomic.Int64  // PostCommitWait in nanoseconds (SetPostCommitWait)
-	xref        xrefModeStore // Xref: header mode (SetXrefMode)
-	running     bool
-	bgOnce      sync.Once // starts the background goroutines once
+	// Peers decides which connections may feed (IHAVE/CHECK/TAKETHIS/MODE STREAM, plan
+	// nntp-peering). nil: no peers, so nothing may feed. It caches the peers table and
+	// starts no goroutine.
+	Peers    *PeerRegistry
+	shutdown chan struct{}
+	wg       *sync.WaitGroup // Use external waitgroup for coordination
+	mu       sync.RWMutex
+	local430 *Local430     // Cache for 430 responses
+	postWait atomic.Int64  // PostCommitWait in nanoseconds (SetPostCommitWait)
+	xref     xrefModeStore // Xref: header mode (SetXrefMode)
+	running  bool
+	bgOnce   sync.Once // starts the background goroutines once
 
 	// Same-process arrivals (POST/IHAVE/TAKETHIS) of the last ArrivalGrace: the by-message-id
 	// lookup tries their groups and caches no miss for them (plan post-430-window).
@@ -162,6 +169,7 @@ func NewNNTPServer(db *database.Database, cfg *config.ServerConfig, mainWG *sync
 		AuthManager: NewAuthManager(db),
 		Stats:       NewServerStats(),
 		Processor:   processor,
+		Peers:       NewPeerRegistry(db),
 		shutdown:    make(chan struct{}),
 		wg:          mainWG, // Use external waitgroup for coordination
 		local430:    &Local430{cache: make(map[string]time.Time), ttl: DefaultLocal430TTL},

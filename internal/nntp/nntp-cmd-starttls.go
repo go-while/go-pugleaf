@@ -40,24 +40,29 @@ func starttlsConfigFor(certFile, keyFile string) (*tls.Config, error) {
 }
 
 // starttlsAvailable reports whether STARTTLS may be used (and advertised) now:
-// a certificate is configured, the connection is plaintext and not authenticated
-// (RFC 4642 §2.2.2).
+// a certificate is configured, the connection is plaintext and no AUTHINFO has
+// succeeded, as a user or as a peer (RFC 4642 §2.2.2).
 func (c *ClientConnection) starttlsAvailable() bool {
-	return !c.isTLS && !c.authenticated && c.server != nil && c.server.Config != nil &&
+	return !c.isTLS && !c.loggedIn() && c.server != nil && c.server.Config != nil &&
 		c.server.Config.NNTP.TLSCert != "" && c.server.Config.NNTP.TLSKey != ""
 }
 
 // resetSessionState discards everything learned from the client before the TLS
 // layer was negotiated (RFC 4642 §2.2.2). No per-user connection slot can be
-// held here: STARTTLS is refused after authentication.
+// held here: STARTTLS is refused after authentication. A peer login is discarded
+// too; the peer match by address does not depend on anything the client said, so
+// it is taken again (plan nntp-peering).
 func (c *ClientConnection) resetSessionState() {
 	c.authenticated = false
 	c.user = nil
 	c.authUsername = ""
+	c.peer = nil
+	c.peerLoggedIn = false
 	c.currentGroup = ""
 	c.currentFirst = 0
 	c.currentLast = 0
 	c.currentArticle = 0
+	c.resolvePeer()
 }
 
 // handleStartTLS handles STARTTLS (RFC 4642 §2.2): 382, then the TLS handshake

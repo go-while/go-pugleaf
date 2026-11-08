@@ -984,7 +984,9 @@ retry1:
 	// error is still checked, so the day batchProcessThreading starts propagating shows up in
 	// the log instead of being dropped on the floor - and that is the day this call site needs
 	// a bounded loop like retry1's, with the test retry1 has.
-	if err := sq.batchProcessThreading(task.Newsgroup, batches, groupDB); err != nil {
+	if sq.db.dbconfig.DisableThreading {
+		// Standalone NNTP server: nothing reads the threading tables (DBConfig.DisableThreading).
+	} else if err := sq.batchProcessThreading(task.Newsgroup, batches, groupDB); err != nil {
 		// Deliberately promises only what is guaranteed: the article rows, their history
 		// entries and the newsgroup counters do survive, but the threading phase also writes
 		// articles.reply_count (batchUpdateReplyCounts) and NOTHING recomputes that column -
@@ -1013,6 +1015,12 @@ retry1:
 		}
 	}
 	var latestDate time.Time
+	// Outgoing transit feed (plan nntp-peering, slice feed-queue): one atomic load per
+	// batch, nil unless a server runs an outgoing feed. The snapshots are taken below,
+	// where the article's last group copy is done and before its fields are cleared, and
+	// handed over after the loop so no article mutex is held while the hook runs.
+	onCommitted := loadFeedHook()
+	var feedSnaps []FeedArticle
 	for _, article := range batches {
 		if article == nil {
 			continue
@@ -1047,6 +1055,14 @@ retry1:
 			latestDate = dateSent
 		}
 		article.Mux.Lock()
+		// Outgoing feed: remember that THIS group's batch really inserted the row, not
+		// that the article was ignored as a stored duplicate. It is a per-article flag
+		// because the last group copy (the one that takes the snapshot below) may well
+		// be a duplicate while an earlier group's batch inserted it; both write it
+		// under article.Mux, so the batches of a crosspost see each other's answer.
+		if _, ok := inserted[article]; ok {
+			article.FeedStored = true
+		}
 		if len(article.NewsgroupsPtr) > 0 {
 			index := -1
 			for j, ptr := range article.NewsgroupsPtr {
@@ -1063,6 +1079,13 @@ retry1:
 				// Still referenced by other groups; skip clearing and continue
 				continue
 			}
+		}
+		// The last group copy of this article is done: take the feed snapshot before the
+		// fields below are cleared. Once per article, so a crossposted one is offered to
+		// a peer once, and only when some group's batch really inserted it (FeedStored):
+		// an article every group already stored is new to nobody and must not be fed.
+		if onCommitted != nil && article.FeedOut && article.FeedStored && messageID != "" {
+			feedSnaps = append(feedSnaps, feedSnapshot(article, *task.Newsgroup))
 		}
 		// clear values and unlink pointers to free memory
 		article.MessageID = ""
@@ -1083,6 +1106,10 @@ retry1:
 		article.RefSlice = nil
 		article.Mux.Unlock()
 		article = nil
+	}
+	// Outgoing feed: handed over with no article mutex held. The hook never blocks.
+	for _, snap := range feedSnaps {
+		onCommitted(snap)
 	}
 	//historyDuration := time.Since(start)
 	//log.Printf("[BATCH] processNewsgroupBatch Completed history/cache updates for group '%s' in %v", *task.Newsgroup, historyDuration)

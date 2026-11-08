@@ -210,6 +210,12 @@ func TestE2EPost430Binary(t *testing.T) {
 	}
 	_, err = mainDB.Exec(`INSERT INTO newsgroups(name,description,last_article,message_count,active,hierarchy,status,low_water,high_water)
 		VALUES(?,'',0,0,1,'post430','y',1,0),(?,'',0,0,1,'post430','y',1,0)`, p430GroupA, p430GroupB)
+	if err == nil {
+		// Only a peer may feed (plan nntp-peering): one peer that may feed from
+		// 127.0.0.1 without a login, so the IHAVE of P10 gets past the feed gate.
+		_, err = mainDB.Exec(`INSERT INTO peers(name,path_token,hosts,in_patterns,max_conns,enabled)
+			VALUES('post430-peer','e2e.client.invalid','127.0.0.1','*',4,1)`)
+	}
 	if cerr := mainDB.Close(); cerr != nil && err == nil {
 		err = cerr
 	}

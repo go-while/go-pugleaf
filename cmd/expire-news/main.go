@@ -43,7 +43,8 @@ func showUsageExamples() {
 	fmt.Println("  -prune: Remove oldest articles to respect max_articles limit per group")
 	fmt.Println("  -trim-history: Also remove deleted articles from the message-id history index")
 	fmt.Println("                 (default: history entries are kept, so expired articles are still")
-	fmt.Println("                 rejected as duplicates when offered again)")
+	fmt.Println("                 rejected as duplicates when offered again). It also prunes the")
+	fmt.Println("                 remembered rejects older than the HistoryRejectDays setting")
 	fmt.Println()
 	fmt.Println("Safety Features:")
 	fmt.Println("  - Always runs in dry-run mode first unless -force is specified")
@@ -141,11 +142,19 @@ func main() {
 			os.Exit(1)
 		}
 		log.Printf("TRIM HISTORY: deleted articles will be removed from the history index")
+		log.Printf("TRIM HISTORY: remembered rejects older than %d days will be pruned (0 = kept)", db.HistoryRejectDays())
 	}
 
-	// Set up signal handling for graceful shutdown
+	// Set up signal handling for graceful shutdown. stopChan is closed on the first signal, so
+	// the group loop and the reject prune (which does not read the signal channel) both see it.
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	stopChan := make(chan struct{})
+	go func() {
+		<-sigChan
+		log.Printf("Received shutdown signal, stopping...")
+		close(stopChan)
+	}()
 
 	// Get newsgroups to process
 	newsgroups, err := getNewsgroupsToExpire(db, *targetGroup)
@@ -157,6 +166,13 @@ func main() {
 
 	if len(newsgroups) == 0 {
 		log.Printf("No newsgroups found matching pattern: %s", *targetGroup)
+		// Remembered rejects are not bound to a newsgroup: -trim-history still prunes them.
+		if hist != nil {
+			if !pruneExpiredRejects(hist, db.HistoryRejectDays(), stopChan) {
+				shutdown(db, hist)
+				os.Exit(1)
+			}
+		}
 		shutdown(db, hist)
 		return
 	}
@@ -184,8 +200,7 @@ func main() {
 groupLoop:
 	for i, ng := range newsgroups {
 		select {
-		case <-sigChan:
-			log.Printf("Received shutdown signal, stopping...")
+		case <-stopChan:
 			interrupted = true
 			break groupLoop
 		default:
@@ -286,6 +301,19 @@ groupLoop:
 		totalScanned += totalScannedInGroup
 	}
 
+	// Remembered rejects are not bound to a newsgroup: the expired ones are pruned once per
+	// run, after the groups (plan nntp-peering). An interrupted run leaves them for the next one.
+	if hist != nil && !interrupted {
+		if !pruneExpiredRejects(hist, db.HistoryRejectDays(), stopChan) {
+			errorCount++
+		}
+		select {
+		case <-stopChan: // a signal during the prune ended the walk early
+			interrupted = true
+		default:
+		}
+	}
+
 	// Summary
 	log.Printf("\n=== Expiration Summary ===")
 	if *dryRun {
@@ -337,6 +365,29 @@ func shutdown(db *database.Database, hist *history.History) (ok bool) {
 		}
 	})
 	return ok
+}
+
+// rejectPruner is the part of *history.History the reject prune uses (tests record the calls)
+type rejectPruner interface {
+	PruneRejects(days int, stop <-chan struct{}) (int64, error)
+}
+
+// pruneExpiredRejects removes the remembered rejects (plan nntp-peering) that are older than
+// days days from the history index; days <= 0 keeps them as long as history. stop (closed by
+// the signal handler) ends the walk between batches. It logs the result and reports whether the
+// prune succeeded.
+func pruneExpiredRejects(p rejectPruner, days int, stop <-chan struct{}) (ok bool) {
+	if days <= 0 {
+		log.Printf("TRIM HISTORY: HistoryRejectDays is 0, remembered rejects are kept")
+		return true
+	}
+	n, err := p.PruneRejects(days, stop)
+	if err != nil {
+		log.Printf("Error pruning remembered rejects older than %d days (removed %d): %v", days, n, err)
+		return false
+	}
+	log.Printf("TRIM HISTORY: pruned %d remembered rejects older than %d days", n, days)
+	return true
 }
 
 // historyRemover is the part of *history.History the history trim uses (tests record the calls)

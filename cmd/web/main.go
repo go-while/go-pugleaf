@@ -16,6 +16,7 @@ import (
 
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/database"
+	"github.com/go-while/go-pugleaf/internal/feed"
 	"github.com/go-while/go-pugleaf/internal/history"
 	"github.com/go-while/go-pugleaf/internal/models"
 	"github.com/go-while/go-pugleaf/internal/preloader"
@@ -341,6 +342,9 @@ func main() {
 	log.Printf("[WEB]: PostQueueWorker started for web posting")
 
 	// Create and start web server in a goroutine for non-blocking startup
+	// The peers page reads the outgoing feed counters from the nntp-server's queue file,
+	// read-only (a missing file shows n/a).
+	web.SetFeedQueueOpener(func(path string) (web.FeedQueueReader, error) { return feed.OpenReadOnly(path) })
 	server, err := web.NewWebServer(db, webConfig, nil, editCronjobs, noCronjobs) // no embedded NNTP server (D10)
 	if err != nil {
 		log.Printf("[WEB]: %v", err)

@@ -47,6 +47,19 @@ func (proc *Processor) ProcessArticle(article *models.Article, legacyNewsgroup s
 	rejected := func(reason string) error {
 		return fmt.Errorf("%w: %s", common.ErrIntakeRejected, reason)
 	}
+	// rejectArticle is rejected() for a refusal that depends on the article alone (bad or
+	// missing headers, a control message, an unusable date, too many newsgroups): on the bulk
+	// (fetcher/importer) path the message-id is also remembered as rejected, so a peer
+	// offering it later gets "not wanted" (plan nntp-peering). Group-dependent refusals (a
+	// group we do not carry, the max_art_size of one group) are never remembered this way,
+	// and neither are site posts from the web queue (see rememberBulkReject). The feed path
+	// remembers its refusals in ProcessIncomingArticle.
+	rejectArticle := func(reason string) error {
+		if bulkmode {
+			proc.rememberBulkReject(article)
+		}
+		return rejected(reason)
+	}
 
 	// A-tools-1: one capture slot per article, taken before article.Mux is locked (a waiting
 	// producer holds no article mutex, so there is no lock cycle with the capture goroutines).
@@ -113,6 +126,7 @@ func (proc *Processor) ProcessArticle(article *models.Article, legacyNewsgroup s
 			normalized, err := common.CheckHeaderBlock(strings.Split(article.HeadersJSON, "\n"), common.HeaderBlockFetch)
 			if err != nil {
 				log.Printf("[INTAKE] article '%s' (bulk) rejected: %v", article.MessageID, err)
+				proc.rememberBulkReject(article)
 				proc.setCaseDupes(msgIdItem, bulkmode)
 				return history.CaseError, err
 			}
@@ -120,9 +134,21 @@ func (proc *Processor) ProcessArticle(article *models.Article, legacyNewsgroup s
 			if mid := common.HeaderValue(normalized, "Message-ID"); mid != "" && mid != article.MessageID {
 				log.Printf("[INTAKE] article '%s' (bulk) rejected: Message-ID header %q differs", article.MessageID, mid)
 				proc.setCaseDupes(msgIdItem, bulkmode)
-				return history.CaseError, rejected("invalid message-id")
+				return history.CaseError, rejectArticle("invalid message-id")
 			}
 			lines = normalized
+		}
+
+		// D3 and decision 6 of plan nntp-peering: the bulk (fetcher/importer) path refuses a
+		// control message exactly like NNTP intake does (validateIntakeHeaders), logs it once
+		// per group per run and remembers it as rejected. A Supersedes header stays ignored.
+		if ctl := bulkControlHeader(article, lines); ctl != "" {
+			if controlRefusals.first(legacyNewsgroup) {
+				log.Printf("[INTAKE] control message %s (%s) in '%s' refused: control messages are not processed (logged once per group)",
+					article.MessageID, ctl, legacyNewsgroup)
+			}
+			proc.setCaseDupes(msgIdItem, bulkmode)
+			return history.CaseError, rejectArticle("control messages not accepted")
 		}
 
 		// dont process crossposts if we downloaded articles in bulkmode
@@ -132,7 +158,7 @@ func (proc *Processor) ProcessArticle(article *models.Article, legacyNewsgroup s
 		if newsgroupsStr == "" {
 			log.Printf("[SPAM:HDR] Article '%s' no newsgroups header", article.MessageID)
 			proc.setCaseDupes(msgIdItem, bulkmode)
-			return history.CaseError, rejected("missing mandatory header")
+			return history.CaseError, rejectArticle("missing mandatory header")
 		}
 
 		ngs := proc.extractGroupsFromHeaders(article.MessageID, newsgroupsStr)
@@ -141,9 +167,9 @@ func (proc *Processor) ProcessArticle(article *models.Article, legacyNewsgroup s
 			log.Printf("[SPAM:EMP] Article '%s' newsgroups=%d", article.MessageID, len(ngs))
 			proc.setCaseDupes(msgIdItem, bulkmode)
 			if len(ngs) == 0 {
-				return history.CaseError, rejected("invalid newsgroups")
+				return history.CaseError, rejectArticle("invalid newsgroups")
 			}
-			return history.CaseError, rejected("too many newsgroups")
+			return history.CaseError, rejectArticle("too many newsgroups")
 		}
 		newsgroups = append(newsgroups, legacyNewsgroup)
 
@@ -211,12 +237,12 @@ func (proc *Processor) ProcessArticle(article *models.Article, legacyNewsgroup s
 		log.Printf("[HDR-SPAM] Article '%s' empty subject... headers='%#v'", article.MessageID, article.Headers)
 		//article.Subject = "No Subject" // Fallback to a default value
 		proc.setCaseDupes(msgIdItem, bulkmode)
-		return history.CaseError, rejected("missing mandatory header")
+		return history.CaseError, rejectArticle("missing mandatory header")
 	}
 	if article.FromHeader == "" {
 		log.Printf("[HDR-SPAM] Article '%s' empty from header... headers='%#v'", article.MessageID, article.Headers)
 		proc.setCaseDupes(msgIdItem, bulkmode)
-		return history.CaseError, rejected("missing mandatory header")
+		return history.CaseError, rejectArticle("missing mandatory header")
 	}
 
 	if bulkmode {
@@ -230,19 +256,30 @@ func (proc *Processor) ProcessArticle(article *models.Article, legacyNewsgroup s
 		if article.DateSent.IsZero() {
 			log.Printf("[ERROR-HDR] Article '%s' no valid date... headerDate='%v' dateString='%s'", article.MessageID, article.DateSent, article.DateString)
 			proc.setCaseDupes(msgIdItem, bulkmode)
-			return history.CaseError, rejected("invalid date")
+			return history.CaseError, rejectArticle("invalid date")
 		}
 		// Check for future posts (more than MaxFutureDate in the future) and skip processing
 		if article.DateSent.After(time.Now().Add(MaxFutureDate)) {
 			log.Printf("[SPAM-HDR:FUTURE] Article '%s' posted too far in future (date: %v), skipping", article.MessageID, article.DateSent)
 			proc.setCaseDupes(msgIdItem, bulkmode)
-			return history.CaseError, rejected("date in the future")
+			return history.CaseError, rejectArticle("date in the future")
 		}
 	}
 
 	// part of parsing data moved to nntp-client-commands.go:L~850 (func ParseLegacyArticleLines)
 	// the history index is written by the batch system after the article was committed (db_batch.go)
 	article.MsgIdItem = msgIdItem
+
+	// Outgoing transit feed (plan nntp-peering): only an article this server accepted on the
+	// NNTP feed (IHAVE/TAKETHIS) or through NNTP POST is queued for the peers, which is
+	// exactly the non-bulk path. Fetched and imported articles (bulkmode, including the
+	// web post queue's own copies) are never queued, so an archive import does not flood
+	// the peers. The batch writer reads the marker at its commit point (db_batch.go,
+	// database.feedSnapshot); it is set either way, never left over from the article pool.
+	// FeedStored is the batch writer's own answer to "was this row really new to some
+	// group?" and starts false for the same reason.
+	article.FeedOut = !bulkmode
+	article.FeedStored = false
 
 	article.ArticleNums = make(map[*string]int64)
 	// One slot per possible target group plus one: the capture sends below must never block.
