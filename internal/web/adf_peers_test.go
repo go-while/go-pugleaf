@@ -138,6 +138,14 @@ func TestAdfPeersCreate(t *testing.T) {
 	if !strings.Contains(body, "password set") {
 		t.Errorf("peers page does not show that the peer login password is set")
 	}
+	// The configuration for the peer's side (INN and Diablo) is on the page, with the
+	// passwords as placeholders (checked by the secret loop above).
+	for _, want := range []string{"config-peer-", "Tm:innfeed!", "Diablo (dnewsfeeds)", "set for you on our side",
+		`data-preset-for="in_patterns"`, `data-preset-for="out_patterns"`, "newsdeef text only", "$NEWSDEEFNOBINARY=\\"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("peers page lacks the peer configuration part %q", want)
+		}
+	}
 }
 
 // TestAdfPeersCreateDefaults: the empty pattern, port and max_conns fields fall back to the
