@@ -6,10 +6,14 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/go-while/go-pugleaf/internal/database"
+	"github.com/go-while/go-pugleaf/internal/feed"
 	"github.com/go-while/go-pugleaf/internal/models"
 	"github.com/mattn/go-sqlite3"
 )
@@ -23,15 +27,95 @@ import (
 // adminPeersRedirect is where every peers form posts back to.
 const adminPeersRedirect = "/admin/peers"
 
-// PeerFeedStats holds the outgoing-feed numbers of one peer. It is nil until the feed sender of
-// wave 3 fills it, and the page then shows a placeholder instead of invented numbers.
+// PeerFeedStats holds the outgoing-feed numbers of one peer, as the feed sender last wrote
+// them into the queue file. It stays nil when there are no numbers (no sender has run, the
+// queue file is not there, or this process cannot read it), and the page then shows "n/a"
+// instead of invented numbers.
 type PeerFeedStats struct {
 	QueueDepth int64
 	Offered    int64
 	Accepted   int64
 	Refused    int64
+	Rejected   int64
 	Deferred   int64
 	LastError  string
+}
+
+// FeedQueueReader is what this page needs from the outgoing feed queue file: the per-peer
+// counters the sender stored there. The queue of internal/feed implements it.
+type FeedQueueReader interface {
+	ReadStats() (map[int64]feed.Stats, error)
+	Close() error
+}
+
+// FeedQueueOpener opens the feed queue file at path for reading.
+type FeedQueueOpener func(path string) (FeedQueueReader, error)
+
+var (
+	feedQueueMu   sync.RWMutex
+	openFeedQueue FeedQueueOpener // nil: the page has no numbers to show
+)
+
+// SetFeedQueueOpener installs the opener the peers page uses to read the counters of the
+// outgoing feed; cmd/web wires the queue of internal/feed (read-only). The feed queue lives in
+// its own SQLite file written by the nntp-server process, so the web process only reads it, for
+// one request at a time. Without an opener the page shows "n/a".
+func SetFeedQueueOpener(o FeedQueueOpener) {
+	feedQueueMu.Lock()
+	openFeedQueue = o
+	feedQueueMu.Unlock()
+}
+
+// feedQueuePath is where the feed queue file of this data root lives.
+func feedQueuePath(dataDir string) string {
+	return filepath.Join(dataDir, "cfg", feed.DefaultQueueFile)
+}
+
+// feedStats returns the stored counters per peer ID, or nil when there are none: no opener
+// wired, no queue file yet, or an unreadable one (logged, never an error page).
+func (s *WebServer) feedStats() map[int64]feed.Stats {
+	feedQueueMu.RLock()
+	open := openFeedQueue
+	feedQueueMu.RUnlock()
+	if open == nil || s.DB == nil {
+		return nil
+	}
+	path := feedQueuePath(s.DB.GetDataDir())
+	if _, err := os.Stat(path); err != nil {
+		return nil // no feed queue on this host: nothing to show
+	}
+	q, err := open(path)
+	if err != nil {
+		log.Printf("[WEB]: Failed to open the feed queue %s: %v", path, err)
+		return nil
+	}
+	if q == nil {
+		return nil
+	}
+	defer func() {
+		if err := q.Close(); err != nil {
+			log.Printf("[WEB]: Failed to close the feed queue %s: %v", path, err)
+		}
+	}()
+	stats, err := q.ReadStats()
+	if err != nil {
+		log.Printf("[WEB]: Failed to read the feed counters from %s: %v", path, err)
+		return nil
+	}
+	return stats
+}
+
+// peerFeedStats copies one peer's stored counters into the view type.
+func peerFeedStats(st feed.Stats) *PeerFeedStats {
+	return &PeerFeedStats{
+		QueueDepth: st.QueueDepth,
+		Offered:    st.Offered,
+		Accepted:   st.Accepted,
+		Refused:    st.Refused,
+		Rejected:   st.Rejected,
+		Deferred:   st.Deferred,
+		LastError:  st.LastError,
+	}
 }
 
 // PeerView is one row of the peers page: the peer without its secrets, plus whether each
@@ -40,7 +124,7 @@ type PeerView struct {
 	*models.Peer
 	InPasswordSet  bool
 	OutPasswordSet bool
-	Stats          *PeerFeedStats // nil: the outgoing feed (wave 3) is not implemented yet
+	Stats          *PeerFeedStats // nil: no counters are available (see PeerFeedStats)
 }
 
 // AdminPeersPageData is the template data of admin_peers.html.
@@ -81,9 +165,14 @@ func (s *WebServer) adminPeersPage(c *Context) {
 		s.renderError(c, http.StatusInternalServerError, "Database Error", "Failed to load peers")
 		return
 	}
+	stats := s.feedStats()
 	views := make([]*PeerView, 0, len(peers))
 	for _, p := range peers {
-		views = append(views, newPeerView(p))
+		v := newPeerView(p)
+		if st, ok := stats[p.ID]; ok {
+			v.Stats = peerFeedStats(st)
+		}
+		views = append(views, v)
 	}
 
 	data := AdminPeersPageData{

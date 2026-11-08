@@ -128,18 +128,19 @@
                   {{end}}
                 </td>
                 <td><code>{{.OutPatterns}}</code></td>
-                <!-- Queue depth and the per-peer counters are filled by the outgoing feed (plan
-                     nntp-peering, wave 3). Until the sender exists, .Stats is nil and these two
-                     columns stay empty on purpose: no invented numbers. -->
+                <!-- Queue depth and the per-peer counters come from the feed queue file the
+                     sender writes (data/cfg/feed-queue.sq3, at most once a minute). .Stats is
+                     nil while there are no numbers (no sender has run yet, or this process
+                     cannot read the file) and both columns then show n/a: no invented numbers. -->
                 <td>
-                  {{if .Stats}}{{.Stats.QueueDepth}}{{else}}<span class="text-muted" title="filled once the outgoing feed is implemented">n/a</span>{{end}}
+                  {{if .Stats}}{{.Stats.QueueDepth}}{{else}}<span class="text-muted" title="no counters: the outgoing feed has not written any yet">n/a</span>{{end}}
                 </td>
                 <td>
                   {{if .Stats}}
-                    <small>offered {{.Stats.Offered}} / accepted {{.Stats.Accepted}} / refused {{.Stats.Refused}} / deferred {{.Stats.Deferred}}
+                    <small>offered {{.Stats.Offered}} / accepted {{.Stats.Accepted}} / refused {{.Stats.Refused}} / rejected {{.Stats.Rejected}} / deferred {{.Stats.Deferred}}
                     {{if .Stats.LastError}}<br><span class="text-danger">{{.Stats.LastError}}</span>{{end}}</small>
                   {{else}}
-                    <span class="text-muted" title="filled once the outgoing feed is implemented">n/a</span>
+                    <span class="text-muted" title="no counters: the outgoing feed has not written any yet">n/a</span>
                   {{end}}
                 </td>
                 <td>
