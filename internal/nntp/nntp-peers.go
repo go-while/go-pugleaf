@@ -504,6 +504,21 @@ func pathElementHost(element string) string {
 	return el
 }
 
+// PathElementHost is pathElementHost under an exported name, for the packages that have to
+// read a Path the same way this one does (internal/feed: the outgoing feed skips a peer
+// whose path_token the Path already names). It changes nothing about the behaviour.
+func PathElementHost(element string) string {
+	return pathElementHost(element)
+}
+
+// PathHasElement is pathHasIdentity under its general name: it reports whether path holds
+// host as one of its elements, ignoring case and the RFC 5537 §3.2.1 keyword suffixes, so
+// "host.MISMATCH" and "host.SEEN.192.0.2.1" both count. The inbound loop check uses it with
+// this server's identity; the outgoing feed (internal/feed) uses it with a peer's path_token.
+func PathHasElement(path, host string) bool {
+	return pathHasIdentity(path, host)
+}
+
 // pathKeyword reports whether component is one of the RFC 5537 §3.2.1 Path keywords.
 func pathKeyword(component string) bool {
 	return strings.EqualFold(component, "SEEN") ||
