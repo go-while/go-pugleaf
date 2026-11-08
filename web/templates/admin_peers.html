@@ -55,8 +55,14 @@
             wins: <code>*</code> every group, <code>!comp.*</code> excludes a subtree,
             <code>@alt.binaries.*</code> poisons the whole article (one matching group refuses the article
             even when another group of it is wanted). <em>In patterns</em> are the groups the peer may send
-            us, <em>out patterns</em> the groups we offer to the peer.
+            us, <em>out patterns</em> the groups we offer to the peer. The <em>preset</em> menu under each
+            field fills in a common list, including the newsdeef.eu defaults that pugleaf.net's INN servers
+            use (newsdeef peers also limit the size with the out flag <code>&lt;{{.NewsdeefMaxSize}}</code>).
           </p>
+          <details class="mb-2">
+            <summary>newsdeef.eu pattern lists (INN newsfeeds variables)</summary>
+            <pre class="border rounded p-2 small mt-2" style="white-space: pre-wrap;">{{.NewsdeefINN}}</pre>
+          </details>
           <p class="mb-0">
             <strong>Path token.</strong> The peer's own Path identity, the leftmost element it writes into
             <code>Path:</code>. An article arriving from the peer with that token on the left gets our
@@ -147,6 +153,9 @@
                   <button type="button" class="btn btn-outline-primary btn-sm"
                           data-bs-toggle="collapse" data-bs-target="#edit-peer-{{.ID}}"
                           title="edit peer {{.Name}}">Edit</button>
+                  <button type="button" class="btn btn-outline-secondary btn-sm"
+                          data-bs-toggle="collapse" data-bs-target="#config-peer-{{.ID}}"
+                          title="INN and Diablo configuration for {{.Name}}'s side">Config</button>
                 </td>
                 <td>
                   {{if .Enabled}}
@@ -159,6 +168,30 @@
                     <button type="submit" class="btn btn-outline-danger btn-sm">Delete</button>
                   </form>
                   {{end}}
+                </td>
+              </tr>
+              <!-- Collapsible peering configuration for the peer's side -->
+              <tr class="collapse" id="config-peer-{{.ID}}">
+                <td colspan="13">
+                  <div class="card">
+                    <div class="card-header bg-secondary text-white">
+                      <h6 class="mb-0">Configuration for {{.Name}}'s side: paste into their INN or Diablo</h6>
+                    </div>
+                    <div class="card-body">
+                      <p class="small text-muted mb-2">Built from this peer row and our host name. Passwords are
+                        shown as placeholders; give them to the peer's admin yourself.</p>
+                      <div class="row">
+                        <div class="col-lg-6">
+                          <h6>INN (incoming.conf, newsfeeds, innfeed.conf)</h6>
+                          <pre class="border rounded p-2 small" style="white-space: pre-wrap;">{{.Config.INN}}</pre>
+                        </div>
+                        <div class="col-lg-6">
+                          <h6>Diablo (dnewsfeeds)</h6>
+                          <pre class="border rounded p-2 small" style="white-space: pre-wrap;">{{.Config.Diablo}}</pre>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
                 </td>
               </tr>
               <!-- Collapsible edit form -->
@@ -226,6 +259,10 @@
                             <div class="mb-3">
                               <label class="form-label">In patterns (groups the peer may send)</label>
                               <input type="text" class="form-control" name="in_patterns" value="{{.InPatterns}}">
+                              <select class="form-select form-select-sm mt-1" data-preset-for="in_patterns" aria-label="in_patterns preset">
+                                <option value="">preset&hellip;</option>
+                                {{range $.PatternPresets}}<option value="{{.Patterns}}">{{.Label}}</option>{{end}}
+                              </select>
                             </div>
                           </div>
                         </div>
@@ -291,6 +328,10 @@
                             <div class="mb-3">
                               <label class="form-label">Out patterns (groups we offer)</label>
                               <input type="text" class="form-control" name="out_patterns" value="{{.OutPatterns}}">
+                              <select class="form-select form-select-sm mt-1" data-preset-for="out_patterns" aria-label="out_patterns preset">
+                                <option value="">preset&hellip;</option>
+                                {{range $.PatternPresets}}<option value="{{.Patterns}}">{{.Label}}</option>{{end}}
+                              </select>
                             </div>
                           </div>
                         </div>
@@ -383,6 +424,10 @@
               <div class="mb-3">
                 <label class="form-label">In patterns (groups the peer may send)</label>
                 <input type="text" class="form-control" name="in_patterns" value="{{.DefaultInPatterns}}">
+                <select class="form-select form-select-sm mt-1" data-preset-for="in_patterns" aria-label="in_patterns preset">
+                  <option value="">preset&hellip;</option>
+                  {{range $.PatternPresets}}<option value="{{.Patterns}}">{{.Label}}</option>{{end}}
+                </select>
               </div>
             </div>
           </div>
@@ -439,6 +484,10 @@
               <div class="mb-3">
                 <label class="form-label">Out patterns (groups we offer)</label>
                 <input type="text" class="form-control" name="out_patterns" value="{{.DefaultOutPatterns}}">
+                <select class="form-select form-select-sm mt-1" data-preset-for="out_patterns" aria-label="out_patterns preset">
+                  <option value="">preset&hellip;</option>
+                  {{range $.PatternPresets}}<option value="{{.Patterns}}">{{.Label}}</option>{{end}}
+                </select>
               </div>
             </div>
           </div>
@@ -462,4 +511,15 @@
     </div>
   </div>
 </div>
+<script>
+  // Pattern presets: picking one fills the patterns field of the same form (still editable).
+  document.querySelectorAll('select[data-preset-for]').forEach(function (sel) {
+    sel.addEventListener('change', function () {
+      if (!sel.value || !sel.form) { return; }
+      var input = sel.form.elements[sel.dataset.presetFor];
+      if (input) { input.value = sel.value; }
+      sel.selectedIndex = 0;
+    });
+  });
+</script>
 {{end}}

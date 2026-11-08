@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/feed"
 	"github.com/go-while/go-pugleaf/internal/models"
@@ -124,7 +125,8 @@ type PeerView struct {
 	*models.Peer
 	InPasswordSet  bool
 	OutPasswordSet bool
-	Stats          *PeerFeedStats // nil: no counters are available (see PeerFeedStats)
+	Stats          *PeerFeedStats     // nil: no counters are available (see PeerFeedStats)
+	Config         PeerConfigSnippets // INN and Diablo configuration for the peer's side
 }
 
 // AdminPeersPageData is the template data of admin_peers.html.
@@ -135,6 +137,9 @@ type AdminPeersPageData struct {
 	DefaultOutPatterns string
 	DefaultOutPort     int
 	DefaultMaxConns    int
+	PatternPresets     []PatternPreset // the preset menu of the patterns fields
+	NewsdeefINN        string          // the newsdeef.eu newsfeeds variables, for copying
+	NewsdeefMaxSize    int
 	Success            string
 	Error              string
 }
@@ -166,9 +171,14 @@ func (s *WebServer) adminPeersPage(c *Context) {
 		return
 	}
 	stats := s.feedStats()
+	ourHost, err := s.DB.GetConfigValue(config.CFG_KEY_HOSTNAME)
+	if err != nil {
+		log.Printf("[WEB]: Failed to read %s for the peer config snippets: %v", config.CFG_KEY_HOSTNAME, err)
+	}
 	views := make([]*PeerView, 0, len(peers))
 	for _, p := range peers {
 		v := newPeerView(p)
+		v.Config = peerConfigSnippets(v.Peer, ourHost)
 		if st, ok := stats[p.ID]; ok {
 			v.Stats = peerFeedStats(st)
 		}
@@ -182,6 +192,9 @@ func (s *WebServer) adminPeersPage(c *Context) {
 		DefaultOutPatterns: "*,!control*,!junk",
 		DefaultOutPort:     119,
 		DefaultMaxConns:    4,
+		PatternPresets:     peerPatternPresets(),
+		NewsdeefINN:        newsdeefINNDefinitions(true),
+		NewsdeefMaxSize:    newsdeefMaxSize,
 		Success:            session.GetSuccess(),
 		Error:              session.GetError(),
 	}
