@@ -966,6 +966,11 @@ var httpxMainRoutes = []string{
 	"POST /admin/nntpusers/delete",
 	"POST /admin/nntpusers/toggle",
 	"POST /admin/nntpusers/enable",
+	"GET /admin/peers",
+	"POST /admin/peers",
+	"POST /admin/peers/update",
+	"POST /admin/peers/delete",
+	"POST /admin/peers/toggle",
 	"POST /admin/sections",
 	"POST /admin/sections/update",
 	"POST /admin/sections/delete",
@@ -1042,9 +1047,9 @@ var httpxFallbackRoutes = []string{
 // TestHttpxProductionRouteTable registers the converted production table (no conflict panic)
 // and checks that representative requests reach the intended pattern.
 func TestHttpxProductionRouteTable(t *testing.T) {
-	// 137 live registrations (setupRoutes also has one commented-out api.GET).
-	if n := len(httpxMainRoutes) + len(httpxFallbackRoutes); n != 137 {
-		t.Errorf("route table has %d registrations, want 137", n)
+	// 142 live registrations (setupRoutes also has one commented-out api.GET).
+	if n := len(httpxMainRoutes) + len(httpxFallbackRoutes); n != 142 {
+		t.Errorf("route table has %d registrations, want 142", n)
 	}
 	r := NewRouter()
 	r.Use(SecureHeaders(SecureConfig{}))
