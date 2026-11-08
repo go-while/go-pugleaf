@@ -12,13 +12,13 @@ import (
 	"github.com/go-while/nntp-testkit/fakeserver"
 )
 
-// connIdentity is our Path identity in these tests.
-const connIdentity = "us.invalid"
+// sndIdentity is our Path identity in these tests.
+const sndIdentity = "us.invalid"
 
-const connGroup = "feed.test"
+const sndGroup = "feed.test"
 
-// connPeer is a peer row that feeds the fake server.
-func connPeer(s *fakeserver.Server, tune func(*models.Peer)) *models.Peer {
+// sndRowFor is a peer row that feeds the fake server.
+func sndRowFor(s *fakeserver.Server, tune func(*models.Peer)) *models.Peer {
 	p := &models.Peer{
 		ID: 1, Name: "fakepeer", PathToken: "fake.invalid", Enabled: true,
 		OutEnabled: true, OutHost: s.Host(), OutPort: s.Port(), MaxConns: 1,
@@ -29,14 +29,14 @@ func connPeer(s *fakeserver.Server, tune func(*models.Peer)) *models.Peer {
 	return p
 }
 
-func connOpts() DialOptions {
-	return DialOptions{Identity: connIdentity, Batch: 8, ConnectTimeout: sndWait}
+func sndDialOpts() DialOptions {
+	return DialOptions{Identity: sndIdentity, Batch: 8, ConnectTimeout: sndWait}
 }
 
-// connDial connects to the fake server and closes the connection when the test ends.
-func connDial(t *testing.T, s *fakeserver.Server, tune func(*models.Peer)) Transport {
+// sndDialReal connects to the fake server and closes the connection when the test ends.
+func sndDialReal(t *testing.T, s *fakeserver.Server, tune func(*models.Peer)) Transport {
 	t.Helper()
-	tr, err := DialPeer(connPeer(s, tune), connOpts())
+	tr, err := DialPeer(sndRowFor(s, tune), sndDialOpts())
 	if err != nil {
 		t.Fatalf("DialPeer: %v", err)
 	}
@@ -44,17 +44,17 @@ func connDial(t *testing.T, s *fakeserver.Server, tune func(*models.Peer)) Trans
 	return tr
 }
 
-// connBatch turns message-ids into a batch of stored articles.
-func connBatch(ids ...string) []Outgoing {
+// sndOutgoing turns message-ids into a batch of stored articles.
+func sndOutgoing(ids ...string) []Outgoing {
 	out := make([]Outgoing, 0, len(ids))
 	for _, id := range ids {
-		out = append(out, Outgoing{Article: sndArticle(id, connGroup), Newsgroup: connGroup})
+		out = append(out, Outgoing{Article: sndArticle(id, sndGroup), Newsgroup: sndGroup})
 	}
 	return out
 }
 
-// connCheck asserts one result.
-func connCheck(t *testing.T, res []Result, i int, id string, code int, outcome Outcome) {
+// sndCheckResult asserts one result.
+func sndCheckResult(t *testing.T, res []Result, i int, id string, code int, outcome Outcome) {
 	t.Helper()
 	if i >= len(res) {
 		t.Fatalf("only %d result(s), wanted %d", len(res), i+1)
@@ -89,12 +89,12 @@ func TestFeedStreamOutcomes(t *testing.T) {
 			wiresMu <- struct{}{}
 		},
 	})})
-	tr := connDial(t, s, nil)
+	tr := sndDialReal(t, s, nil)
 	if tr.Mode() != "stream" {
 		t.Fatalf("Mode = %q, want stream", tr.Mode())
 	}
 
-	res, offered, err := tr.Send(connBatch(accept, have, retry, reject))
+	res, offered, err := tr.Send(sndOutgoing(accept, have, retry, reject))
 	if err != nil {
 		t.Fatalf("Send: %v", err)
 	}
@@ -105,20 +105,20 @@ func TestFeedStreamOutcomes(t *testing.T) {
 	if offered != 4 {
 		t.Errorf("offered = %d, want 4 CHECKs", offered)
 	}
-	connCheck(t, res, 0, accept, 239, OutcomeDone)
-	connCheck(t, res, 1, have, 438, OutcomeDone)
-	connCheck(t, res, 2, retry, 431, OutcomeDefer)
-	connCheck(t, res, 3, reject, 439, OutcomeDone)
+	sndCheckResult(t, res, 0, accept, 239, OutcomeDone)
+	sndCheckResult(t, res, 1, have, 438, OutcomeDone)
+	sndCheckResult(t, res, 2, retry, 431, OutcomeDefer)
+	sndCheckResult(t, res, 3, reject, 439, OutcomeDone)
 	if res[2].Err == "" {
 		t.Error("the deferred result has no reason")
 	}
 
 	// The same connection takes the next batch.
-	res, _, err = tr.Send(connBatch(second))
+	res, _, err = tr.Send(sndOutgoing(second))
 	if err != nil {
 		t.Fatalf("second Send: %v", err)
 	}
-	connCheck(t, res, 0, second, 239, OutcomeDone)
+	sndCheckResult(t, res, 0, second, 239, OutcomeDone)
 
 	// Relay as stored: our identity is prepended to the stored Path exactly once.
 	<-wiresMu
@@ -136,7 +136,7 @@ func TestFeedStreamOutcomes(t *testing.T) {
 	if len(paths) != 1 {
 		t.Fatalf("%d Path line(s) on the wire: %q", len(paths), wire)
 	}
-	if want := "Path: " + connIdentity + "!up.invalid!not-for-mail"; paths[0] != want {
+	if want := "Path: " + sndIdentity + "!up.invalid!not-for-mail"; paths[0] != want {
 		t.Errorf("Path = %q, want %q", paths[0], want)
 	}
 }
@@ -145,12 +145,12 @@ func TestFeedStreamOutcomes(t *testing.T) {
 // before anything goes on the wire.
 func TestFeedStreamInvalidID(t *testing.T) {
 	s := fakeserver.New(t, fakeserver.Options{Handler: fakeserver.PeerHandler(&fakeserver.PeerOptions{})})
-	tr := connDial(t, s, nil)
-	res, offered, err := tr.Send(connBatch("not-a-message-id"))
+	tr := sndDialReal(t, s, nil)
+	res, offered, err := tr.Send(sndOutgoing("not-a-message-id"))
 	if err != nil {
 		t.Fatalf("Send: %v", err)
 	}
-	connCheck(t, res, 0, "not-a-message-id", 0, OutcomeDrop)
+	sndCheckResult(t, res, 0, "not-a-message-id", 0, OutcomeDrop)
 	if offered != 0 {
 		t.Errorf("offered = %d, want 0", offered)
 	}
@@ -174,21 +174,21 @@ func TestFeedIHaveFallback(t *testing.T) {
 		Defer436Once: map[string]bool{retry: true},
 		Reject:       map[string]bool{reject: true},
 	})})
-	tr := connDial(t, s, nil)
+	tr := sndDialReal(t, s, nil)
 	if tr.Mode() != "ihave" {
 		t.Fatalf("Mode = %q, want ihave", tr.Mode())
 	}
-	res, offered, err := tr.Send(connBatch(accept, have, retry, reject))
+	res, offered, err := tr.Send(sndOutgoing(accept, have, retry, reject))
 	if err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 	if offered != 4 {
 		t.Errorf("offered = %d, want 4", offered)
 	}
-	connCheck(t, res, 0, accept, 235, OutcomeDone)
-	connCheck(t, res, 1, have, 435, OutcomeDone)
-	connCheck(t, res, 2, retry, 436, OutcomeDefer)
-	connCheck(t, res, 3, reject, 437, OutcomeDone)
+	sndCheckResult(t, res, 0, accept, 235, OutcomeDone)
+	sndCheckResult(t, res, 1, have, 435, OutcomeDone)
+	sndCheckResult(t, res, 2, retry, 436, OutcomeDefer)
+	sndCheckResult(t, res, 3, reject, 437, OutcomeDone)
 	if n := s.Count("CHECK"); n != 0 {
 		t.Errorf("%d CHECK(s) sent to a peer without streaming", n)
 	}
@@ -199,27 +199,27 @@ func TestFeedIHaveFallback(t *testing.T) {
 func TestFeedStreamAuth(t *testing.T) {
 	opts := &fakeserver.PeerOptions{User: "peerlogin", Pass: "peersecret"}
 	s := fakeserver.New(t, fakeserver.Options{Handler: fakeserver.PeerHandler(opts)})
-	tr := connDial(t, s, func(p *models.Peer) {
+	tr := sndDialReal(t, s, func(p *models.Peer) {
 		p.OutUsername, p.OutPassword = "peerlogin", "peersecret"
 	})
-	res, _, err := tr.Send(connBatch("<auth1@test.invalid>"))
+	res, _, err := tr.Send(sndOutgoing("<auth1@test.invalid>"))
 	if err != nil {
 		t.Fatalf("Send: %v", err)
 	}
-	connCheck(t, res, 0, "<auth1@test.invalid>", 239, OutcomeDone)
+	sndCheckResult(t, res, 0, "<auth1@test.invalid>", 239, OutcomeDone)
 
-	bad, err := DialPeer(connPeer(s, func(p *models.Peer) {
+	bad, err := DialPeer(sndRowFor(s, func(p *models.Peer) {
 		p.OutUsername, p.OutPassword = "peerlogin", "wrong"
-	}), connOpts())
+	}), sndDialOpts())
 	if err == nil {
 		bad.Close()
 		t.Fatal("DialPeer with a wrong password: no error")
 	}
 }
 
-// connDropHandler answers the greeting's MODE STREAM and the first CHECK and then closes the
+// sndDropHandler answers the greeting's MODE STREAM and the first CHECK and then closes the
 // connection, like a peer that goes away mid-batch.
-func connDropHandler(after int) func(*fakeserver.Conn) {
+func sndDropHandler(after int) func(*fakeserver.Conn) {
 	return func(c *fakeserver.Conn) {
 		seen := 0
 		for {
@@ -249,13 +249,69 @@ func connDropHandler(after int) func(*fakeserver.Conn) {
 	}
 }
 
+// sndRefuseStreamHandler answers MODE STREAM with reply and takes IHAVE afterwards.
+func sndRefuseStreamHandler(reply string) func(*fakeserver.Conn) {
+	return func(c *fakeserver.Conn) {
+		for {
+			line, err := c.ReadLine()
+			if err != nil {
+				return
+			}
+			var out []string
+			switch {
+			case strings.EqualFold(line, "MODE STREAM"):
+				out = []string{reply}
+			case strings.HasPrefix(line, "IHAVE "):
+				out = []string{"435 not wanted"}
+			default:
+				out = []string{"500 unexpected"}
+			}
+			if err := c.WriteLines(out...); err != nil {
+				return
+			}
+		}
+	}
+}
+
+// TestFeedModeStreamFallback: a status the peer answers to MODE STREAM (500/501 without
+// streaming, 480, 502) switches the connection to IHAVE, while a connection that breaks during
+// MODE STREAM is a network error: the dial fails and the sender reconnects with its backoff.
+func TestFeedModeStreamFallback(t *testing.T) {
+	for _, reply := range []string{"501 Unknown MODE variant", "502 Transfer permission denied", "480 authentication required"} {
+		s := fakeserver.New(t, fakeserver.Options{Handler: sndRefuseStreamHandler(reply)})
+		tr, err := DialPeer(sndRowFor(s, nil), sndDialOpts())
+		if err != nil {
+			t.Fatalf("DialPeer with MODE STREAM %q: %v", reply, err)
+		}
+		if tr.Mode() != "ihave" {
+			t.Errorf("MODE STREAM %q: mode = %q, want ihave", reply, tr.Mode())
+		}
+		res, _, err := tr.Send(sndOutgoing("<ms1@test.invalid>"))
+		if err != nil {
+			t.Errorf("MODE STREAM %q: Send: %v", reply, err)
+		} else {
+			sndCheckResult(t, res, 0, "<ms1@test.invalid>", 435, OutcomeDone)
+		}
+		tr.Close()
+	}
+
+	// The peer closes the connection instead of answering: not a refusal of streaming.
+	s := fakeserver.New(t, fakeserver.Options{Handler: func(c *fakeserver.Conn) {}})
+	tr, err := DialPeer(sndRowFor(s, nil), sndDialOpts())
+	if err == nil {
+		mode := tr.Mode()
+		tr.Close()
+		t.Fatalf("DialPeer on a connection that broke during MODE STREAM: no error (mode %q)", mode)
+	}
+}
+
 // TestFeedStreamConnectionDrop: a peer that disappears mid-batch leaves every unanswered
 // article deferred and the error tells the sender to close the connection.
 func TestFeedStreamConnectionDrop(t *testing.T) {
-	s := fakeserver.New(t, fakeserver.Options{Handler: connDropHandler(1)})
-	tr := connDial(t, s, nil)
+	s := fakeserver.New(t, fakeserver.Options{Handler: sndDropHandler(1)})
+	tr := sndDialReal(t, s, nil)
 	first, second := "<drop1@test.invalid>", "<drop2@test.invalid>"
-	res, offered, err := tr.Send(connBatch(first, second))
+	res, offered, err := tr.Send(sndOutgoing(first, second))
 	if err == nil {
 		t.Fatal("Send on a dropped connection: no error")
 	}
@@ -286,19 +342,19 @@ func TestFeedSenderEndToEnd(t *testing.T) {
 	})})
 	f := newSndFixture(t, func(c *Config) {
 		c.Dial = nil // the real DialPeer
-		c.Hostname = connIdentity
+		c.Hostname = sndIdentity
 		c.ConnectTimeout = sndWait
 	})
 	ids := []string{"<e2e1@test.invalid>", have, "<e2e3@test.invalid>"}
 	var items []Item
 	for _, id := range ids {
-		f.arts.add(connGroup, sndArticle(id, connGroup))
-		items = append(items, Item{PeerID: 1, MessageID: id, Newsgroup: connGroup})
+		f.arts.add(sndGroup, sndArticle(id, sndGroup))
+		items = append(items, Item{PeerID: 1, MessageID: id, Newsgroup: sndGroup})
 	}
 	if err := f.q.Enqueue(items); err != nil {
 		t.Fatal(err)
 	}
-	f.peers.set(connPeer(s, func(p *models.Peer) { p.Name = "e2epeer" }))
+	f.peers.set(sndRowFor(s, func(p *models.Peer) { p.Name = "e2epeer" }))
 	if err := f.s.Start(); err != nil {
 		t.Fatal(err)
 	}

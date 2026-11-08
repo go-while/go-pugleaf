@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -20,15 +21,18 @@ func TestSenderNeedsConfig(t *testing.T) {
 		name string
 		cfg  Config
 	}{
-		{"no queue", Config{Peers: &sndPeerSource{}, Articles: newSndArticles()}},
-		{"no peers", Config{Queue: q, Articles: newSndArticles()}},
-		{"no articles", Config{Queue: q, Peers: &sndPeerSource{}}},
+		{"no queue", Config{Peers: &sndPeerSource{}, Articles: newSndArticles(), Hostname: "us.invalid"}},
+		{"no peers", Config{Queue: q, Articles: newSndArticles(), Hostname: "us.invalid"}},
+		{"no articles", Config{Queue: q, Peers: &sndPeerSource{}, Hostname: "us.invalid"}},
+		// Without our identity the Path of a relayed article would not carry this server.
+		{"no hostname", Config{Queue: q, Peers: &sndPeerSource{}, Articles: newSndArticles()}},
+		{"blank hostname", Config{Queue: q, Peers: &sndPeerSource{}, Articles: newSndArticles(), Hostname: "  "}},
 	} {
 		if _, err := NewSender(tc.cfg); err == nil {
 			t.Errorf("NewSender with %s: no error", tc.name)
 		}
 	}
-	s, err := NewSender(Config{Queue: q, Peers: &sndPeerSource{}, Articles: newSndArticles()})
+	s, err := NewSender(Config{Queue: q, Peers: &sndPeerSource{}, Articles: newSndArticles(), Hostname: "us.invalid"})
 	if err != nil {
 		t.Fatalf("NewSender: %v", err)
 	}
@@ -256,6 +260,253 @@ func TestSenderDropPeer(t *testing.T) {
 		defer f.s.mu.Unlock()
 		return len(f.s.peers) == 0
 	})
+}
+
+// TestSenderDisabledPeerKeepsQueue: disabling a peer (its inbound switch) stops the feed but
+// keeps everything that is queued for it, and enabling it again resumes the feed. Only a peer
+// whose row is gone, or whose out_enabled is cleared, loses its queue.
+func TestSenderDisabledPeerKeepsQueue(t *testing.T) {
+	f := newSndFixture(t, nil)
+	const group = "feed.test"
+	id := "<dis1@test.invalid>"
+	f.arts.add(group, sndArticle(id, group))
+	peer := sndPeer(5, "dispeer")
+	f.peers.set(peer)
+	if err := f.s.Start(); err != nil {
+		t.Fatal(err)
+	}
+	sndWaitFor(t, "the peer feed to start", func() bool {
+		f.s.mu.Lock()
+		defer f.s.mu.Unlock()
+		return f.s.peers[5] != nil
+	})
+
+	// Disabled, but the outgoing feed is still configured: stop feeding, keep the queue.
+	disabled := *peer
+	disabled.Enabled = false
+	f.peers.set(&disabled)
+	sndWaitFor(t, "the peer feed to stop", func() bool {
+		f.s.mu.Lock()
+		defer f.s.mu.Unlock()
+		return f.s.peers[5] == nil && !f.s.transit[5]
+	})
+	if dropped := f.q.droppedPeers(); len(dropped) != 0 {
+		t.Fatalf("dropped %v for a disabled peer, want none: its queue must be kept", dropped)
+	}
+	// Nothing is sent while it is disabled.
+	if err := f.q.Enqueue([]Item{{PeerID: 5, MessageID: id, Newsgroup: group}}); err != nil {
+		t.Fatal(err)
+	}
+	reads := f.peers.readCount()
+	sndWaitFor(t, "two more peer list reads", func() bool { return f.peers.readCount() >= reads+2 })
+	if ids := f.q.doneIDs(); len(ids) != 0 {
+		t.Errorf("sent %v to a disabled peer", ids)
+	}
+	if depth, err := f.q.Depth(5); err != nil || depth != 1 {
+		t.Errorf("queue depth of the disabled peer = %d (err %v), want 1", depth, err)
+	}
+
+	// Enabled again: the queue is drained.
+	f.peers.set(peer)
+	sndWaitFor(t, "the queued article to be sent", func() bool { return len(f.q.doneIDs()) == 1 })
+	if dropped := f.q.droppedPeers(); len(dropped) != 0 {
+		t.Errorf("dropped %v, want none", dropped)
+	}
+}
+
+// TestSenderDropsOrphanedQueue: counters in the queue file of a peer whose row is gone (or lost
+// out_enabled while no sender was running) are dropped with its queue.
+func TestSenderDropsOrphanedQueue(t *testing.T) {
+	f := newSndFixture(t, nil)
+	if err := f.q.WriteStats(Stats{PeerID: 99, Offered: 5}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.q.Enqueue([]Item{{PeerID: 99, MessageID: "<orph@test.invalid>", Newsgroup: "feed.test"}}); err != nil {
+		t.Fatal(err)
+	}
+	f.peers.set(sndPeer(1, "livepeer"))
+	if err := f.s.Start(); err != nil {
+		t.Fatal(err)
+	}
+	sndWaitFor(t, "the orphaned queue to be dropped", func() bool {
+		for _, id := range f.q.droppedPeers() {
+			if id == 99 {
+				return true
+			}
+		}
+		return false
+	})
+	if depth, err := f.q.Depth(99); err != nil || depth != 0 {
+		t.Errorf("queue depth of the dropped peer = %d (err %v), want 0", depth, err)
+	}
+	// The peer that is still configured keeps its own queue and counters.
+	if dropped := f.q.droppedPeers(); len(dropped) != 1 || dropped[0] != 99 {
+		t.Errorf("dropped %v, want only peer 99", dropped)
+	}
+}
+
+// TestSenderStopDuringConnectKeepsLease: a stop while a connect is running returns without
+// touching the queue, so the claimed batch comes back on its lease instead of counting an
+// attempt and storing a "stopping" error.
+func TestSenderStopDuringConnectKeepsLease(t *testing.T) {
+	f := newSndFixture(t, nil)
+	const group = "feed.test"
+	id := "<lease@test.invalid>"
+	f.arts.add(group, sndArticle(id, group))
+	if err := f.q.Enqueue([]Item{{PeerID: 1, MessageID: id, Newsgroup: group}}); err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	dialing := make(chan struct{})
+	var once sync.Once
+	f.dial.before = func() {
+		once.Do(func() { close(dialing) })
+		<-release
+	}
+	f.peers.set(sndPeer(1, "leasepeer"))
+	if err := f.s.Start(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-dialing:
+	case <-time.After(sndWait):
+		t.Fatal("the worker never reached the connect")
+	}
+
+	stopped := make(chan struct{})
+	go func() { f.s.Stop(); close(stopped) }()
+	// Stop waits for the connect that is already running; releasing it once the sender is
+	// stopping lets the worker see that and return.
+	sndWaitFor(t, "the sender to be stopping", f.s.stopping)
+	close(release)
+	select {
+	case <-stopped:
+	case <-time.After(sndWait):
+		t.Fatal("Stop did not return after the connect finished")
+	}
+	if d := f.q.deferred(); len(d) != 0 {
+		t.Errorf("deferred %+v on stop, want none: the batch stays claimed", d)
+	}
+	if ids := f.q.doneIDs(); len(ids) != 0 {
+		t.Errorf("done %v on stop, want none", ids)
+	}
+	if st, ok := f.q.storedStats(1); ok && strings.Contains(st.LastError, "stopping") {
+		t.Errorf("last error = %q, want no stopping error", st.LastError)
+	}
+}
+
+// TestSenderClearsLastError: a run the peer answered for every article clears the last error.
+func TestSenderClearsLastError(t *testing.T) {
+	f := newSndFixture(t, nil)
+	const group = "feed.test"
+	first, second := "<cle1@test.invalid>", "<cle2@test.invalid>"
+	for _, id := range []string{first, second} {
+		f.arts.add(group, sndArticle(id, group))
+	}
+	if err := f.q.Enqueue([]Item{{PeerID: 1, MessageID: first, Newsgroup: group}}); err != nil {
+		t.Fatal(err)
+	}
+	f.dial.newT = func() *sndTransport {
+		return &sndTransport{reply: func(call int, arts []Outgoing) ([]Result, int, error) {
+			if call == 1 {
+				return sndDeferAll(arts, "CHECK 431"), len(arts), nil
+			}
+			return sndAcceptAll(arts), len(arts), nil
+		}}
+	}
+	f.peers.set(sndPeer(1, "clearpeer"))
+	if err := f.s.Start(); err != nil {
+		t.Fatal(err)
+	}
+	sndWaitFor(t, "the first article to be deferred", func() bool { return len(f.q.deferred()) == 1 })
+	f.s.mu.Lock()
+	pf := f.s.peers[1]
+	f.s.mu.Unlock()
+	if pf == nil {
+		t.Fatal("no feed for the peer")
+	}
+	sndWaitFor(t, "the last error to be stored", func() bool { return pf.snapshot().LastError != "" })
+
+	// The deferred item is due again after its backoff, and the next run is clean.
+	f.clock.Advance(time.Minute)
+	if err := f.q.Enqueue([]Item{{PeerID: 1, MessageID: second, Newsgroup: group}}); err != nil {
+		t.Fatal(err)
+	}
+	sndWaitFor(t, "both articles to be sent", func() bool { return len(f.q.doneIDs()) == 2 })
+	sndWaitFor(t, "the last error to be cleared", func() bool { return pf.snapshot().LastError == "" })
+	f.s.Stop()
+	if st, _ := f.q.storedStats(1); st.LastError != "" {
+		t.Errorf("stored last error = %q, want it cleared", st.LastError)
+	}
+}
+
+// TestSenderDepthErrorStillWritesStats: a queue depth that cannot be read is reported as the
+// peer's last error and does not stop the counters from being written.
+func TestSenderDepthErrorStillWritesStats(t *testing.T) {
+	f := newSndFixture(t, nil)
+	f.q.mu.Lock()
+	f.q.depthErr = errors.New("queue depth is unreadable")
+	f.q.mu.Unlock()
+	f.peers.set(sndPeer(1, "depthpeer"))
+	if err := f.s.Start(); err != nil {
+		t.Fatal(err)
+	}
+	sndWaitFor(t, "the peer feed to start", func() bool {
+		f.s.mu.Lock()
+		defer f.s.mu.Unlock()
+		return f.s.peers[1] != nil
+	})
+	f.s.Stop()
+	st, ok := f.q.storedStats(1)
+	if !ok {
+		t.Fatal("no counters written although only the depth failed")
+	}
+	if !strings.Contains(st.LastError, "queue depth is unreadable") {
+		t.Errorf("last error = %q, want the depth error", st.LastError)
+	}
+}
+
+// TestSenderBatchBytes: a claimed batch is sent in runs bounded by BatchBytes, so a batch of
+// large articles does not go into one pipeline.
+func TestSenderBatchBytes(t *testing.T) {
+	const group = "feed.test"
+	body := strings.Repeat("x", 4096)
+	f := newSndFixture(t, func(c *Config) {
+		c.Batch = 10
+		c.BatchBytes = 5000 // one article per run (4096 + the header block + 512)
+	})
+	var items []Item
+	for i := 0; i < 3; i++ {
+		id := fmt.Sprintf("<bb%d@test.invalid>", i)
+		a := sndArticle(id, group)
+		a.BodyText = body
+		f.arts.add(group, a)
+		items = append(items, Item{PeerID: 1, MessageID: id, Newsgroup: group})
+	}
+	if err := f.q.Enqueue(items); err != nil {
+		t.Fatal(err)
+	}
+	f.peers.set(sndPeer(1, "bbpeer"))
+	if err := f.s.Start(); err != nil {
+		t.Fatal(err)
+	}
+	sndWaitFor(t, "all three articles to be sent", func() bool { return len(f.q.doneIDs()) == 3 })
+	dials, _, _ := f.dial.counts()
+	if dials != 1 {
+		t.Errorf("dials = %d, want 1: the runs share one connection", dials)
+	}
+	f.dial.mu.Lock()
+	last := f.dial.last
+	f.dial.mu.Unlock()
+	batches := last.batches()
+	if len(batches) != 3 {
+		t.Fatalf("%d send(s) for 3 large articles, want 3: %v", len(batches), batches)
+	}
+	for i, b := range batches {
+		if len(b) != 1 {
+			t.Errorf("send %d carried %d articles, want 1: %v", i, len(b), b)
+		}
+	}
 }
 
 // TestSenderRestartsOnChange: a changed out_host restarts the feed of that peer (the old

@@ -7,8 +7,10 @@ package feed
 // retry backoff and the per-peer counters.
 
 import (
+	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,25 +32,36 @@ const (
 	// DefaultBatch is how many items one connection claims at once; it is also the bound of
 	// the CHECK/TAKETHIS commands in flight on that connection.
 	DefaultBatch = 50
+	// DefaultBatchBytes bounds what one send of a batch puts on the wire: a claimed batch is
+	// split into runs of at most this many octets, so a batch of large articles does not sit
+	// in one pipeline.
+	DefaultBatchBytes = 8 << 20
 	// DefaultBackoffBase is the delay before the first retry of a deferred item and after the
 	// first failed connect.
 	DefaultBackoffBase = 30 * time.Second
 	// DefaultBackoffMax caps the doubling of DefaultBackoffBase.
 	DefaultBackoffMax = 30 * time.Minute
 	// DefaultIdleClose is how long a connection is kept open with nothing to send. It stays
-	// below the client's idle read timeout, so an idle connection is closed here instead of
-	// being torn down by a timeout.
-	DefaultIdleClose = time.Minute
+	// below DefaultReadTimeout, so an idle connection is closed here instead of being torn
+	// down by the idle read timeout.
+	DefaultIdleClose = 30 * time.Second
 	// DefaultConnectTimeout bounds dial, TLS handshake, greeting and AUTHINFO of one connect.
-	// Stop waits for a connect that is already running, so this is also the longest a Stop can
-	// take beyond the answers in flight.
+	// A connect cannot be interrupted, so this is the longest a Stop or a peer reload waits.
 	DefaultConnectTimeout = 10 * time.Second
+	// DefaultReadTimeout and DefaultWriteTimeout are the idle timeouts of one connection,
+	// shorter than the client's own defaults: they are the last resort behind CloseNow for a
+	// peer that stops answering.
+	DefaultReadTimeout  = time.Minute
+	DefaultWriteTimeout = time.Minute
 )
 
-// PeerSource lists the peers the sender may feed. *database.Database implements it with
-// GetEnabledPeers (every enabled peer; the sender picks the ones with out_enabled).
+// PeerSource lists the configured peers, enabled or not. *database.Database implements it with
+// GetPeers. The sender feeds a peer that is enabled and has out_enabled, and it keeps the queue
+// of every peer whose row still has out_enabled: a peer that is only disabled (its inbound
+// switch) keeps what is queued for it, so one click on the admin page does not throw a feed
+// away.
 type PeerSource interface {
-	GetEnabledPeers() ([]*models.Peer, error)
+	GetPeers() ([]*models.Peer, error)
 }
 
 // ArticleSource reads stored articles. *database.Database implements it with GetArticlesByIDs:
@@ -94,12 +107,13 @@ type Config struct {
 	StatsInterval  time.Duration
 	Lease          time.Duration
 	Batch          int
+	BatchBytes     int
 	BackoffBase    time.Duration
 	BackoffMax     time.Duration
 	IdleClose      time.Duration
 	ConnectTimeout time.Duration
-	ReadTimeout    time.Duration // 0: the client default, <0: no idle read timeout
-	WriteTimeout   time.Duration // 0: the client default, <0: no idle write timeout
+	ReadTimeout    time.Duration // 0: DefaultReadTimeout, <0: no idle read timeout
+	WriteTimeout   time.Duration // 0: DefaultWriteTimeout, <0: no idle write timeout
 }
 
 // withDefaults returns cfg with every zero field filled.
@@ -121,6 +135,15 @@ func (cfg Config) withDefaults() Config {
 	}
 	if cfg.Batch <= 0 {
 		cfg.Batch = DefaultBatch
+	}
+	if cfg.BatchBytes <= 0 {
+		cfg.BatchBytes = DefaultBatchBytes
+	}
+	if cfg.ReadTimeout == 0 {
+		cfg.ReadTimeout = DefaultReadTimeout
+	}
+	if cfg.WriteTimeout == 0 {
+		cfg.WriteTimeout = DefaultWriteTimeout
 	}
 	if cfg.BackoffBase <= 0 {
 		cfg.BackoffBase = DefaultBackoffBase
@@ -149,6 +172,7 @@ type Sender struct {
 
 	mu       sync.Mutex
 	peers    map[int64]*peerFeed
+	transit  map[int64]bool // peers whose feed is being stopped or restarted right now
 	started  bool
 	stopped  bool
 	noHostOf map[int64]bool // peers logged as "out_enabled without out_host" (log once)
@@ -167,11 +191,17 @@ func NewSender(cfg Config) (*Sender, error) {
 	if cfg.Articles == nil {
 		return nil, fmt.Errorf("feed: sender needs an ArticleSource")
 	}
+	if strings.TrimSpace(cfg.Hostname) == "" {
+		// Without our identity the relayed Path would not carry this server, so a peer could
+		// feed the article straight back: never start the feed like that.
+		return nil, fmt.Errorf("feed: sender needs a Hostname (our Path identity)")
+	}
 	cfg = cfg.withDefaults()
 	s := &Sender{
 		cfg:      cfg,
 		done:     make(chan struct{}),
 		peers:    make(map[int64]*peerFeed),
+		transit:  make(map[int64]bool),
 		noHostOf: make(map[int64]bool),
 	}
 	if s.cfg.Dial == nil {
@@ -210,11 +240,10 @@ func (s *Sender) Start() error {
 // Stop stops every peer feed and waits for all goroutines. The counters of every peer are
 // written to the queue one last time. It is safe to call it more than once and before Start.
 //
-// Every open connection is force-closed first, so a worker waiting for a streaming answer
-// returns at once. Two waits are not interruptible and bound how long Stop takes: a connect
-// that is already running (ConnectTimeout) and, on the IHAVE fallback, the answer to one
-// article (the client's idle read timeout, Config.ReadTimeout) - the client holds the
-// connection's lock for that exchange, so closing the socket has to wait for it.
+// Every open connection is closed socket first (BackendConn.CloseNow), so a worker waiting for
+// an answer returns at once whichever protocol it was in. The one wait that cannot be
+// interrupted is a connect that is already running, so Stop takes at most ConnectTimeout
+// (10 s by default) plus the queue calls of the last acknowledgement.
 func (s *Sender) Stop() {
 	s.stopOnce.Do(func() {
 		s.mu.Lock()
@@ -272,28 +301,45 @@ func (s *Sender) prune() {
 	}
 }
 
-// reload starts the feed of every peer that may be fed, stops the feed of a peer that may not
-// any more (deleted, disabled or out_enabled cleared: its queue and counters are dropped) and
-// restarts the feed of a peer whose connection settings changed.
+// reload decides, from the current peer rows, which feeds run:
+//
+//   - fed: the row is enabled, has out_enabled and an out_host;
+//   - stopped but queued: the row still has out_enabled but the peer is disabled (or has no
+//     out_host) - nothing is sent and the queue is kept, so enabling the peer again resumes it;
+//   - dropped: the row is gone or out_enabled is cleared - the feed stops and Queue.DropPeer
+//     deletes its queue and counters.
+//
+// A peer whose connection settings changed is stopped and started again with its counters. The
+// stopping, dropping and restarting of one peer runs in its own goroutine, so a peer that is
+// stuck in a connect does not hold up the reload of the others; the peer is marked in transit
+// until that goroutine is done, so no second feed is started for it meanwhile.
 func (s *Sender) reload() {
-	peers, err := s.cfg.Peers.GetEnabledPeers()
+	peers, err := s.cfg.Peers.GetPeers()
 	if err != nil {
 		// Fail closed: keep the feeds that run, never drop a queue on a read error.
 		log.Printf("[FEED] peer list: %v", err)
 		return
 	}
-	want := make(map[int64]*models.Peer, len(peers))
+	var (
+		want = make(map[int64]*models.Peer, len(peers)) // feed these
+		keep = make(map[int64]bool, len(peers))         // row present with out_enabled: keep its queue
+	)
 	for _, p := range peers {
-		if p == nil || !p.Enabled || !p.OutEnabled {
+		if p == nil || !p.OutEnabled {
 			continue
 		}
-		want[p.ID] = p
+		keep[p.ID] = true
+		if p.Enabled {
+			want[p.ID] = p
+		}
 	}
 
-	var (
-		gone    []*peerFeed // feed stopped and its queue dropped
-		changed []*peerFeed // feed stopped, started again below
-	)
+	type restart struct {
+		old  *peerFeed
+		next *models.Peer // nil: the feed is not started again
+		drop bool         // call Queue.DropPeer after the feed stopped
+	}
+	var moves []restart
 	s.mu.Lock()
 	if s.stopped {
 		s.mu.Unlock()
@@ -301,51 +347,25 @@ func (s *Sender) reload() {
 	}
 	for id := range s.noHostOf {
 		if _, ok := want[id]; !ok {
-			delete(s.noHostOf, id) // the peer is gone: warn again if it comes back
+			delete(s.noHostOf, id) // the peer is gone or off: warn again if it comes back
 		}
 	}
 	for id, pf := range s.peers {
 		w, ok := want[id]
 		if !ok {
 			delete(s.peers, id)
-			gone = append(gone, pf)
+			s.transit[id] = true
+			moves = append(moves, restart{old: pf, drop: !keep[id]})
 			continue
 		}
 		if peerFingerprint(w) != pf.fp {
 			delete(s.peers, id)
-			changed = append(changed, pf)
+			s.transit[id] = true
+			moves = append(moves, restart{old: pf, next: w})
 		}
-	}
-	s.mu.Unlock()
-
-	// Stop the outdated feeds before a replacement is started, so one peer is never fed by
-	// two feeds at once.
-	for _, pf := range gone {
-		pf.stop()
-	}
-	// A restarted feed keeps the counters of the stopped one: a settings change is not a
-	// reason for the admin page to start at zero.
-	carry := make(map[int64]Stats, len(changed))
-	for _, pf := range changed {
-		pf.stop()
-		carry[pf.peer.ID] = pf.snapshot()
-		log.Printf("[FEED] peer %s: settings changed, feed restarted", pf.peer.Name)
-	}
-	for _, pf := range gone {
-		if err := s.cfg.Queue.DropPeer(pf.peer.ID); err != nil {
-			log.Printf("[FEED] peer %s: dropping the queue failed: %v", pf.peer.Name, err)
-			continue
-		}
-		log.Printf("[FEED] peer %s: outgoing feed off, queue and counters dropped", pf.peer.Name)
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.stopped {
-		return
 	}
 	for id, p := range want {
-		if _, ok := s.peers[id]; ok {
+		if s.peers[id] != nil || s.transit[id] {
 			continue
 		}
 		if p.OutHost == "" {
@@ -356,14 +376,96 @@ func (s *Sender) reload() {
 			continue
 		}
 		delete(s.noHostOf, id) // it has a host again: warn once more if it loses it
-		pf := newPeerFeed(s, p)
-		if st, ok := carry[id]; ok {
-			pf.stats, pf.logged = st, st // nothing else touches pf before start
-		}
-		s.peers[id] = pf
-		pf.start()
-		log.Printf("[FEED] peer %s: feeding %s:%d with up to %d connection(s)", p.Name, p.OutHost, pf.port(), pf.conns)
+		s.startPeerLocked(p, nil)
 	}
+	s.mu.Unlock()
+
+	s.dropOrphans(keep)
+
+	for _, m := range moves {
+		mv := m
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			s.transition(mv.old, mv.next, mv.drop)
+		}()
+	}
+}
+
+// dropOrphans deletes the queue of every peer the queue file still holds counters for whose row
+// is gone or has no out_enabled any more. keep names the peers whose queue stays. This also
+// clears what an earlier run of the sender left behind (a peer switched off while it was not
+// running); a peer being stopped right now is left to its own transition.
+func (s *Sender) dropOrphans(keep map[int64]bool) {
+	stats, err := s.cfg.Queue.ReadStats()
+	if err != nil {
+		log.Printf("[FEED] reading the stored counters failed: %v", err)
+		return
+	}
+	for id := range stats {
+		if keep[id] {
+			continue
+		}
+		s.mu.Lock()
+		busy := s.peers[id] != nil || s.transit[id]
+		s.mu.Unlock()
+		if busy {
+			continue
+		}
+		s.dropQueue(id, "")
+	}
+}
+
+// transition stops one feed, drops its queue when the peer lost its outgoing feed, and starts
+// the replacement feed with the counters of the old one. It runs in its own goroutine.
+func (s *Sender) transition(old *peerFeed, next *models.Peer, drop bool) {
+	id := old.peer.ID
+	old.stop()
+	if drop {
+		s.dropQueue(id, old.peer.Name)
+	} else if next == nil {
+		log.Printf("[FEED] peer %s: not enabled, feed stopped (its queue is kept)", old.peer.Name)
+	}
+	st := old.snapshot()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.transit, id)
+	if s.stopped || next == nil {
+		return
+	}
+	if next.OutHost == "" || s.peers[id] != nil {
+		return // picked up by the next reload
+	}
+	log.Printf("[FEED] peer %s: settings changed, feed restarted", next.Name)
+	// A restarted feed keeps the counters of the stopped one: a settings change is not a
+	// reason for the admin page to start at zero.
+	s.startPeerLocked(next, &st)
+}
+
+// startPeerLocked starts the feed of p, optionally with the counters of the feed it replaces.
+// The caller holds s.mu and has checked that no feed and no transition exists for p.
+func (s *Sender) startPeerLocked(p *models.Peer, carry *Stats) {
+	pf := newPeerFeed(s, p)
+	if carry != nil {
+		pf.stats, pf.logged = *carry, *carry // nothing else touches pf before start
+		pf.stats.PeerID, pf.logged.PeerID = p.ID, p.ID
+	}
+	s.peers[p.ID] = pf
+	pf.start()
+	log.Printf("[FEED] peer %s: feeding %s:%d with up to %d connection(s)", p.Name, p.OutHost, pf.port(), pf.conns)
+}
+
+// dropQueue deletes the queue and the counters of a peer that has no outgoing feed any more.
+func (s *Sender) dropQueue(id int64, name string) {
+	if name == "" {
+		name = fmt.Sprintf("#%d", id)
+	}
+	if err := s.cfg.Queue.DropPeer(id); err != nil {
+		log.Printf("[FEED] peer %s: dropping the queue failed: %v", name, err)
+		return
+	}
+	log.Printf("[FEED] peer %s: outgoing feed off, queue and counters dropped", name)
 }
 
 // peerFingerprint is the part of a peer the running feed depends on: a change restarts it.
@@ -381,12 +483,13 @@ type peerFeed struct {
 	done  chan struct{}
 	wg    sync.WaitGroup
 
-	mu       sync.Mutex
-	stats    Stats
-	logged   Stats // the counters of the last log line, to stay quiet while nothing happens
-	live     map[int]Transport
-	closed   bool // no new connection is opened
-	stopOnce sync.Once
+	mu        sync.Mutex
+	stats     Stats
+	logged    Stats // the counters of the last log line, to stay quiet while nothing happens
+	live      map[int]Transport
+	badGroups map[string]bool // newsgroups whose read failure was logged already
+	closed    bool            // no new connection is opened
+	stopOnce  sync.Once
 }
 
 // maxPeerConns bounds the connections of one peer whatever its row says (ValidatePeer keeps
@@ -404,13 +507,14 @@ func newPeerFeed(s *Sender, p *models.Peer) *peerFeed {
 	}
 	snap := *p
 	return &peerFeed{
-		s:     s,
-		peer:  &snap,
-		fp:    peerFingerprint(p),
-		conns: conns,
-		done:  make(chan struct{}),
-		stats: Stats{PeerID: p.ID},
-		live:  make(map[int]Transport),
+		s:         s,
+		peer:      &snap,
+		fp:        peerFingerprint(p),
+		conns:     conns,
+		done:      make(chan struct{}),
+		stats:     Stats{PeerID: p.ID},
+		live:      make(map[int]Transport),
+		badGroups: make(map[string]bool),
 	}
 }
 
@@ -498,12 +602,14 @@ func (pf *peerFeed) sleep(d time.Duration) bool {
 	}
 }
 
-// addConn remembers an open connection so watch can force-close it. It returns false when the
-// feed is already stopping: the caller must close the connection and return.
+// addConn remembers an open connection so watch can close it. It returns false when the feed is
+// already stopping: the caller must close the connection and return. The stop channels are
+// checked as well as the flag the watcher sets, because a connect that was running while the
+// stop began finishes before the watcher gets to run.
 func (pf *peerFeed) addConn(idx int, t Transport) bool {
 	pf.mu.Lock()
 	defer pf.mu.Unlock()
-	if pf.closed {
+	if pf.closed || pf.stopping() {
 		return false
 	}
 	pf.live[idx] = t
@@ -560,6 +666,11 @@ func (pf *peerFeed) connWorker(idx int) {
 			continue
 		}
 		idleSince = time.Time{}
+		// A stop between the claim and the send leaves the batch claimed: its lease runs out
+		// and the items come back by themselves, without an attempt and without a last error.
+		if pf.stopping() {
+			return
+		}
 
 		// The articles are read before a connection is opened: a batch whose articles are all
 		// gone is finished without dialing the peer.
@@ -569,12 +680,18 @@ func (pf *peerFeed) connWorker(idx int) {
 		}
 		out, done, deferred := pf.load(items)
 		pf.finish(done, deferred, attempts)
+		if pf.stopping() {
+			return // the rest of the batch stays claimed
+		}
 		if len(out) == 0 {
 			continue
 		}
 
 		if t == nil {
 			t, err = pf.dial(idx)
+			if errors.Is(err, errStopping) {
+				return // the batch stays claimed, see above
+			}
 			if err != nil {
 				pf.deferAll(out, attempts, err.Error())
 				pf.setLastError(err.Error())
@@ -602,10 +719,14 @@ func (pf *peerFeed) connWorker(idx int) {
 	}
 }
 
-// dial opens one connection and registers it for the force-close on stop.
+// errStopping is dial's answer when the feed is on its way out: the caller returns without
+// touching the queue, so a claimed batch stays claimed until its lease runs out.
+var errStopping = errors.New("feed: stopping")
+
+// dial opens one connection and registers it for the close on stop.
 func (pf *peerFeed) dial(idx int) (Transport, error) {
 	if pf.stopping() {
-		return nil, fmt.Errorf("feed: stopping")
+		return nil, errStopping
 	}
 	t, err := pf.s.cfg.Dial(pf.peer)
 	if err != nil {
@@ -616,7 +737,7 @@ func (pf *peerFeed) dial(idx int) (Transport, error) {
 	}
 	if !pf.addConn(idx, t) {
 		t.Close()
-		return nil, fmt.Errorf("feed: stopping")
+		return nil, errStopping
 	}
 	return t, nil
 }
@@ -648,11 +769,50 @@ func backoffDelay(n int, base, max time.Duration) time.Duration {
 	return d
 }
 
-// sendBatch hands one batch to the peer and acknowledges every article. It returns false when
-// the connection must be closed.
+// sendBatch hands one batch to the peer and acknowledges every article. The batch is split into
+// runs of at most BatchBytes octets (one article always goes alone when it is larger), so a
+// batch of large articles does not sit in one pipeline. It returns false when the connection
+// must be closed; the articles of the runs that were not sent are deferred with that reason.
 func (pf *peerFeed) sendBatch(t Transport, out []Outgoing, attempts map[string]int) bool {
+	for len(out) > 0 {
+		run := pf.byteRun(out)
+		ok, err := pf.sendRun(t, out[:run], attempts)
+		if ok {
+			out = out[run:]
+			continue
+		}
+		pf.setLastError(err.Error())
+		log.Printf("[FEED] peer %s: %s connection lost: %v", pf.peer.Name, t.Mode(), err)
+		if rest := out[run:]; len(rest) > 0 {
+			pf.deferAll(rest, attempts, err.Error())
+		}
+		return false
+	}
+	return true
+}
+
+// byteRun returns how many of the articles at the front of out fit into one send (at least one).
+func (pf *peerFeed) byteRun(out []Outgoing) int {
+	budget := pf.s.cfg.BatchBytes
+	n, size := 0, 0
+	for _, o := range out {
+		s := o.wireSize()
+		if n > 0 && size+s > budget {
+			break
+		}
+		size += s
+		n++
+	}
+	if n == 0 {
+		n = 1
+	}
+	return n
+}
+
+// sendRun offers one run of articles and acknowledges every one of them.
+func (pf *peerFeed) sendRun(t Transport, out []Outgoing, attempts map[string]int) (bool, error) {
 	res, offered, err := t.Send(out)
-	pf.record(res, offered)
+	pf.record(res, offered, err == nil)
 	var (
 		done     []string
 		deferred []deferItem
@@ -673,12 +833,7 @@ func (pf *peerFeed) sendBatch(t Transport, out []Outgoing, attempts map[string]i
 		}
 	}
 	pf.finish(done, deferred, attempts)
-	if err != nil {
-		pf.setLastError(err.Error())
-		log.Printf("[FEED] peer %s: %s connection lost: %v", pf.peer.Name, t.Mode(), err)
-		return false
-	}
-	return true
+	return err == nil, err
 }
 
 // finish acknowledges the items of one batch: the finished ones are deleted, the deferred ones
@@ -742,14 +897,21 @@ func (pf *peerFeed) load(items []Item) (out []Outgoing, done []string, deferred 
 		g := group
 		arts, err := pf.s.cfg.Articles.GetArticlesByIDs(&g, ids)
 		if err != nil {
-			log.Printf("[FEED] peer %s: reading %d article(s) from %s failed: %v",
-				pf.peer.Name, len(ids), group, err)
+			// A newsgroup that cannot be read (its database is busy, or gone with the group)
+			// is temporary for the queue: the items are deferred and the queue's own give-up
+			// age drops them in the end. Logged once per peer and newsgroup, so a group that
+			// does not exist any more does not fill the log at every poll.
+			if pf.markBadGroup(group) {
+				log.Printf("[FEED] peer %s: reading %d article(s) from %s failed: %v (logged once; the queue gives up on them in the end)",
+					pf.peer.Name, len(ids), group, err)
+			}
 			pf.setLastError("read " + group + ": " + err.Error())
 			for _, i := range idx {
 				deferred = append(deferred, deferItem{id: items[i].MessageID, err: "read " + group + ": " + err.Error()})
 			}
 			continue
 		}
+		pf.clearBadGroup(group)
 		for _, a := range arts {
 			if a != nil {
 				found[group+"\x00"+a.MessageID] = a
@@ -784,11 +946,13 @@ func hasDefer(deferred []deferItem, id string) bool {
 	return false
 }
 
-// record adds the verdicts of one batch to the peer's counters.
-func (pf *peerFeed) record(res []Result, offered int) {
+// record adds the verdicts of one run to the peer's counters. A run that the peer answered for
+// every article, with nothing deferred or dropped, clears the last error: the feed works again.
+func (pf *peerFeed) record(res []Result, offered int, connOK bool) {
 	pf.mu.Lock()
 	defer pf.mu.Unlock()
 	pf.stats.Offered += int64(offered)
+	clean := connOK && len(res) > 0
 	for _, r := range res {
 		switch r.Code {
 		case 235, 239:
@@ -802,10 +966,39 @@ func (pf *peerFeed) record(res []Result, offered int) {
 				pf.stats.Deferred++
 			}
 		}
+		if r.Outcome != OutcomeDone || r.Err != "" {
+			clean = false
+		}
 		if r.Err != "" {
 			pf.stats.LastError = r.Err
 		}
 	}
+	if clean {
+		pf.stats.LastError = ""
+	}
+}
+
+// markBadGroup records that this newsgroup could not be read and reports whether this is the
+// first time (so the caller logs it once); clearBadGroup forgets it after a read that worked.
+func (pf *peerFeed) markBadGroup(group string) bool {
+	pf.mu.Lock()
+	defer pf.mu.Unlock()
+	if pf.badGroups[group] {
+		return false
+	}
+	if pf.badGroups == nil {
+		pf.badGroups = make(map[string]bool, 1)
+	}
+	pf.badGroups[group] = true
+	return true
+}
+
+func (pf *peerFeed) clearBadGroup(group string) {
+	pf.mu.Lock()
+	if pf.badGroups[group] {
+		delete(pf.badGroups, group)
+	}
+	pf.mu.Unlock()
 }
 
 func (pf *peerFeed) setLastError(msg string) {
@@ -839,11 +1032,13 @@ func (pf *peerFeed) statsLoop() {
 }
 
 // flush stores the counters in the queue file (so the web process can read them) and logs one
-// line. Without final it does nothing while no counter moved and the queue is empty.
+// line. Without final it does nothing while no counter moved and the queue is empty. A queue
+// depth that cannot be read is reported as the peer's last error and never stops the write.
 func (pf *peerFeed) flush(final bool) {
-	depth, err := pf.s.cfg.Queue.Depth(pf.peer.ID)
-	if err != nil {
-		log.Printf("[FEED] peer %s: queue depth failed: %v", pf.peer.Name, err)
+	depth, derr := pf.s.cfg.Queue.Depth(pf.peer.ID)
+	if derr != nil {
+		log.Printf("[FEED] peer %s: queue depth failed: %v", pf.peer.Name, derr)
+		pf.setLastError("queue depth: " + derr.Error())
 	}
 	pf.mu.Lock()
 	st := pf.stats
@@ -852,7 +1047,7 @@ func (pf *peerFeed) flush(final bool) {
 		st.Deferred == pf.logged.Deferred && st.LastError == pf.logged.LastError
 	pf.logged = st
 	pf.mu.Unlock()
-	if quiet && depth == 0 && !final {
+	if quiet && depth == 0 && derr == nil && !final {
 		return
 	}
 	st.PeerID = pf.peer.ID

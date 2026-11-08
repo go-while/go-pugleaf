@@ -51,6 +51,16 @@ type Outgoing struct {
 	Newsgroup string
 }
 
+// wireSize is roughly what this article costs on the wire: the stored header block, the body
+// and some room for the command and the dot stuffing. It bounds how much one batch sends
+// (Config.BatchBytes), so an exact count is not needed.
+func (o Outgoing) wireSize() int {
+	if o.Article == nil {
+		return 0
+	}
+	return len(o.Article.HeadersJSON) + len(o.Article.BodyText) + 512
+}
+
 // Transport is one open connection to a peer.
 type Transport interface {
 	// Send offers every article and returns one Result per article, in order (an article
@@ -112,14 +122,16 @@ func DialPeer(p *models.Peer, o DialOptions) (Transport, error) {
 	if err := conn.Connect(); err != nil {
 		return nil, err
 	}
-	if err := conn.SwitchToModeStream(); err != nil {
-		if errors.Is(err, nntp.ErrStreamingUnsupported) || conn.IsConnected() {
-			// The peer answered, so the connection is still usable: innfeed falls back to
-			// IHAVE here and so do we.
+	code, err := conn.ModeStreamCode()
+	if err != nil {
+		// Only a status the peer answered is a refusal of streaming; a send or read error is
+		// the network, and the sender must reconnect with its backoff instead of switching
+		// this connection to IHAVE.
+		if errors.Is(err, nntp.ErrStreamingUnsupported) || code == 480 || code == 502 {
 			log.Printf("[FEED] peer %s: no streaming (%v): using IHAVE", p.Name, err)
 			return newIHaveTransport(conn, p, o.Identity), nil
 		}
-		conn.ForceCloseConn()
+		conn.CloseNow()
 		return nil, fmt.Errorf("MODE STREAM: %w", err)
 	}
 	return newStreamTransport(conn, p, o.Identity, batch), nil
@@ -167,9 +179,11 @@ func newStreamTransport(conn *nntp.BackendConn, p *models.Peer, identity string,
 
 func (t *streamTransport) Mode() string { return "stream" }
 
+// Close ends the connection at once, also while Send is waiting for an answer on another
+// goroutine (CloseNow does not wait for the connection's lock).
 func (t *streamTransport) Close() {
 	common.SignalErrChan(t.errChan)
-	t.conn.ForceCloseConn()
+	t.conn.CloseNow()
 }
 
 // Send runs one streaming round: CHECK every article, TAKETHIS the wanted ones.
@@ -357,7 +371,9 @@ func newIHaveTransport(conn *nntp.BackendConn, p *models.Peer, identity string) 
 
 func (t *ihaveTransport) Mode() string { return "ihave" }
 
-func (t *ihaveTransport) Close() { t.conn.ForceCloseConn() }
+// Close ends the connection at once: IHave holds the connection's lock for a whole exchange,
+// so only CloseNow unblocks a worker that is waiting for the answer to one article.
+func (t *ihaveTransport) Close() { t.conn.CloseNow() }
 
 func (t *ihaveTransport) Send(arts []Outgoing) ([]Result, int, error) {
 	res := make([]Result, len(arts))

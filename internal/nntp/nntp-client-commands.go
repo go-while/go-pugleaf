@@ -1639,13 +1639,24 @@ func (c *BackendConn) SwitchToModeReader() error {
 
 // SwitchToModeStream switches the connection to MODE STREAM
 func (c *BackendConn) SwitchToModeStream() error {
+	_, err := c.ModeStreamCode()
+	return err
+}
+
+// ModeStreamCode is SwitchToModeStream with the peer's status as well: 0 when
+// no status was read (the command could not be sent, or the reply could not be
+// read: the connection is broken), else the status the peer answered, also when
+// the error is ErrStreamingUnsupported. A caller that falls back to IHAVE needs
+// that number: 500/501 (no streaming), 480 and 502 are refusals on a connection
+// that still works, while a read or write error is not.
+func (c *BackendConn) ModeStreamCode() (int, error) {
 
 	if c.ModeStream {
 		// Already in stream mode
-		return nil
+		return 203, nil
 	}
 	if c.ModeReader {
-		return fmt.Errorf("cannot switch from MODE READER to MODE STREAM on same connection")
+		return 0, fmt.Errorf("cannot switch from MODE READER to MODE STREAM on same connection")
 	}
 
 	c.lastUsed = time.Now()
@@ -1653,7 +1664,7 @@ func (c *BackendConn) SwitchToModeStream() error {
 	// Send MODE STREAM command
 	id, err := c.sendCmd("MODE STREAM")
 	if err != nil {
-		return fmt.Errorf("failed to send MODE STREAM command: %w", err)
+		return 0, fmt.Errorf("failed to send MODE STREAM command: %w", err)
 	}
 
 	c.TextConn.StartResponse(id)
@@ -1661,16 +1672,16 @@ func (c *BackendConn) SwitchToModeStream() error {
 
 	code, line, err := c.TextConn.ReadCodeLine(203)
 	if err != nil && code == 0 {
-		return fmt.Errorf("failed to read MODE STREAM response: %w", err)
+		return 0, fmt.Errorf("failed to read MODE STREAM response: %w", err)
 	}
 
 	if code == 500 || code == 501 {
-		return fmt.Errorf("%w: %d %s", ErrStreamingUnsupported, code, strings.TrimSpace(line))
+		return code, fmt.Errorf("%w: %d %s", ErrStreamingUnsupported, code, strings.TrimSpace(line))
 	}
 	if code != 203 {
-		return fmt.Errorf("MODE STREAM failed (code %d): %s", code, line)
+		return code, fmt.Errorf("MODE STREAM failed (code %d): %s", code, line)
 	}
 
 	c.ModeStream = true
-	return nil
+	return code, nil
 }

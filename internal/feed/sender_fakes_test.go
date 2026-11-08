@@ -91,6 +91,7 @@ type sndQueue struct {
 
 	claimErr error
 	doneErr  error
+	depthErr error
 }
 
 func newSndQueue() *sndQueue {
@@ -165,6 +166,9 @@ func (q *sndQueue) Defer(peerID int64, messageID string, lastErr string, next ti
 func (q *sndQueue) Depth(peerID int64) (int64, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	if q.depthErr != nil {
+		return 0, q.depthErr
+	}
 	return int64(len(q.rows[peerID])), nil
 }
 
@@ -238,7 +242,8 @@ func (q *sndQueue) pruneCalls() int {
 	return q.prunes
 }
 
-// sndPeerSource is a peer list a test changes while the sender runs.
+// sndPeerSource is a peer list a test changes while the sender runs. It returns every row, as
+// database.GetPeers does, enabled or not.
 type sndPeerSource struct {
 	mu    sync.Mutex
 	peers []*models.Peer
@@ -246,7 +251,7 @@ type sndPeerSource struct {
 	reads int
 }
 
-func (p *sndPeerSource) GetEnabledPeers() ([]*models.Peer, error) {
+func (p *sndPeerSource) GetPeers() ([]*models.Peer, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.reads++
@@ -414,15 +419,22 @@ type sndDialer struct {
 	err     error
 	newT    func() *sndTransport
 	last    *sndTransport
+	before  func() // runs inside dial, before it returns: a test can hold the connect up
 }
 
 func (d *sndDialer) dial(p *models.Peer) (Transport, error) {
 	d.mu.Lock()
 	d.dials++
+	before := d.before
 	if d.err != nil {
 		err := d.err
 		d.mu.Unlock()
 		return nil, err
+	}
+	if before != nil {
+		d.mu.Unlock()
+		before()
+		d.mu.Lock()
 	}
 	d.live++
 	if d.live > d.maxLive {
