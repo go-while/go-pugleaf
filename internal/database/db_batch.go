@@ -984,7 +984,9 @@ retry1:
 	// error is still checked, so the day batchProcessThreading starts propagating shows up in
 	// the log instead of being dropped on the floor - and that is the day this call site needs
 	// a bounded loop like retry1's, with the test retry1 has.
-	if err := sq.batchProcessThreading(task.Newsgroup, batches, groupDB); err != nil {
+	if sq.db.dbconfig.DisableThreading {
+		// Standalone NNTP server: nothing reads the threading tables (DBConfig.DisableThreading).
+	} else if err := sq.batchProcessThreading(task.Newsgroup, batches, groupDB); err != nil {
 		// Deliberately promises only what is guaranteed: the article rows, their history
 		// entries and the newsgroup counters do survive, but the threading phase also writes
 		// articles.reply_count (batchUpdateReplyCounts) and NOTHING recomputes that column -

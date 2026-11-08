@@ -190,6 +190,8 @@ databases below `-data` (default `./data`). `./pugleaf-fetcher -help` prints usa
 # -maxartsize int       maximum article size in bytes (0 = config default 32768)
 # -xref string          Xref: header: off, partial (default) or full
 # -post-commit-wait d   wait for the commit of a POSTed article before 240 (default 5s, 0 = no wait)
+# -disable-webserver-post-threads   standalone server: build no threads (only the web view uses them;
+#                       recover-db -rebuild-threads builds them later, reply counts stay 0)
 # -idletimeout, -articledelay, -groupdelay, -errordelay, -local430ttl: see -h
 ```
 
