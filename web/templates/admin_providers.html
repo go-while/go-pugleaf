@@ -209,7 +209,7 @@
                                                     <div class="col-md-2">
                                                         <div class="mb-3">
                                                             <label class="form-label">Max Article Size</label>
-                                                            <input type="number" class="form-control" name="max_art_size" value="{{.MaxArtSize}}" min="1024" max="16777216"><small>bytes</small>
+                                                            <input type="number" class="form-control" name="max_art_size" value="{{.MaxArtSize}}" min="0" max="16777216"><small>bytes (0 = no limit)</small>
                                                         </div>
                                                     </div>
                                                 </div>
@@ -250,7 +250,7 @@
                                                     <div class="col-md-2">
                                                         <div class="mb-3">
                                                             <label class="form-label">Proxy Port</label>
-                                                            <input type="number" class="form-control" name="proxy_port" value="{{.ProxyPort}}"
+                                                            <input type="number" class="form-control" name="proxy_port" value="{{if .ProxyPort}}{{.ProxyPort}}{{end}}"
                                                                    placeholder="9050 for Tor" min="1" max="65535">
                                                         </div>
                                                     </div>

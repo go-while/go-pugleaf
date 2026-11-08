@@ -117,8 +117,7 @@ func showUsageExamples() {
 	fmt.Println("  ./nntp-analyze -group alt.test -clear-cache      (deletes the cache file)")
 	fmt.Println()
 	fmt.Println("Server Configuration (defaults: -host " + defaultHost + " -port 563 -ssl=true):")
-	fmt.Println("  The default -host is the go-pugleaf project's public server;")
-	fmt.Println("  the default -username/-password (" + defaultUsername + "/" + defaultPassword + ") are its public read-only credentials.")
+	fmt.Println("  The default -host is the public BlueWorldHosting archive, read-only and without a login (no -username/-password).")
 	fmt.Println("  ./nntp-analyze -group alt.test -host news.server.com -port 563")
 	fmt.Println("  ./nntp-analyze -group alt.test -host news.server.com -port 119 -ssl=false")
 	fmt.Println("  ./nntp-analyze -group alt.test -username user -password pass")
@@ -147,12 +146,13 @@ func showUsageExamples() {
 
 var appVersion = "-unset-"
 
-// Defaults of the server flags (decision D-O2: the default stays the project's public
-// server with its public read-only account; the usage text says so).
+// Defaults of the server flags (decision D-O2: the default is a public read-only server, the
+// usage text says so). The project's former public server 81-171-22-215.pugleaf.net is gone;
+// the BlueWorldHosting archive reads without a login.
 const (
-	defaultHost      = "81-171-22-215.pugleaf.net"
-	defaultUsername  = "read"
-	defaultPassword  = "only"
+	defaultHost      = "archive.usenet.blueworldhosting.com"
+	defaultUsername  = ""
+	defaultPassword  = ""
 	defaultOutSubdir = "analyze-out"
 )
 
@@ -179,10 +179,10 @@ func main() {
 
 	// Command line flags for NNTP server connection
 	var (
-		host       = flag.String("host", defaultHost, "NNTP hostname; the default is the go-pugleaf project's public server")
+		host       = flag.String("host", defaultHost, "NNTP hostname; the default is the public BlueWorldHosting archive (read-only, no login)")
 		port       = flag.Int("port", 563, "NNTP port (563 is TLS: use -ssl=false for a plain-text port such as 119)")
-		username   = flag.String("username", defaultUsername, "NNTP username; the default is the public read-only account of the default -host")
-		password   = flag.String("password", defaultPassword, "NNTP password; the default is the public read-only account of the default -host")
+		username   = flag.String("username", defaultUsername, "NNTP username (empty: no AUTHINFO; the default -host needs none)")
+		password   = flag.String("password", defaultPassword, "NNTP password (used with -username)")
 		ssl        = flag.Bool("ssl", true, "Use SSL/TLS connection")
 		timeout    = flag.Int("timeout", 30, "Connection timeout in seconds")
 		group      = flag.String("group", "", "Newsgroup to analyze: a name, '$all' or 'prefix.*' (the last two read the group list from the databases in -data); -group or -groups-file is required")

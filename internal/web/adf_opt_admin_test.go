@@ -534,3 +534,39 @@ func TestAdfOptShutdownStopsCaches(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+// TestAdfOptProviderEditFormZeroValues: a provider without a proxy port and without an article
+// size limit renders an edit form the browser can submit: the proxy port field is empty (not
+// value="0" against min="1") and the size field allows 0 (no limit).
+func TestAdfOptProviderEditFormZeroValues(t *testing.T) {
+	db := w0DB(t)
+	_, cookie := w0NewUser(t, true)
+	name := w0Name("adfoptprovzero")
+	form := url.Values{"name": {name}, "host": {"news.test.invalid"}, "port": {"119"}, "max_art_size": {"0"}}
+	if resp, success, failure := adfOptPost(t, cookie, "/admin/providers", form); resp.StatusCode != http.StatusSeeOther || failure != "" {
+		t.Fatalf("create: %d success=%q error=%q", resp.StatusCode, success, failure)
+	}
+	p, err := db.GetProviderByName(name)
+	if err != nil || p == nil {
+		t.Fatalf("GetProviderByName(%s) = %v, %v", name, p, err)
+	}
+	t.Cleanup(func() {
+		if err := db.DeleteProvider(int(p.ID)); err != nil {
+			t.Errorf("DeleteProvider(%d): %v", p.ID, err)
+		}
+	})
+	if p.ProxyPort != 0 || p.MaxArtSize != 0 {
+		t.Fatalf("stored proxy_port=%d max_art_size=%d, want 0/0", p.ProxyPort, p.MaxArtSize)
+	}
+	rec := w0Do(t, w0Req{Path: "/admin?tab=providers", Cookies: []*http.Cookie{cookie}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /admin?tab=providers = %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, `name="proxy_port" value="0"`) {
+		t.Error(`edit form renders proxy_port value="0", which min="1" refuses: the form cannot be saved`)
+	}
+	if strings.Contains(body, `name="max_art_size" value="0" min="1024"`) {
+		t.Error(`edit form renders max_art_size 0 with min="1024": the form cannot be saved`)
+	}
+}
