@@ -259,6 +259,25 @@ other's peer (`hosts 127.0.0.1`, path tokens = hostnames), same test group on bo
 - slice feed-sender: internal/feed/sender.go (+ tests against nntp-testkit or a fake server), the
   counters on the admin peers page (internal/web/web_admin_peers.go, web/templates/admin_peers.html).
 
+### Waves 2+3 — done (merged into plan-nntp-peering)
+- feed-queue `worktree-agent-a26fe5fe025a6a64c` (b44cdd6, 2b9ffcc) → merge 8cb9c2b. SQLiteQueue
+  (atomic handle, Claim lease in one immediate tx, give-up prune 3 days), Enqueuer (bounded channel,
+  drop+count, Stop bounded 30 s, peer cache with generation counter), out_flags `<N >N H[N] G[N] Nm Nu`
+  per INN source: size limits accept exactly N; Nm/Nu narrow the out_patterns-wanted groups per
+  group and queue when one survives (unknown status = not subscribed). Hook fires once per article
+  that was inserted in some group (Article.FeedOut && Article.FeedStored), never for bulk.
+- feed-sender `worktree-agent-a181d2c1458225c79` (c3f120d, 2c5d59f, e2d4860, 3248d50) → merge
+  1094aff. Per-peer feeds (GetPeers: disabled peer keeps its queue, DropPeer only when the row is gone
+  or out_enabled cleared; orphaned stats dropped), up to max_conns connections, CHECK/TAKETHIS via
+  the client + demuxer (NewResponseDemuxerSize), IHAVE only on 500/501/480/502, BackendConn.CloseNow
+  (mux-free close) so Stop/reload never wait on a hung exchange, timeouts 60 s, batches ≤50 articles
+  and ≤8 MiB, backoff 30 s..30 min, LastError cleared on a clean run.
+- Inline: 5e6a52b feed.OpenReadOnly (web never creates the queue file); 0e3a552 cmd/nntp-server
+  `-feed` (default on) wiring and shutdown order (sender before the DB, enqueuer after the last
+  batches, then the queue), cmd/web counters opener, out_flags validated on the peers form.
+- Open: web site posts (post_queue, bulk) are not fed; no catch-up for enqueue overflow;
+  Peers.Invalidate/InvalidatePeers unreachable from the web process (edits apply within 30 s).
+
 ## Open questions (answered 2026-11-08 with the recommendations, user said "run the peering plan")
 1. Control: (a) refuse everywhere now; PGP-verified newgroup/rmgroup is a later plan.
 2. Waves 2-3 stay in this plan.
