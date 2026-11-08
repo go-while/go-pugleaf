@@ -253,27 +253,45 @@ func TestSessCapabilities(t *testing.T) {
 			}
 		}
 	})
-	t.Run("processor-ihave", func(t *testing.T) {
+	t.Run("processor-without-peers-no-ihave", func(t *testing.T) {
 		hs := newTestServer(t, hServerOpts{Proc: &hFakeProcessor{}})
+		caps := sessCaps(t, hs.dial(t))
+		// RFC 3977 §3.3.2: IHAVE is advertised when the server accepts it. Since plan
+		// nntp-peering only a peer may feed, so a server without peers never offers it.
+		for _, l := range []string{"IHAVE", "STREAMING"} {
+			if sessHasCap(caps, l) {
+				t.Errorf("server without peers advertises %s: %q", l, caps)
+			}
+		}
+	})
+	t.Run("peer-ihave", func(t *testing.T) {
+		peers, _ := hPeerIP("")
+		hs := newTestServer(t, hServerOpts{Proc: &hFakeProcessor{}, Peers: peers})
 		caps := sessCaps(t, hs.dial(t))
 		// RFC 3977 §3.3.2: IHAVE is advertised when the server supports IHAVE.
 		if !sessHasCap(caps, "IHAVE") {
-			t.Fatalf("server with processor lacks IHAVE: %q", caps)
+			t.Fatalf("peer connection lacks IHAVE: %q", caps)
 		}
 	})
-	t.Run("processor-streaming-consistent", func(t *testing.T) {
-		hs := newTestServer(t, hServerOpts{Proc: &hFakeProcessor{}})
-		c := hs.dial(t)
-		caps := sessCaps(t, c)
-		code, line := c.Cmd("MODE STREAM")
-		// RFC 4644 §2.2: STREAMING may be advertised only when MODE STREAM, CHECK
-		// and TAKETHIS are implemented: STREAMING is listed iff MODE STREAM gives 203.
-		if has := sessHasCap(caps, "STREAMING"); has != (code == 203) {
-			t.Fatalf("STREAMING advertised=%v but MODE STREAM answered %q", has, line)
+	t.Run("streaming-consistent", func(t *testing.T) {
+		for _, withPeer := range []bool{false, true} {
+			opts := hServerOpts{Proc: &hFakeProcessor{}}
+			if withPeer {
+				opts.Peers, _ = hPeerIP("")
+			}
+			c := newTestServer(t, opts).dial(t)
+			caps := sessCaps(t, c)
+			code, line := c.Cmd("MODE STREAM")
+			// RFC 4644 §2.2: STREAMING may be advertised only when MODE STREAM, CHECK
+			// and TAKETHIS are implemented: STREAMING is listed iff MODE STREAM gives 203.
+			if has := sessHasCap(caps, "STREAMING"); has != (code == 203) {
+				t.Fatalf("peer=%v: STREAMING advertised=%v but MODE STREAM answered %q", withPeer, has, line)
+			}
 		}
 	})
-	t.Run("processor-streaming-complete", func(t *testing.T) {
-		hs := newTestServer(t, hServerOpts{Proc: &hFakeProcessor{}})
+	t.Run("peer-streaming-complete", func(t *testing.T) {
+		peers, _ := hPeerIP("")
+		hs := newTestServer(t, hServerOpts{Proc: &hFakeProcessor{}, Peers: peers})
 		code, line := hs.dial(t).Cmd("MODE STREAM")
 		// RFC 4644 §2.2/§2.3: TAKETHIS is dispatched, so the rest of streaming is
 		// expected too (MODE STREAM → 203, CHECK, the STREAMING capability).
@@ -359,11 +377,17 @@ func TestSessMode(t *testing.T) {
 		}
 	})
 	t.Run("stream", func(t *testing.T) {
-		hs := newTestServer(t, hServerOpts{Proc: &hFakeProcessor{}})
+		peers, _ := hPeerIP("")
+		hs := newTestServer(t, hServerOpts{Proc: &hFakeProcessor{}, Peers: peers})
 		code, line := hs.dial(t).Cmd("MODE STREAM")
 		// RFC 4644 §2.3: 203 streaming permitted; a server without streaming
 		// answers the unknown MODE variant with 501 (RFC 3977 §3.2.1).
 		if err := client.ExpectCode(code, line, 203, 501); err != nil {
+			t.Fatal(err)
+		}
+		// plan nntp-peering: without peers nothing may stream
+		code, line = newTestServer(t, hServerOpts{Proc: &hFakeProcessor{}}).dial(t).Cmd("MODE STREAM")
+		if err := client.ExpectCode(code, line, 502); err != nil {
 			t.Fatal(err)
 		}
 	})

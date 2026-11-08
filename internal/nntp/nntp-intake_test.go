@@ -18,11 +18,20 @@ import (
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/history"
+	"github.com/go-while/go-pugleaf/internal/models"
 )
 
-// intkConn wires a ClientConnection with a config (MaxArtSize, Hostname) to the test
-// side of a net.Pipe. proc may be nil.
-func intkConn(t *testing.T, proc ArticleProcessor, maxArtSize int, hostname string, authenticated bool) (*ClientConnection, *textproto.Conn) {
+// intkPeer is the peer of a feed connection in these tests. net.Pipe has no host:port
+// address, so the registry cannot match it: the peer is set on the connection directly,
+// exactly as resolvePeer would (plan nntp-peering).
+func intkPeer() *models.Peer {
+	return &models.Peer{ID: 1, Name: "intk-peer", PathToken: "peer.intk.invalid", InPatterns: "*", Enabled: true}
+}
+
+// intkConn wires a ClientConnection with a config (MaxArtSize, Hostname) to the test side
+// of a net.Pipe. proc may be nil. allowed makes the connection both an authenticated user
+// (POST) and a peer connection (IHAVE/TAKETHIS), so every intake command is reachable.
+func intkConn(t *testing.T, proc ArticleProcessor, maxArtSize int, hostname string, allowed bool) (*ClientConnection, *textproto.Conn) {
 	t.Helper()
 	serverEnd, clientEnd := net.Pipe()
 	cfg := &config.ServerConfig{Hostname: hostname}
@@ -39,7 +48,10 @@ func intkConn(t *testing.T, proc ArticleProcessor, maxArtSize int, hostname stri
 		server.Processor = proc
 	}
 	c := NewClientConnection(serverEnd, server, false)
-	c.authenticated = authenticated
+	c.authenticated = allowed
+	if allowed {
+		c.peer = intkPeer()
+	}
 	client := textproto.NewConn(clientEnd)
 	t.Cleanup(func() {
 		serverEnd.Close()
@@ -376,35 +388,110 @@ type intkAddrConn struct {
 
 func (c intkAddrConn) RemoteAddr() net.Addr { return c.remote }
 
-// TestIntkRelayPath (D7): IHAVE/TAKETHIS prepend "<identity>!.SEEN.<peer IP>!".
-func TestIntkRelayPath(t *testing.T) {
+// TestIntkFeedPath (plan nntp-peering): an article from a peer gets "<identity>!" in front
+// of its Path when the leftmost element is the peer's path_token, and
+// "<identity>!<token>.MISMATCH!" when it is not. No ".SEEN.<ip>" is written any more.
+func TestIntkFeedPath(t *testing.T) {
 	const host = "news.intk.invalid"
-	head := []string{"From: a <a@test.invalid>", "Path: peer.invalid!origin.invalid!not-for-mail", "Subject: x"}
+	head := []string{"From: a <a@test.invalid>", "Path: peer.intk.invalid!origin.invalid!not-for-mail", "Subject: x"}
 
+	// token match: only our identity is prepended
 	c, _ := intkConn(t, nil, 1024, host, true)
 	c.conn = intkAddrConn{Conn: c.conn, remote: &net.TCPAddr{IP: net.IPv4(192, 0, 2, 7), Port: 41119}}
-	out := c.relayPath(head)
-	if v := common.HeaderValue(out, "Path"); v != host+"!.SEEN.192.0.2.7!peer.invalid!origin.invalid!not-for-mail" {
-		t.Fatalf("relayed Path %q", v)
+	out := c.feedPath(head)
+	if v := common.HeaderValue(out, "Path"); v != host+"!peer.intk.invalid!origin.invalid!not-for-mail" {
+		t.Fatalf("Path of a matching token %q", v)
 	}
-	if head[1] != "Path: peer.invalid!origin.invalid!not-for-mail" {
+	if head[1] != "Path: peer.intk.invalid!origin.invalid!not-for-mail" {
 		t.Fatalf("input modified: %q", head)
 	}
-
-	// net.Pipe has no host:port address
-	c2, _ := intkConn(t, nil, 1024, host, true)
-	if v := common.HeaderValue(c2.relayPath(head), "Path"); v != host+"!.SEEN.unknown!peer.invalid!origin.invalid!not-for-mail" {
-		t.Fatalf("relayed Path without a peer address %q", v)
+	// Path keywords are case-insensitive (RFC 5537 3.2.1), so the token match is too
+	upper := []string{"Path: PEER.INTK.INVALID!not-for-mail"}
+	if v := common.HeaderValue(c.feedPath(upper), "Path"); v != host+"!PEER.INTK.INVALID!not-for-mail" {
+		t.Fatalf("Path of a token differing in case %q", v)
 	}
 
-	// no Path: not invented; no identity: unchanged
+	// the peer did not write its token: it is inserted as <token>.MISMATCH
+	mism := []string{"Path: somewhere.else.invalid!not-for-mail"}
+	if v := common.HeaderValue(c.feedPath(mism), "Path"); v != host+"!peer.intk.invalid.MISMATCH!somewhere.else.invalid!not-for-mail" {
+		t.Fatalf("Path of a mismatching token %q", v)
+	}
+
+	// no Path: not invented (RFC 5537 3.6); no identity: unchanged
 	noPath := []string{"From: a <a@test.invalid>", "Subject: x"}
-	if out := c.relayPath(noPath); strings.Join(out, "\n") != strings.Join(noPath, "\n") {
+	if out := c.feedPath(noPath); strings.Join(out, "\n") != strings.Join(noPath, "\n") {
 		t.Fatalf("Path invented: %q", out)
 	}
 	c3, _ := intkConn(t, nil, 1024, "", true)
-	if out := c3.relayPath(head); strings.Join(out, "\n") != strings.Join(head, "\n") {
+	if out := c3.feedPath(head); strings.Join(out, "\n") != strings.Join(head, "\n") {
 		t.Fatalf("head changed without an identity: %q", out)
+	}
+}
+
+// TestIntkPathLoop (plan nntp-peering): a Path that already holds our identity means the
+// article has been here; the keyword suffixes and the case do not matter.
+func TestIntkPathLoop(t *testing.T) {
+	const host = "news.intk.invalid"
+	for _, tc := range []struct {
+		path string
+		want bool
+	}{
+		{"", false},
+		{"not-for-mail", false},
+		{"peer.invalid!origin.invalid!not-for-mail", false},
+		{"peer.invalid!news.intk.invalid!not-for-mail", true},
+		{"news.intk.invalid!.POSTED!not-for-mail", true},
+		{"NEWS.INTK.INVALID!not-for-mail", true},
+		{"peer.invalid!news.intk.invalid.MISMATCH!origin.invalid", true},
+		{"peer.invalid!news.intk.invalid.SEEN.192.0.2.1!origin.invalid", true},
+		{"peer.invalid!other.news.intk.invalid!origin.invalid", false},
+		{"peer.invalid!news.intk.invalid.example!origin.invalid", false},
+	} {
+		if got := pathHasIdentity(tc.path, host); got != tc.want {
+			t.Errorf("pathHasIdentity(%q, %q) = %v, want %v", tc.path, host, got, tc.want)
+		}
+	}
+	if pathHasIdentity("news.intk.invalid!not-for-mail", "") {
+		t.Error("an empty identity must never be a loop")
+	}
+}
+
+// TestIntkFeedCheck (plan nntp-peering): feedCheck refuses a loop and an article whose
+// newsgroups the peer's in_patterns do not accept, and takes everything else.
+func TestIntkFeedCheck(t *testing.T) {
+	const host = "news.intk.invalid"
+	head := func(path, groups string) []string {
+		h := []string{"From: a <a@test.invalid>", "Subject: x"}
+		if path != "" {
+			h = append(h, "Path: "+path)
+		}
+		if groups != "" {
+			h = append(h, "Newsgroups: "+groups)
+		}
+		return h
+	}
+	for _, tc := range []struct {
+		name     string
+		patterns string
+		path     string
+		groups   string
+		want     string
+	}{
+		{"wanted", "*", "peer.intk.invalid!not-for-mail", "t7.intk.a", ""},
+		{"loop", "*", "peer.intk.invalid!news.intk.invalid!not-for-mail", "t7.intk.a", "path loop"},
+		{"excluded", "t7.intk.*,!t7.intk.b", "peer.intk.invalid!x", "t7.intk.b", "no newsgroup accepted from this peer"},
+		{"crosspost-partly-wanted", "t7.intk.*,!t7.intk.b", "peer.intk.invalid!x", "t7.intk.b,t7.intk.a", ""},
+		{"poisoned", "t7.intk.*,@t7.intk.bad", "peer.intk.invalid!x", "t7.intk.a,t7.intk.bad", "newsgroup not accepted from this peer"},
+		{"unknown-hierarchy", "t7.intk.*", "peer.intk.invalid!x", "other.group", "no newsgroup accepted from this peer"},
+		// the intake answers for a missing or unparsable Newsgroups header, not feedCheck
+		{"no-newsgroups", "t7.intk.*", "peer.intk.invalid!x", "", ""},
+		{"loop-before-patterns", "!*", "news.intk.invalid!x", "t7.intk.a", "path loop"},
+	} {
+		c, _ := intkConn(t, nil, 1024, host, true)
+		c.peer.InPatterns = tc.patterns
+		if got := c.feedCheck(head(tc.path, tc.groups)); got != tc.want {
+			t.Errorf("%s: feedCheck = %q, want %q", tc.name, got, tc.want)
+		}
 	}
 }
 

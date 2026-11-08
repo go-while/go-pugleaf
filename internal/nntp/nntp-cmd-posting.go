@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/mail"
 	"strconv"
 	"strings"
@@ -113,14 +112,13 @@ func (c *ClientConnection) handleIHave(args []string) error {
 		return c.sendResponse(501, "IHAVE command requires exactly one argument (message-ID)")
 	}
 
-	// Check authentication and permission before requesting the article
-	if !c.authenticated {
+	// Only a peer may feed (plan nntp-peering); checked before the article is requested
+	if !c.feedAllowed() {
 		c.rateLimitOnError()
-		return c.sendResponse(480, "Transfer permission denied (authentication required)")
-	}
-	if c.user != nil && !c.user.Posting {
-		c.rateLimitOnError()
-		return c.sendResponse(502, "Transfer not permitted for this user")
+		if c.feedDeniedCode() == 480 {
+			return c.sendResponse(480, "Transfer permission denied (authentication required)")
+		}
+		return c.sendResponse(502, "Transfer not permitted (peers only)")
 	}
 	messageID := args[0]
 	// RFC 3977 §3.2.1, §3.6: a malformed message-id argument is a syntax error
@@ -160,7 +158,14 @@ func (c *ClientConnection) handleIHave(args []string) error {
 	case err != nil:
 		return err // I/O error: nothing can be written
 	}
-	head = c.relayPath(head)
+	// Loop and in_patterns are decided here, so the article never reaches the processor;
+	// the id is remembered as rejected, so the peer stops offering it (plan nntp-peering).
+	if reason := c.feedCheck(head); reason != "" {
+		log.Printf("[NNTP-PEER] IHAVE %s from peer %q refused: %s", messageID, c.peerName(), reason)
+		c.server.Processor.RememberReject(messageID)
+		return c.sendResponse(437, "Rejected ("+reason+")")
+	}
+	head = c.feedPath(head)
 
 	article, err := c.buildIncomingArticle(head, body)
 	if err != nil {
@@ -223,8 +228,7 @@ func (c *ClientConnection) handleTakeThis(args []string) error {
 	if len(args) > 0 {
 		id = args[0]
 	}
-	allowed := c.server.Processor != nil && len(args) == 1 && c.authenticated &&
-		(c.user == nil || c.user.Posting) && common.ValidMessageID(id)
+	allowed := c.feedAllowed() && len(args) == 1 && common.ValidMessageID(id)
 
 	// Streaming mode: the client sends the article without waiting, so it is always
 	// consumed (bounded) before the reply, also for the early error replies.
@@ -254,14 +258,13 @@ func (c *ClientConnection) handleTakeThis(args []string) error {
 	if len(args) != 1 {
 		return reply(501, "TAKETHIS requires exactly one message-id")
 	}
-	// Check authentication and permission (exactly one response per TAKETHIS)
-	if !c.authenticated {
+	// Only a peer may feed (plan nntp-peering; exactly one response per TAKETHIS)
+	if !c.feedAllowed() {
 		c.rateLimitOnError()
-		return reply(480, "Transfer permission denied")
-	}
-	if c.user != nil && !c.user.Posting {
-		c.rateLimitOnError()
-		return reply(502, "Transfer not permitted")
+		if c.feedDeniedCode() == 480 {
+			return reply(480, "Transfer permission denied")
+		}
+		return reply(502, "Transfer not permitted (peers only)")
 	}
 	if !common.ValidMessageID(id) {
 		c.rateLimitOnError()
@@ -284,7 +287,13 @@ func (c *ClientConnection) handleTakeThis(args []string) error {
 		log.Printf("[NNTP] TAKETHIS %s: error checking article history, closing", id)
 		return c.closeAfterReply(400, "Service temporarily unavailable")
 	}
-	head = c.relayPath(head)
+	// Loop and in_patterns, as in IHAVE (plan nntp-peering)
+	if reason := c.feedCheck(head); reason != "" {
+		log.Printf("[NNTP-PEER] TAKETHIS %s from peer %q refused: %s", id, c.peerName(), reason)
+		c.server.Processor.RememberReject(id)
+		return reply(439, "Rejected ("+reason+")")
+	}
+	head = c.feedPath(head)
 
 	article, err := c.buildIncomingArticle(head, body)
 	if err != nil {
@@ -486,22 +495,6 @@ func (c *ClientConnection) injectProtoArticle(head []string) ([]string, error) {
 		old = "not-for-mail"
 	}
 	return common.ReplaceHeader(out, "Path", identity+"!.POSTED!"+old), nil
-}
-
-// relayPath prepends "<identity>!.SEEN.<peer IP>!" to the Path of a relayed article
-// (RFC 5537 §3.2.1). Without an identity or a Path header the head is returned unchanged.
-func (c *ClientConnection) relayPath(head []string) []string {
-	identity := c.pathIdentity()
-	if identity == "" || len(common.HeaderValues(head, "Path")) == 0 {
-		return head
-	}
-	peerIP := "unknown"
-	if c.conn != nil && c.conn.RemoteAddr() != nil {
-		if host, _, err := net.SplitHostPort(c.conn.RemoteAddr().String()); err == nil && host != "" {
-			peerIP = host
-		}
-	}
-	return common.ReplaceHeader(head, "Path", identity+"!.SEEN."+peerIP+"!"+common.HeaderValue(head, "Path"))
 }
 
 // buildIncomingArticle parses raw head/body lines and maps the newsgroups to pointers.

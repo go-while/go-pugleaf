@@ -148,13 +148,20 @@ func hDataDir(t *testing.T) string {
 // Server
 
 // hServerOpts configures newTestServer. Zero values: no processor, MaxConns 100,
-// default idle timeout, no error delay, plain TCP.
+// default idle timeout, no error delay, plain TCP, no peers.
 type hServerOpts struct {
 	Proc        ArticleProcessor
 	MaxConns    int
 	IdleTimeout time.Duration
 	ErrorDelay  time.Duration
 	TLS         *tls.Config
+	// Peers is the peer registry of this server (plan nntp-peering). nil means "no
+	// peers", so nothing may feed; it is never the shared database, so the peer rows
+	// one test inserts cannot turn another test's connections into peer connections.
+	Peers *PeerRegistry
+	// Hostname is Config.Hostname, the server's Path identity ("" = none, so no Path is
+	// written and POST is refused).
+	Hostname string
 }
 
 // hServer wraps a running NNTPServer bound to 127.0.0.1:0.
@@ -173,7 +180,7 @@ type hServer struct {
 func newTestServer(t *testing.T, opts hServerOpts) *hServer {
 	t.Helper()
 	db := hTestDB(t)
-	cfg := &config.ServerConfig{}
+	cfg := &config.ServerConfig{Hostname: opts.Hostname}
 	cfg.NNTP.MaxConns = opts.MaxConns
 	if cfg.NNTP.MaxConns <= 0 {
 		cfg.NNTP.MaxConns = 100
@@ -187,6 +194,7 @@ func newTestServer(t *testing.T, opts hServerOpts) *hServer {
 	s.GroupCmdDelay = 0
 	s.ErrorDelay = opts.ErrorDelay
 	s.IdleTimeout = opts.IdleTimeout
+	s.Peers = opts.Peers // never the shared DB: see hServerOpts.Peers
 	hs.S = s
 
 	l, err := net.Listen("tcp", "127.0.0.1:0")
@@ -454,6 +462,71 @@ func hUser(t *testing.T, posting, active bool) (user, pass string) {
 }
 
 // ---------------------------------------------------------------------------
+// Peers (plan nntp-peering: only a peer may feed)
+
+// hPeerStore is the PeerStore of one test server: a fixed peer list, so the peers other
+// tests insert into the shared DB never reach this server, plus the real AuthenticatePeer
+// of the peers table when db is set.
+type hPeerStore struct {
+	peers []*models.Peer
+	db    *database.Database
+}
+
+// GetEnabledPeers implements PeerStore.
+func (s *hPeerStore) GetEnabledPeers() ([]*models.Peer, error) { return s.peers, nil }
+
+// AuthenticatePeer implements PeerStore (no login without a database).
+func (s *hPeerStore) AuthenticatePeer(username, password string) (*models.Peer, error) {
+	if s.db == nil {
+		return nil, database.ErrPeerAuth
+	}
+	return s.db.AuthenticatePeer(username, password)
+}
+
+// hPeers builds a registry over peers, without a database: only address matching works.
+func hPeers(peers ...*models.Peer) *PeerRegistry {
+	return NewPeerRegistry(&hPeerStore{peers: peers})
+}
+
+// hPeerSpec returns an enabled peer row (not inserted) named hpeer<seq> with its own Path
+// token, the given hosts and in_patterns ("" means "*").
+func hPeerSpec(hosts, patterns string) *models.Peer {
+	n := hSeq.Add(1)
+	if patterns == "" {
+		patterns = "*"
+	}
+	return &models.Peer{
+		ID: n, Name: fmt.Sprintf("hpeer%04d", n), PathToken: fmt.Sprintf("hpeer%04d.test.invalid", n),
+		Hosts: hosts, InPatterns: patterns, MaxConns: 4, Enabled: true,
+	}
+}
+
+// hPeerIP is the common fixture: one peer that may feed from 127.0.0.1 without a login, so
+// every connection of that test server is a peer connection. It returns the registry for
+// hServerOpts.Peers and the peer.
+func hPeerIP(patterns string) (*PeerRegistry, *models.Peer) {
+	p := hPeerSpec("127.0.0.1", patterns)
+	return hPeers(p), p
+}
+
+// hPeerLogin inserts a peer with an AUTHINFO login into the shared DB (so AuthenticatePeer
+// runs the real bcrypt check against the peers table) and returns the registry for
+// hServerOpts.Peers, the peer and its password. hosts may be "" (login only).
+func hPeerLogin(t *testing.T, hosts string) (*PeerRegistry, *models.Peer, string) {
+	t.Helper()
+	db := hTestDB(t)
+	p := hPeerSpec(hosts, "*")
+	p.InUsername = p.Name + "in"
+	pass := "pw-" + p.Name
+	id, err := db.InsertPeer(p, pass)
+	if err != nil {
+		t.Fatalf("InsertPeer %s: %v", p.Name, err)
+	}
+	p.ID = id
+	return NewPeerRegistry(&hPeerStore{peers: []*models.Peer{p}, db: db}), p, pass
+}
+
+// ---------------------------------------------------------------------------
 // Fake processor (same behavior as wiringTestProcessor, kept separate)
 
 // hFakeProcessor is a scriptable ArticleProcessor. The *Fn hooks, when set,
@@ -535,6 +608,13 @@ func (p *hFakeProcessor) processedArticles() []*models.Article {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return append([]*models.Article(nil), p.processed...)
+}
+
+// rejectedIDs returns the message-ids RememberReject was called with.
+func (p *hFakeProcessor) rejectedIDs() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.rejected...)
 }
 
 func (p *hFakeProcessor) findCount() int {
