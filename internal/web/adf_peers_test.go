@@ -1,12 +1,16 @@
 package web
 
 import (
+	"errors"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/go-while/go-pugleaf/internal/feed"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
@@ -487,4 +491,137 @@ func adfPeersCount(t *testing.T) int {
 		t.Fatalf("GetPeers: %v", err)
 	}
 	return len(peers)
+}
+
+// Counters of the outgoing feed on the peers page (plan nntp-peering, slice feed-sender). The
+// page reads them from the feed queue file through the opener SetFeedQueueOpener installs; the
+// real opener is the queue of internal/feed, these tests use a fake one.
+
+// adfFeedQueue is a fake FeedQueueReader.
+type adfFeedQueue struct {
+	stats  map[int64]feed.Stats
+	err    error
+	paths  []string
+	closed int
+}
+
+func (q *adfFeedQueue) ReadStats() (map[int64]feed.Stats, error) {
+	if q.err != nil {
+		return nil, q.err
+	}
+	return q.stats, nil
+}
+
+func (q *adfFeedQueue) Close() error {
+	q.closed++
+	return nil
+}
+
+// adfPeersBody renders the peers page as an admin.
+func adfPeersBody(t *testing.T, cookie *http.Cookie) string {
+	t.Helper()
+	rec := w0Do(t, w0Req{Path: "/admin/peers", Cookies: []*http.Cookie{cookie}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /admin/peers = %d, want 200", rec.Code)
+	}
+	return rec.Body.String()
+}
+
+// adfSqueeze collapses every run of white space into one space, so an assertion does not
+// depend on the template's indentation.
+func adfSqueeze(s string) string { return strings.Join(strings.Fields(s), " ") }
+
+// adfFeedQueueFile creates the queue file the page looks for and removes it afterwards (its
+// content is never read: the fake opener stands for feed.Open).
+func adfFeedQueueFile(t *testing.T) {
+	t.Helper()
+	path := feedQueuePath(w0DB(t).GetDataDir())
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("not a database"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(path) })
+}
+
+// TestAdfPeersFeedStatsNA: without an opener (no feed sender wired) and without a queue file
+// the page shows "n/a" and no numbers.
+func TestAdfPeersFeedStatsNA(t *testing.T) {
+	_, cookie := w0NewUser(t, true)
+	p := adfPeersCreate(t, cookie, adfPeersForm(w0Name("adfpeer")))
+
+	SetFeedQueueOpener(nil)
+	body := adfPeersBody(t, cookie)
+	if !strings.Contains(body, "n/a") {
+		t.Error("peers page without a feed queue does not show n/a")
+	}
+	if strings.Contains(body, "<small>offered ") {
+		t.Error("peers page shows counters without a feed queue")
+	}
+
+	// An opener is wired but the queue file does not exist: still no numbers, and the opener
+	// is not even called.
+	called := false
+	SetFeedQueueOpener(func(path string) (FeedQueueReader, error) {
+		called = true
+		return &adfFeedQueue{stats: map[int64]feed.Stats{p.ID: {Offered: 1}}}, nil
+	})
+	t.Cleanup(func() { SetFeedQueueOpener(nil) })
+	body = adfPeersBody(t, cookie)
+	if called {
+		t.Error("the feed queue was opened although the file does not exist")
+	}
+	if strings.Contains(body, "<small>offered ") {
+		t.Error("peers page shows counters although the queue file is missing")
+	}
+}
+
+// TestAdfPeersFeedStats: with a queue file and an opener the page shows the stored counters of
+// that peer, and the queue file is closed again after every request.
+func TestAdfPeersFeedStats(t *testing.T) {
+	_, cookie := w0NewUser(t, true)
+	p := adfPeersCreate(t, cookie, adfPeersForm(w0Name("adfpeer")))
+	adfFeedQueueFile(t)
+
+	q := &adfFeedQueue{stats: map[int64]feed.Stats{p.ID: {
+		PeerID: p.ID, Offered: 11, Accepted: 7, Refused: 2, Rejected: 1, Deferred: 3,
+		QueueDepth: 4242, LastError: "CHECK 431",
+	}}}
+	wantPath := feedQueuePath(w0DB(t).GetDataDir())
+	SetFeedQueueOpener(func(path string) (FeedQueueReader, error) {
+		q.paths = append(q.paths, path)
+		return q, nil
+	})
+	t.Cleanup(func() { SetFeedQueueOpener(nil) })
+
+	body := adfSqueeze(adfPeersBody(t, cookie))
+	if want := "offered 11 / accepted 7 / refused 2 / rejected 1 / deferred 3"; !strings.Contains(body, want) {
+		t.Errorf("peers page does not show %q", want)
+	}
+	if !strings.Contains(body, "<td> 4242 </td>") {
+		t.Error("peers page does not show the queue depth")
+	}
+	if !strings.Contains(body, "CHECK 431") {
+		t.Error("peers page does not show the last error")
+	}
+	if len(q.paths) != 1 || q.paths[0] != wantPath {
+		t.Errorf("opened %v, want [%s]", q.paths, wantPath)
+	}
+	if q.closed != 1 {
+		t.Errorf("the feed queue was closed %d time(s), want 1", q.closed)
+	}
+
+	// A queue that cannot be read is not an error page: the counters fall back to n/a.
+	q.err = errors.New("feed queue is locked")
+	body = adfPeersBody(t, cookie)
+	if strings.Contains(body, "offered 11") {
+		t.Error("peers page shows counters although the queue could not be read")
+	}
+	if !strings.Contains(body, "n/a") {
+		t.Error("peers page does not fall back to n/a on a read error")
+	}
+	if q.closed != 2 {
+		t.Errorf("the feed queue was closed %d time(s), want 2", q.closed)
+	}
 }
