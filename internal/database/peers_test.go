@@ -76,9 +76,10 @@ func TestPeersValidate(t *testing.T) {
 		{Name: "x", PathToken: "a!b"},
 		{Name: "x", PathToken: "a b"},
 		{Name: "x", PathToken: "a", Hosts: "bad_host!"},
-		{Name: "x", PathToken: "a", OutPort: 70000},
-		{Name: "x", PathToken: "a", MaxConns: 65},
-		{Name: "x", PathToken: "a", OutEnabled: true},
+		{Name: "x", PathToken: "a", Hosts: "h", OutPort: 70000},
+		{Name: "x", PathToken: "a", Hosts: "h", MaxConns: 65},
+		{Name: "x", PathToken: "a", Hosts: "h", OutEnabled: true},
+		{Name: "x", PathToken: "a"},
 	} {
 		if err := ValidatePeer(&p); err == nil {
 			t.Errorf("ValidatePeer(%+v) = nil, want an error", p)
@@ -87,6 +88,13 @@ func TestPeersValidate(t *testing.T) {
 	ok := models.Peer{Name: "x", PathToken: "a", Hosts: "::1,fe80::/10,host-1.example.org.", OutEnabled: true, OutHost: "b"}
 	if err := ValidatePeer(&ok); err != nil {
 		t.Errorf("ValidatePeer(ok) = %v", err)
+	}
+	loginOnly := models.Peer{Name: "x", PathToken: "a", InUsername: "feeder"}
+	if err := ValidatePeer(&loginOnly); err != nil {
+		t.Errorf("ValidatePeer(login only) = %v", err)
+	}
+	if _, err := w0DB(t).InsertPeer(&models.Peer{Name: w0Name("pw"), PathToken: "a", Hosts: "127.0.0.1"}, "secret-password"); err == nil {
+		t.Error("InsertPeer with a password and no login: want an error")
 	}
 }
 

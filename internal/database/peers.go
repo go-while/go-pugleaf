@@ -80,7 +80,8 @@ func (db *Database) getPeer(where string, arg interface{}) (*models.Peer, error)
 
 // ValidatePeer checks a peer before it is written: a name, a Path token without '!' or white
 // space, hosts entries that are IPs, CIDRs or host names, ports and max_conns in range, and an
-// out_host when the outgoing feed is enabled. It also fills empty pattern fields with the
+// out_host when the outgoing feed is enabled, and hosts or an in_username (a peer with neither
+// can never be matched). It also fills empty pattern fields with the
 // table defaults.
 func ValidatePeer(p *models.Peer) error {
 	p.Name = strings.TrimSpace(p.Name)
@@ -99,6 +100,9 @@ func ValidatePeer(p *models.Peer) error {
 		}
 	}
 	p.Hosts = strings.Join(ParsePeerHosts(p.Hosts), ",")
+	if p.Hosts == "" && p.InUsername == "" {
+		return fmt.Errorf("peer %q: needs hosts or a login (in_username), else it can never be matched", p.Name)
+	}
 	if strings.TrimSpace(p.InPatterns) == "" {
 		p.InPatterns = "*"
 	}
@@ -162,6 +166,9 @@ func validPeerHost(h string) bool {
 func (db *Database) InsertPeer(p *models.Peer, inPassword string) (int64, error) {
 	if err := ValidatePeer(p); err != nil {
 		return 0, err
+	}
+	if inPassword != "" && p.InUsername == "" {
+		return 0, fmt.Errorf("peer %q: a login password needs a login name (in_username)", p.Name)
 	}
 	hash, err := hashPeerPassword(inPassword)
 	if err != nil {
