@@ -137,11 +137,11 @@ func TestAdfPeersCreate(t *testing.T) {
 }
 
 // TestAdfPeersCreateDefaults: the empty pattern, port and max_conns fields fall back to the
-// column defaults of ValidatePeer, and empty hosts mean "AUTHINFO only".
+// column defaults of ValidatePeer, and empty hosts with a login mean "AUTHINFO only".
 func TestAdfPeersCreateDefaults(t *testing.T) {
 	_, cookie := w0NewUser(t, true)
 	name := w0Name("adfpeer")
-	p := adfPeersCreate(t, cookie, url.Values{"name": {name}, "path_token": {name}, "enabled": {"on"}})
+	p := adfPeersCreate(t, cookie, url.Values{"name": {name}, "path_token": {name}, "in_username": {name + "-login"}, "enabled": {"on"}})
 
 	if p.Hosts != "" {
 		t.Errorf("hosts = %q, want empty (AUTHINFO only)", p.Hosts)
