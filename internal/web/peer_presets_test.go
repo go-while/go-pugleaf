@@ -64,3 +64,18 @@ func TestPeerPresetsINNVariables(t *testing.T) {
 		t.Errorf("an edited preset must be written expanded:\n%s", got)
 	}
 }
+
+// TestPeerPresetsShort: the peers table shows a preset by its variable form and cuts long lists.
+func TestPeerPresetsShort(t *testing.T) {
+	presets := peerPatternPresets()
+	if got := patternsShort(presets[len(presets)-1].Patterns); got != "*,$NEWSDEEFDEFAULT,$NEWSDEEFNOBINARY" {
+		t.Errorf("patternsShort(newsdeef text) = %q", got)
+	}
+	if got := patternsShort("*,!junk"); got != "*,!junk" {
+		t.Errorf("patternsShort(short list) = %q", got)
+	}
+	long := strings.Repeat("comp.lang.x,", 10)
+	if got := patternsShort(long); len([]rune(got)) != patternsShortMax+1 || !strings.HasSuffix(got, "…") {
+		t.Errorf("patternsShort(long) = %q, want %d characters and an ellipsis", got, patternsShortMax)
+	}
+}

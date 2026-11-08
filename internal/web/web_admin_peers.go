@@ -127,6 +127,10 @@ type PeerView struct {
 	OutPasswordSet bool
 	Stats          *PeerFeedStats     // nil: no counters are available (see PeerFeedStats)
 	Config         PeerConfigSnippets // INN and Diablo configuration for the peer's side
+	// InPatternsShort and OutPatternsShort are the patterns as the list table shows them: the
+	// preset name when they are a preset, else at most patternsShortMax characters.
+	InPatternsShort  string
+	OutPatternsShort string
 }
 
 // AdminPeersPageData is the template data of admin_peers.html.
@@ -179,6 +183,8 @@ func (s *WebServer) adminPeersPage(c *Context) {
 	for _, p := range peers {
 		v := newPeerView(p)
 		v.Config = peerConfigSnippets(v.Peer, ourHost)
+		v.InPatternsShort = patternsShort(v.InPatterns)
+		v.OutPatternsShort = patternsShort(v.OutPatterns)
 		if st, ok := stats[p.ID]; ok {
 			v.Stats = peerFeedStats(st)
 		}

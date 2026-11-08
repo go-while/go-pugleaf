@@ -61,7 +61,7 @@
           </p>
           <details class="mb-2">
             <summary>newsdeef.eu pattern lists (INN newsfeeds variables)</summary>
-            <pre class="border rounded p-2 small mt-2" style="white-space: pre-wrap;">{{.NewsdeefINN}}</pre>
+            <pre class="border rounded p-2 small mt-2" style="white-space: pre-wrap; overflow-wrap: anywhere;">{{.NewsdeefINN}}</pre>
           </details>
           <p class="mb-0">
             <strong>Path token.</strong> The peer's own Path identity, the leftmost element it writes into
@@ -119,7 +119,7 @@
                     <span class="text-muted">none</span>
                   {{end}}
                 </td>
-                <td><code>{{.InPatterns}}</code></td>
+                <td style="max-width: 16rem; overflow-wrap: anywhere;"><code title="{{.InPatterns}}">{{.InPatternsShort}}</code></td>
                 <td>
                   {{if .OutEnabled}}<span title="outgoing feed enabled">✅</span>{{else}}<span title="outgoing feed disabled">⚪</span>{{end}}
                 </td>
@@ -133,7 +133,7 @@
                     <span class="text-muted">—</span>
                   {{end}}
                 </td>
-                <td><code>{{.OutPatterns}}</code></td>
+                <td style="max-width: 16rem; overflow-wrap: anywhere;"><code title="{{.OutPatterns}}">{{.OutPatternsShort}}</code></td>
                 <!-- Queue depth and the per-peer counters come from the feed queue file the
                      sender writes (data/cfg/feed-queue.sq3, at most once a minute). .Stats is
                      nil while there are no numbers (no sender has run yet, or this process
@@ -183,11 +183,11 @@
                       <div class="row">
                         <div class="col-lg-6">
                           <h6>INN (incoming.conf, newsfeeds, innfeed.conf)</h6>
-                          <pre class="border rounded p-2 small" style="white-space: pre-wrap;">{{.Config.INN}}</pre>
+                          <pre class="border rounded p-2 small" style="white-space: pre-wrap; overflow-wrap: anywhere;">{{.Config.INN}}</pre>
                         </div>
                         <div class="col-lg-6">
                           <h6>Diablo (dnewsfeeds)</h6>
-                          <pre class="border rounded p-2 small" style="white-space: pre-wrap;">{{.Config.Diablo}}</pre>
+                          <pre class="border rounded p-2 small" style="white-space: pre-wrap; overflow-wrap: anywhere;">{{.Config.Diablo}}</pre>
                         </div>
                       </div>
                     </div>
