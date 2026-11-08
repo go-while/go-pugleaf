@@ -75,6 +75,14 @@ const DefaultMaxCrossPosts = 9
 // each article's ProcessQueue from the configured value, so this is only a sanity bound.
 const MaxCrossPostsLimit = 99
 
+// CFG_KEY_HISTORY_REJECT_DAYS is how many days a rejected message-id stays in history (INN
+// "remembertrash"), so peers stop offering it again. 0 keeps rejects as long as history; a
+// missing, invalid or negative value reads as DefaultHistoryRejectDays.
+const CFG_KEY_HISTORY_REJECT_DAYS string = "HistoryRejectDays"
+
+// DefaultHistoryRejectDays is the HistoryRejectDays used when the key is missing or invalid.
+const DefaultHistoryRejectDays = 30
+
 // Admin settings form field names
 const FORM_FIELD_HOSTNAME string = "local_nntp_hostname"
 const FORM_FIELD_WEBPOSTSIZE string = "web_post_size"

@@ -23,6 +23,7 @@ type wiringTestProcessor struct {
 	processErr    error
 	processed     []*models.Article
 	checked       []string
+	rejected      []string
 	findArticle   *models.Article
 	findErr       error
 	findCalls     int
@@ -39,6 +40,12 @@ func (p *wiringTestProcessor) ProcessIncomingArticle(article *models.Article) (i
 // ProcessPostedArticle implements ArticleProcessor (no commit wait in the fake).
 func (p *wiringTestProcessor) ProcessPostedArticle(article *models.Article, stop <-chan struct{}, timeout time.Duration) (int, error) {
 	return p.ProcessIncomingArticle(article)
+}
+
+func (p *wiringTestProcessor) RememberReject(messageID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.rejected = append(p.rejected, messageID)
 }
 
 func (p *wiringTestProcessor) CheckMessageID(messageID string) int {

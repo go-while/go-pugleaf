@@ -470,6 +470,7 @@ type hFakeProcessor struct {
 	findFn         func(messageID, currentGroup string) (*models.Article, error)
 	processed      []*models.Article
 	checked        []string
+	rejected       []string
 	findCalls      int
 	lastFindGroup  string
 	lastFindID     string
@@ -500,6 +501,12 @@ func (p *hFakeProcessor) ProcessIncomingArticle(article *models.Article) (int, e
 		return p.processFn(article)
 	}
 	return p.processResult, p.processErr
+}
+
+func (p *hFakeProcessor) RememberReject(messageID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.rejected = append(p.rejected, messageID)
 }
 
 func (p *hFakeProcessor) CheckMessageID(messageID string) int {

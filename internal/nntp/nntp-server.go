@@ -32,6 +32,9 @@ type ArticleProcessor interface {
 	// CheckMessageID returns history.CasePass (wanted), history.CaseDupes (have it),
 	// history.CaseRetry (in progress) or history.CaseError for an offered message-id
 	CheckMessageID(messageID string) int
+	// RememberReject records messageID as rejected in the history index (a permanent refusal
+	// decided in the NNTP layer: Path loop, peer pattern), so peers stop offering it again.
+	RememberReject(messageID string)
 	// FindArticleByMessageID looks in currentGroup first, then in the groups from the history index.
 	// A definite miss returns an error wrapping ErrArticleNotFound (nntp-backend-pool.go).
 	FindArticleByMessageID(messageID, currentGroup string) (*models.Article, error)

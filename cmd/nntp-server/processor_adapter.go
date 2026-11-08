@@ -35,6 +35,11 @@ func (pa *ProcessorAdapter) CheckMessageID(messageID string) int {
 	return pa.processor.CheckMessageID(messageID)
 }
 
+// RememberReject records an offered message-id as rejected in the history index
+func (pa *ProcessorAdapter) RememberReject(messageID string) {
+	pa.processor.RememberReject(messageID)
+}
+
 // FindArticleByMessageID finds an article by message-ID (current group first, then history)
 func (pa *ProcessorAdapter) FindArticleByMessageID(messageID, currentGroup string) (*models.Article, error) {
 	return pa.processor.FindArticleByMessageID(messageID, currentGroup)

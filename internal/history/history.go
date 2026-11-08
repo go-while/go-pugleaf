@@ -238,6 +238,15 @@ func (h *History) AddArticleAt(messageID string, groupID, articleNum int64) {
 	h.enqueue(opAdd, messageID, groupID, articleNum)
 }
 
+// AddReject queues "messageID was rejected" (INN remembertrash): the row gets a reject token
+// r<unixday> instead of a group token, so Exists reports it as known and peers stop offering it,
+// while LookupGroups/LookupLocations return nothing for it. Rejects expire after the
+// HistoryRejectDays config key. No-op if history is disabled.
+// Wave 0 stub of plan nntp-peering; slice history-rejects implements it.
+func (h *History) AddReject(messageID string) {
+	_ = messageID
+}
+
 // RemoveArticle queues "messageID is no longer stored in groupID" (trimming). The number is
 // unknown, so every token of groupID (plain or with a number) is removed.
 func (h *History) RemoveArticle(messageID string, groupID int64) {

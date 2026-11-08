@@ -174,6 +174,14 @@ func (proc *Processor) AddArticleToHistory(messageID string, groupID, articleNum
 	proc.History.AddArticleAt(messageID, groupID, articleNum)
 }
 
+// RememberReject records messageID as rejected in the history index (History.AddReject), so a
+// peer offering it again gets "not wanted". No-op if history is disabled.
+func (proc *Processor) RememberReject(messageID string) {
+	if proc.History != nil {
+		proc.History.AddReject(messageID)
+	}
+}
+
 // GetHistoryStats returns current history statistics
 func (proc *Processor) GetHistoryStats() history.HistoryStats {
 	if proc.History != nil {
