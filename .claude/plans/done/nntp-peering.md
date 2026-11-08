@@ -297,3 +297,27 @@ other's peer (`hosts 127.0.0.1`, path tokens = hostnames), same test group on bo
    on arc1-ca?
 3. `history_reject_days` default 30 (INN keeps rejects as long as history)? 
 4. Peer outbound passwords stored as given (like providers) acceptable for now?
+
+## Outcome (2026-11-08)
+- Integration branch `plan-nntp-peering`, merged into testing-001 as 4dfca0c (pushed).
+- Inline commits: 514b8c9 + 61f2665 (wave 0), 586fe24 (feed contract), 5e6a52b (feed.OpenReadOnly),
+  0e3a552 (nntp-server -feed / web wiring, out_flags check), 56211aa (verifier findings: RememberReject
+  marks the msgid cache; expire-news prunes rejects when -group matches nothing).
+- Worktree branches (left in place) under /tank0/claude/trees/go-pugleaf/: worktree-agent-abca3d5198f613fa4
+  (peers-admin), worktree-agent-a2d5828036dd9a723 (peer-acl), worktree-agent-ae34918d8147ac350
+  (history-rejects), worktree-agent-a26fe5fe025a6a64c (feed-queue), worktree-agent-a181d2c1458225c79
+  (feed-sender); sq-no-web-threads (branch sidequest-no-web-threads, 94ec63b: nntp-server
+  -disable-webserver-post-threads, merged f4c21cf).
+- Verification: full check list green (incl. internal/feed); known bugs unchanged (only
+  nntp-article-430-cache-delay); two-server E2E all PASS (POST relayed with Path
+  example.org!example.com!.POSTED!not-for-mail; refused back-offer done; Path loop 439 + remembered;
+  non-peer 502 / 480 with a peer login possible, no IHAVE/STREAMING in CAPABILITIES; remembered reject
+  438, wanted again after expire-news -trim-history; 50 queued while B down, drained in 22 s, counters
+  50/50; bulk Control refused + remembered; /admin/peers shows the counters). Scratch roots
+  data-test-peer-{a,b,c} left in the checkout (gitignored).
+- Deploy notes: every feeding server needs a peers row (posting users no longer feed; nntp-transfer to a
+  go-pugleaf target needs one too). The first reject prune after the upgrade builds the partial index
+  per history table, one table per step.
+- Leftovers: web site posts (post_queue) are not fed; no catch-up for enqueue overflow; admin edits
+  reach the nntp-server within 30 s (Invalidate hooks unreachable cross-process); usermgr-style peer
+  CLI flags; control messages refused everywhere (PGP-verified newgroup/rmgroup = later plan).
