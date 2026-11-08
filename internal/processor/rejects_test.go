@@ -334,3 +334,26 @@ func TestRejectBulkControlHeader(t *testing.T) {
 		t.Errorf("bulkControlHeader from the headers map = %q, want newgroup", got)
 	}
 }
+
+// TestRejectRememberRejectMarksTheCache: a refusal the NNTP layer decides (RememberReject) is
+// known to CheckMessageID at once, before the async history writer flushed it; an id another
+// connection holds (CaseLock) keeps its in-flight state.
+func TestRejectRememberRejectMarksTheCache(t *testing.T) {
+	history.NewMsgIdItemCache()
+	h := wiringTestHistory(t)
+	proc := &Processor{History: h, MsgIdCache: history.MsgIdCache}
+
+	msgid := rejTestMsgID("nntp-layer")
+	proc.RememberReject(msgid)
+	if got := proc.CheckMessageID(msgid); got != history.CaseDupes {
+		t.Errorf("CheckMessageID right after RememberReject = %#x, want CaseDupes", got)
+	}
+	rejTestWaitRemembered(t, h, msgid)
+
+	busy := rejTestMsgID("nntp-layer-busy")
+	wiringTestSetState(busy, history.CaseLock)
+	proc.RememberReject(busy)
+	if got := proc.CheckMessageID(busy); got != history.CaseRetry {
+		t.Errorf("CheckMessageID of an in-flight id after RememberReject = %#x, want CaseRetry", got)
+	}
+}

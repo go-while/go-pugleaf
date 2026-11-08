@@ -166,6 +166,13 @@ func main() {
 
 	if len(newsgroups) == 0 {
 		log.Printf("No newsgroups found matching pattern: %s", *targetGroup)
+		// Remembered rejects are not bound to a newsgroup: -trim-history still prunes them.
+		if hist != nil {
+			if !pruneExpiredRejects(hist, db.HistoryRejectDays(), stopChan) {
+				shutdown(db, hist)
+				os.Exit(1)
+			}
+		}
 		shutdown(db, hist)
 		return
 	}

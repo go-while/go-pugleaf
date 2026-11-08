@@ -178,8 +178,25 @@ func (proc *Processor) AddArticleToHistory(messageID string, groupID, articleNum
 }
 
 // RememberReject records messageID as rejected in the history index (History.AddReject), so a
-// peer offering it again gets "not wanted". No-op if history is disabled.
+// peer offering it again gets "not wanted". The history write is asynchronous, so the id is
+// also marked in the short-term message-id cache (as the ProcessArticle refusals are): a
+// pipelining peer's next CHECK answers 438 at once, not only after the writer's flush. An id
+// another connection is processing right now (CaseLock/CaseWrite) is left alone.
+// The history part is a no-op if history is disabled.
 func (proc *Processor) RememberReject(messageID string) {
+	if messageID == "" {
+		return
+	}
+	if history.MsgIdCache != nil {
+		if item := history.MsgIdCache.GetORCreate(messageID); item != nil {
+			item.Mux.Lock()
+			if item.Response != history.CaseLock && item.Response != history.CaseWrite {
+				item.Response = history.CaseDupes
+				item.CachedEntryExpires = time.Now().Add(history.CachedEntryTTL)
+			}
+			item.Mux.Unlock()
+		}
+	}
 	if proc.History != nil {
 		proc.History.AddReject(messageID)
 	}
