@@ -213,6 +213,10 @@ func main() {
 	nntpServer.SetPostCommitWait(postCommitWait)
 	log.Printf("[NNTP]: idletimeout=%s articledelay=%s groupdelay=%s errordelay=%s plaintextauth=%s readauth=%v enforce-user-maxconns=%v maxartsize=%d local430ttl=%s xref=%s xref-batched-lookup=%v bind=%q post-commit-wait=%s",
 		idleTimeout, articleDelay, groupDelay, errorDelay, plaintextAuth, readAuth, enforceUserMaxConns, nntpServer.MaxArticleBytes(), nntpServer.Local430TTL(), nntpServer.XrefMode(), nntpServer.XrefBatchedLookup(), mainConfig.Server.NNTP.Addr, nntpServer.PostCommitWait())
+	// Only a peer may feed this server (plan nntp-peering): read the peers table once here,
+	// so the log says at startup who that is (the registry logs the names and reads the
+	// table again every 30 s, so admin edits apply without a restart).
+	log.Printf("[NNTP]: peers that may feed (IHAVE/CHECK/TAKETHIS/MODE STREAM): %d", len(nntpServer.Peers.Enabled()))
 	// Set up the date parser adapter to use processor's ParseNNTPDate
 	database.GlobalDateParser = processor.ParseNNTPDate
 
