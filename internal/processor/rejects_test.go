@@ -269,6 +269,8 @@ func TestRejectBulkRejectOnlyRowIsNoDuplicate(t *testing.T) {
 	msgid := rejTestMsgID("bulk-accept")
 	h.AddReject(msgid)
 	rejTestWaitRemembered(t, h, msgid)
+	// the 15 s in-flight cache must not make the bulk path skip the article either
+	wiringTestSetState(msgid, history.CaseDupes)
 
 	mark := db.Batch.CommitMark(group)
 	code, err := proc.ProcessArticle(rejTestArticle(t, group, msgid, "", true), group, true)
