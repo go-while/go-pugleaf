@@ -3,7 +3,7 @@ package feed
 // Tests of the sender's bookkeeping (plan nntp-peering, slice feed-sender): claiming,
 // acknowledging, the retry backoff, the peer reload and the counters. The protocol itself is
 // tested against a fake NNTP peer in sender_conn_test.go. No test asserts on wall-clock time:
-// the sender's clock is a fake one and every wait is a hang guard (testWait).
+// the sender's clock is a fake one and every wait is a hang guard (sndWait).
 
 import (
 	"errors"
@@ -15,20 +15,20 @@ import (
 
 // TestSenderNeedsConfig: the three required fields are checked by NewSender.
 func TestSenderNeedsConfig(t *testing.T) {
-	q := newFakeQueue()
+	q := newSndQueue()
 	for _, tc := range []struct {
 		name string
 		cfg  Config
 	}{
-		{"no queue", Config{Peers: &fakePeerSource{}, Articles: newFakeArticles()}},
-		{"no peers", Config{Queue: q, Articles: newFakeArticles()}},
-		{"no articles", Config{Queue: q, Peers: &fakePeerSource{}}},
+		{"no queue", Config{Peers: &sndPeerSource{}, Articles: newSndArticles()}},
+		{"no peers", Config{Queue: q, Articles: newSndArticles()}},
+		{"no articles", Config{Queue: q, Peers: &sndPeerSource{}}},
 	} {
 		if _, err := NewSender(tc.cfg); err == nil {
 			t.Errorf("NewSender with %s: no error", tc.name)
 		}
 	}
-	s, err := NewSender(Config{Queue: q, Peers: &fakePeerSource{}, Articles: newFakeArticles()})
+	s, err := NewSender(Config{Queue: q, Peers: &sndPeerSource{}, Articles: newSndArticles()})
 	if err != nil {
 		t.Fatalf("NewSender: %v", err)
 	}
@@ -66,11 +66,11 @@ func TestSenderBackoff(t *testing.T) {
 // TestSenderAckAndDefer: 239 and 438 finish an item, 431 defers it at now + the backoff of its
 // own attempt count, and the counters match.
 func TestSenderAckAndDefer(t *testing.T) {
-	f := newSenderFixture(t, nil)
+	f := newSndFixture(t, nil)
 	const group = "feed.test"
 	accept, refuse, retry := "<ack1@test.invalid>", "<ack2@test.invalid>", "<ack3@test.invalid>"
 	for _, id := range []string{accept, refuse, retry} {
-		f.arts.add(group, testArticle(id, group))
+		f.arts.add(group, sndArticle(id, group))
 	}
 	if err := f.q.Enqueue([]Item{
 		{PeerID: 1, MessageID: accept, Newsgroup: group},
@@ -79,8 +79,8 @@ func TestSenderAckAndDefer(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	f.dial.newT = func() *fakeTransport {
-		return &fakeTransport{reply: func(_ int, arts []Outgoing) ([]Result, int, error) {
+	f.dial.newT = func() *sndTransport {
+		return &sndTransport{reply: func(_ int, arts []Outgoing) ([]Result, int, error) {
 			res := make([]Result, 0, len(arts))
 			for _, a := range arts {
 				switch a.Article.MessageID {
@@ -95,13 +95,13 @@ func TestSenderAckAndDefer(t *testing.T) {
 			return res, len(arts), nil
 		}}
 	}
-	f.peers.set(testPeer(1, "ackpeer"))
+	f.peers.set(sndPeer(1, "ackpeer"))
 	if err := f.s.Start(); err != nil {
 		t.Fatal(err)
 	}
 
-	waitFor(t, "two items done", func() bool { return len(f.q.doneIDs()) == 2 })
-	waitFor(t, "one item deferred", func() bool { return len(f.q.deferred()) == 1 })
+	sndWaitFor(t, "two items done", func() bool { return len(f.q.doneIDs()) == 2 })
+	sndWaitFor(t, "one item deferred", func() bool { return len(f.q.deferred()) == 1 })
 
 	done := strings.Join(f.q.doneIDs(), " ")
 	if !strings.Contains(done, accept) || !strings.Contains(done, refuse) {
@@ -138,17 +138,17 @@ func TestSenderAckAndDefer(t *testing.T) {
 // TestSenderMissingArticle: an article that is not stored any more finishes its queue item and
 // no connection is opened for it.
 func TestSenderMissingArticle(t *testing.T) {
-	f := newSenderFixture(t, nil)
+	f := newSndFixture(t, nil)
 	const group = "feed.test"
 	gone := "<gone@test.invalid>"
 	if err := f.q.Enqueue([]Item{{PeerID: 1, MessageID: gone, Newsgroup: group}}); err != nil {
 		t.Fatal(err)
 	}
-	f.peers.set(testPeer(1, "gonepeer"))
+	f.peers.set(sndPeer(1, "gonepeer"))
 	if err := f.s.Start(); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, "the missing article to be dropped", func() bool { return len(f.q.doneIDs()) == 1 })
+	sndWaitFor(t, "the missing article to be dropped", func() bool { return len(f.q.doneIDs()) == 1 })
 	if got := f.q.doneIDs()[0]; got != gone {
 		t.Errorf("done = %q, want %q", got, gone)
 	}
@@ -162,16 +162,16 @@ func TestSenderMissingArticle(t *testing.T) {
 
 // TestSenderArticleReadErrorDefers: a newsgroup that cannot be read is temporary.
 func TestSenderArticleReadErrorDefers(t *testing.T) {
-	f := newSenderFixture(t, nil)
+	f := newSndFixture(t, nil)
 	f.arts.err = errors.New("group db is busy")
 	if err := f.q.Enqueue([]Item{{PeerID: 1, MessageID: "<busy@test.invalid>", Newsgroup: "feed.test"}}); err != nil {
 		t.Fatal(err)
 	}
-	f.peers.set(testPeer(1, "busypeer"))
+	f.peers.set(sndPeer(1, "busypeer"))
 	if err := f.s.Start(); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, "the item to be deferred", func() bool { return len(f.q.deferred()) > 0 })
+	sndWaitFor(t, "the item to be deferred", func() bool { return len(f.q.deferred()) > 0 })
 	if ids := f.q.doneIDs(); len(ids) != 0 {
 		t.Errorf("done = %v, want none", ids)
 	}
@@ -183,25 +183,25 @@ func TestSenderArticleReadErrorDefers(t *testing.T) {
 // TestSenderConnectFailureDefers: a peer we cannot reach keeps its queue, every item gets one
 // more attempt and the sender tries again.
 func TestSenderConnectFailureDefers(t *testing.T) {
-	f := newSenderFixture(t, func(c *Config) {
+	f := newSndFixture(t, func(c *Config) {
 		c.BackoffBase = time.Millisecond // the retry wait of the worker, not an assertion
 		c.BackoffMax = time.Millisecond
 	})
 	const group = "feed.test"
 	id := "<down@test.invalid>"
-	f.arts.add(group, testArticle(id, group))
+	f.arts.add(group, sndArticle(id, group))
 	if err := f.q.Enqueue([]Item{{PeerID: 1, MessageID: id, Newsgroup: group}}); err != nil {
 		t.Fatal(err)
 	}
 	f.dial.setErr(errors.New("connection refused"))
-	f.peers.set(testPeer(1, "downpeer"))
+	f.peers.set(sndPeer(1, "downpeer"))
 	if err := f.s.Start(); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, "the item to be deferred", func() bool { return len(f.q.deferred()) > 0 })
+	sndWaitFor(t, "the item to be deferred", func() bool { return len(f.q.deferred()) > 0 })
 	// The deferred item is due only after its backoff: move the sender's clock past it.
 	f.clock.Advance(time.Minute)
-	waitFor(t, "a second connect attempt", func() bool { dials, _, _ := f.dial.counts(); return dials >= 2 })
+	sndWaitFor(t, "a second connect attempt", func() bool { dials, _, _ := f.dial.counts(); return dials >= 2 })
 	d := f.q.deferred()[0]
 	if !strings.Contains(d.Err, "connection refused") {
 		t.Errorf("last error = %q, want the connect error", d.Err)
@@ -218,13 +218,13 @@ func TestSenderConnectFailureDefers(t *testing.T) {
 // TestSenderDropPeer: a peer that loses out_enabled (or disappears) stops being fed and its
 // queue and counters are dropped; a peer list that cannot be read drops nothing.
 func TestSenderDropPeer(t *testing.T) {
-	f := newSenderFixture(t, nil)
-	peer := testPeer(7, "droppeer")
+	f := newSndFixture(t, nil)
+	peer := sndPeer(7, "droppeer")
 	f.peers.set(peer)
 	if err := f.s.Start(); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, "the peer feed to start", func() bool {
+	sndWaitFor(t, "the peer feed to start", func() bool {
 		f.s.mu.Lock()
 		defer f.s.mu.Unlock()
 		return len(f.s.peers) == 1
@@ -235,7 +235,7 @@ func TestSenderDropPeer(t *testing.T) {
 	f.peers.err = errors.New("main db is busy")
 	f.peers.mu.Unlock()
 	reads := f.peers.readCount()
-	waitFor(t, "another peer list read", func() bool { return f.peers.readCount() > reads+1 })
+	sndWaitFor(t, "another peer list read", func() bool { return f.peers.readCount() > reads+1 })
 	if dropped := f.q.droppedPeers(); len(dropped) != 0 {
 		t.Fatalf("dropped %v on a peer list error, want none", dropped)
 	}
@@ -247,11 +247,11 @@ func TestSenderDropPeer(t *testing.T) {
 	off := *peer
 	off.OutEnabled = false
 	f.peers.set(&off)
-	waitFor(t, "the peer to be dropped", func() bool { return len(f.q.droppedPeers()) == 1 })
+	sndWaitFor(t, "the peer to be dropped", func() bool { return len(f.q.droppedPeers()) == 1 })
 	if got := f.q.droppedPeers()[0]; got != 7 {
 		t.Errorf("DropPeer(%d), want 7", got)
 	}
-	waitFor(t, "the peer feed to stop", func() bool {
+	sndWaitFor(t, "the peer feed to stop", func() bool {
 		f.s.mu.Lock()
 		defer f.s.mu.Unlock()
 		return len(f.s.peers) == 0
@@ -261,24 +261,24 @@ func TestSenderDropPeer(t *testing.T) {
 // TestSenderRestartsOnChange: a changed out_host restarts the feed of that peer (the old
 // connection is closed) without dropping its queue.
 func TestSenderRestartsOnChange(t *testing.T) {
-	f := newSenderFixture(t, nil)
+	f := newSndFixture(t, nil)
 	const group = "feed.test"
 	id := "<chg@test.invalid>"
-	f.arts.add(group, testArticle(id, group))
+	f.arts.add(group, sndArticle(id, group))
 	if err := f.q.Enqueue([]Item{{PeerID: 3, MessageID: id, Newsgroup: group}}); err != nil {
 		t.Fatal(err)
 	}
-	peer := testPeer(3, "chgpeer")
+	peer := sndPeer(3, "chgpeer")
 	f.peers.set(peer)
 	if err := f.s.Start(); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, "the first connection", func() bool { dials, _, _ := f.dial.counts(); return dials >= 1 })
+	sndWaitFor(t, "the first connection", func() bool { dials, _, _ := f.dial.counts(); return dials >= 1 })
 
 	moved := *peer
 	moved.OutHost = "other.invalid"
 	f.peers.set(&moved)
-	waitFor(t, "the restarted feed", func() bool {
+	sndWaitFor(t, "the restarted feed", func() bool {
 		f.s.mu.Lock()
 		defer f.s.mu.Unlock()
 		pf := f.s.peers[3]
@@ -297,24 +297,24 @@ func TestSenderRestartsOnChange(t *testing.T) {
 // TestSenderMaxConns: a peer with max_conns N never has more than N connections open.
 func TestSenderMaxConns(t *testing.T) {
 	const conns = 3
-	f := newSenderFixture(t, func(c *Config) { c.Batch = 1 })
+	f := newSndFixture(t, func(c *Config) { c.Batch = 1 })
 	const group = "feed.test"
 	var items []Item
 	for i := 0; i < 40; i++ {
 		id := fmt.Sprintf("<mc%d@test.invalid>", i)
-		f.arts.add(group, testArticle(id, group))
+		f.arts.add(group, sndArticle(id, group))
 		items = append(items, Item{PeerID: 1, MessageID: id, Newsgroup: group})
 	}
 	if err := f.q.Enqueue(items); err != nil {
 		t.Fatal(err)
 	}
-	peer := testPeer(1, "mcpeer")
+	peer := sndPeer(1, "mcpeer")
 	peer.MaxConns = conns
 	f.peers.set(peer)
 	if err := f.s.Start(); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, "all items to be sent", func() bool { return len(f.q.doneIDs()) == len(items) })
+	sndWaitFor(t, "all items to be sent", func() bool { return len(f.q.doneIDs()) == len(items) })
 	dials, _, maxLive := f.dial.counts()
 	if maxLive > conns {
 		t.Errorf("%d connections open at once, want at most %d", maxLive, conns)
@@ -332,26 +332,26 @@ func TestSenderMaxConns(t *testing.T) {
 // TestSenderStopUnblocksSend: Stop closes the open connections, so a worker waiting for a
 // peer's answer returns, the item is deferred and the counters are written.
 func TestSenderStopUnblocksSend(t *testing.T) {
-	f := newSenderFixture(t, nil)
+	f := newSndFixture(t, nil)
 	const group = "feed.test"
 	id := "<stop@test.invalid>"
-	f.arts.add(group, testArticle(id, group))
+	f.arts.add(group, sndArticle(id, group))
 	if err := f.q.Enqueue([]Item{{PeerID: 1, MessageID: id, Newsgroup: group}}); err != nil {
 		t.Fatal(err)
 	}
 	// Each connection blocks in Send until it is closed.
-	f.dial.newT = func() *fakeTransport { return &fakeTransport{block: make(chan struct{})} }
-	f.peers.set(testPeer(1, "stoppeer"))
+	f.dial.newT = func() *sndTransport { return &sndTransport{block: make(chan struct{})} }
+	f.peers.set(sndPeer(1, "stoppeer"))
 	if err := f.s.Start(); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, "the blocked send", func() bool { _, live, _ := f.dial.counts(); return live == 1 })
+	sndWaitFor(t, "the blocked send", func() bool { _, live, _ := f.dial.counts(); return live == 1 })
 
 	stopped := make(chan struct{})
 	go func() { f.s.Stop(); close(stopped) }()
 	select {
 	case <-stopped:
-	case <-time.After(testWait):
+	case <-time.After(sndWait):
 		t.Fatal("Stop did not return: a worker is still waiting for the peer")
 	}
 	if _, ok := f.q.storedStats(1); !ok {
@@ -367,25 +367,25 @@ func TestSenderStopUnblocksSend(t *testing.T) {
 
 // TestSenderPrune: the sender calls the queue's optional Prune once per peer reload.
 func TestSenderPrune(t *testing.T) {
-	f := newSenderFixture(t, nil)
+	f := newSndFixture(t, nil)
 	if err := f.s.Start(); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, "two prune calls", func() bool { return f.q.pruneCalls() >= 2 })
+	sndWaitFor(t, "two prune calls", func() bool { return f.q.pruneCalls() >= 2 })
 }
 
 // TestSenderClaimErrorKeepsRunning: a queue that cannot be claimed from is logged and retried,
 // and the error is kept as the peer's last error.
 func TestSenderClaimErrorKeepsRunning(t *testing.T) {
-	f := newSenderFixture(t, nil)
+	f := newSndFixture(t, nil)
 	f.q.mu.Lock()
 	f.q.claimErr = errors.New("queue is locked")
 	f.q.mu.Unlock()
-	f.peers.set(testPeer(1, "claimpeer"))
+	f.peers.set(sndPeer(1, "claimpeer"))
 	if err := f.s.Start(); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, "repeated claims", func() bool {
+	sndWaitFor(t, "repeated claims", func() bool {
 		f.q.mu.Lock()
 		defer f.q.mu.Unlock()
 		return f.q.claims >= 3
@@ -400,14 +400,14 @@ func TestSenderClaimErrorKeepsRunning(t *testing.T) {
 // TestSenderSkipsPeerWithoutHost: out_enabled without out_host sends nothing and keeps the
 // queue (the admin can still fix the host).
 func TestSenderSkipsPeerWithoutHost(t *testing.T) {
-	f := newSenderFixture(t, nil)
-	peer := testPeer(1, "nohost")
+	f := newSndFixture(t, nil)
+	peer := sndPeer(1, "nohost")
 	peer.OutHost = ""
 	f.peers.set(peer)
 	if err := f.s.Start(); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, "two peer list reads", func() bool { return f.peers.readCount() >= 2 })
+	sndWaitFor(t, "two peer list reads", func() bool { return f.peers.readCount() >= 2 })
 	f.s.mu.Lock()
 	running := len(f.s.peers)
 	f.s.mu.Unlock()

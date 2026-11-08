@@ -30,7 +30,7 @@ func connPeer(s *fakeserver.Server, tune func(*models.Peer)) *models.Peer {
 }
 
 func connOpts() DialOptions {
-	return DialOptions{Identity: connIdentity, Batch: 8, ConnectTimeout: testWait}
+	return DialOptions{Identity: connIdentity, Batch: 8, ConnectTimeout: sndWait}
 }
 
 // connDial connects to the fake server and closes the connection when the test ends.
@@ -48,7 +48,7 @@ func connDial(t *testing.T, s *fakeserver.Server, tune func(*models.Peer)) Trans
 func connBatch(ids ...string) []Outgoing {
 	out := make([]Outgoing, 0, len(ids))
 	for _, id := range ids {
-		out = append(out, Outgoing{Article: testArticle(id, connGroup), Newsgroup: connGroup})
+		out = append(out, Outgoing{Article: sndArticle(id, connGroup), Newsgroup: connGroup})
 	}
 	return out
 }
@@ -284,15 +284,15 @@ func TestFeedSenderEndToEnd(t *testing.T) {
 	s := fakeserver.New(t, fakeserver.Options{Handler: fakeserver.PeerHandler(&fakeserver.PeerOptions{
 		Have: map[string]bool{have: true},
 	})})
-	f := newSenderFixture(t, func(c *Config) {
+	f := newSndFixture(t, func(c *Config) {
 		c.Dial = nil // the real DialPeer
 		c.Hostname = connIdentity
-		c.ConnectTimeout = testWait
+		c.ConnectTimeout = sndWait
 	})
 	ids := []string{"<e2e1@test.invalid>", have, "<e2e3@test.invalid>"}
 	var items []Item
 	for _, id := range ids {
-		f.arts.add(connGroup, testArticle(id, connGroup))
+		f.arts.add(connGroup, sndArticle(id, connGroup))
 		items = append(items, Item{PeerID: 1, MessageID: id, Newsgroup: connGroup})
 	}
 	if err := f.q.Enqueue(items); err != nil {
@@ -302,7 +302,7 @@ func TestFeedSenderEndToEnd(t *testing.T) {
 	if err := f.s.Start(); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, "the queue to be drained", func() bool { return len(f.q.doneIDs()) == len(ids) })
+	sndWaitFor(t, "the queue to be drained", func() bool { return len(f.q.doneIDs()) == len(ids) })
 	f.s.Stop()
 
 	st, ok := f.q.storedStats(1)

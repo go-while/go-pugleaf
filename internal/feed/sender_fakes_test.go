@@ -3,6 +3,9 @@ package feed
 // Fakes shared by the sender tests: a queue (the real one is written in the feed-queue slice),
 // a peer list, an article store, a clock and a transport. Nothing here talks to a socket; the
 // protocol paths are tested against a fake NNTP peer in sender_conn_test.go.
+//
+// Everything here is named snd* so these helpers never collide with the queue tests of the
+// same package.
 
 import (
 	"fmt"
@@ -14,11 +17,11 @@ import (
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
-// testWait is the hang guard of this package's tests: a passing test never waits on it.
+// sndWait is the hang guard of this package's tests: a passing test never waits on it.
 // Override with PUGLEAF_TEST_DEADLINE (plan test-timing-hardening D3).
-var testWait = testWaitFromEnv(60 * time.Second)
+var sndWait = sndWaitFromEnv(60 * time.Second)
 
-func testWaitFromEnv(def time.Duration) time.Duration {
+func sndWaitFromEnv(def time.Duration) time.Duration {
 	if v := os.Getenv("PUGLEAF_TEST_DEADLINE"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d > 0 {
 			return d
@@ -27,10 +30,10 @@ func testWaitFromEnv(def time.Duration) time.Duration {
 	return def
 }
 
-// waitFor polls cond until it holds or the hang guard expires.
-func waitFor(t *testing.T, what string, cond func() bool) {
+// sndWaitFor polls cond until it holds or the hang guard expires.
+func sndWaitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(testWait)
+	deadline := time.Now().Add(sndWait)
 	for !cond() {
 		if time.Now().After(deadline) {
 			t.Fatalf("timeout waiting for %s", what)
@@ -39,48 +42,48 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 	}
 }
 
-// fakeClock is a clock a test moves by hand.
-type fakeClock struct {
+// sndClock is a clock a test moves by hand.
+type sndClock struct {
 	mu sync.Mutex
 	t  time.Time
 }
 
-func newFakeClock() *fakeClock {
-	return &fakeClock{t: time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)}
+func newSndClock() *sndClock {
+	return &sndClock{t: time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)}
 }
 
-func (c *fakeClock) Now() time.Time {
+func (c *sndClock) Now() time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.t
 }
 
-func (c *fakeClock) Advance(d time.Duration) {
+func (c *sndClock) Advance(d time.Duration) {
 	c.mu.Lock()
 	c.t = c.t.Add(d)
 	c.mu.Unlock()
 }
 
-// fakeDefer is one recorded Queue.Defer call.
-type fakeDefer struct {
+// sndDefer is one recorded Queue.Defer call.
+type sndDefer struct {
 	PeerID    int64
 	MessageID string
 	Err       string
 	Next      time.Time
 }
 
-type fakeRow struct {
+type sndRow struct {
 	item Item
 	next time.Time
 }
 
-// fakeQueue is an in-memory Queue.
-type fakeQueue struct {
+// sndQueue is an in-memory Queue.
+type sndQueue struct {
 	mu      sync.Mutex
-	rows    map[int64][]*fakeRow
+	rows    map[int64][]*sndRow
 	stats   map[int64]Stats
 	done    []string
-	defers  []fakeDefer
+	defers  []sndDefer
 	dropped []int64
 	claims  int
 	writes  int
@@ -90,20 +93,20 @@ type fakeQueue struct {
 	doneErr  error
 }
 
-func newFakeQueue() *fakeQueue {
-	return &fakeQueue{rows: make(map[int64][]*fakeRow), stats: make(map[int64]Stats)}
+func newSndQueue() *sndQueue {
+	return &sndQueue{rows: make(map[int64][]*sndRow), stats: make(map[int64]Stats)}
 }
 
-func (q *fakeQueue) Enqueue(items []Item) error {
+func (q *sndQueue) Enqueue(items []Item) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	for _, it := range items {
-		q.rows[it.PeerID] = append(q.rows[it.PeerID], &fakeRow{item: it})
+		q.rows[it.PeerID] = append(q.rows[it.PeerID], &sndRow{item: it})
 	}
 	return nil
 }
 
-func (q *fakeQueue) Claim(peerID int64, max int, now time.Time, lease time.Duration) ([]Item, error) {
+func (q *sndQueue) Claim(peerID int64, max int, now time.Time, lease time.Duration) ([]Item, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.claims++
@@ -124,7 +127,7 @@ func (q *fakeQueue) Claim(peerID int64, max int, now time.Time, lease time.Durat
 	return out, nil
 }
 
-func (q *fakeQueue) Done(peerID int64, messageIDs []string) error {
+func (q *sndQueue) Done(peerID int64, messageIDs []string) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if q.doneErr != nil {
@@ -145,10 +148,10 @@ func (q *fakeQueue) Done(peerID int64, messageIDs []string) error {
 	return nil
 }
 
-func (q *fakeQueue) Defer(peerID int64, messageID string, lastErr string, next time.Time) error {
+func (q *sndQueue) Defer(peerID int64, messageID string, lastErr string, next time.Time) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	q.defers = append(q.defers, fakeDefer{PeerID: peerID, MessageID: messageID, Err: lastErr, Next: next})
+	q.defers = append(q.defers, sndDefer{PeerID: peerID, MessageID: messageID, Err: lastErr, Next: next})
 	for _, r := range q.rows[peerID] {
 		if r.item.MessageID == messageID {
 			r.item.Attempts++
@@ -159,13 +162,13 @@ func (q *fakeQueue) Defer(peerID int64, messageID string, lastErr string, next t
 	return nil
 }
 
-func (q *fakeQueue) Depth(peerID int64) (int64, error) {
+func (q *sndQueue) Depth(peerID int64) (int64, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	return int64(len(q.rows[peerID])), nil
 }
 
-func (q *fakeQueue) DropPeer(peerID int64) error {
+func (q *sndQueue) DropPeer(peerID int64) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.dropped = append(q.dropped, peerID)
@@ -174,7 +177,7 @@ func (q *fakeQueue) DropPeer(peerID int64) error {
 	return nil
 }
 
-func (q *fakeQueue) WriteStats(s Stats) error {
+func (q *sndQueue) WriteStats(s Stats) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.writes++
@@ -182,7 +185,7 @@ func (q *fakeQueue) WriteStats(s Stats) error {
 	return nil
 }
 
-func (q *fakeQueue) ReadStats() (map[int64]Stats, error) {
+func (q *sndQueue) ReadStats() (map[int64]Stats, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	out := make(map[int64]Stats, len(q.stats))
@@ -192,10 +195,10 @@ func (q *fakeQueue) ReadStats() (map[int64]Stats, error) {
 	return out, nil
 }
 
-func (q *fakeQueue) Close() error { return nil }
+func (q *sndQueue) Close() error { return nil }
 
 // Prune is the optional method the sender calls through its small interface.
-func (q *fakeQueue) Prune(now time.Time) (int64, error) {
+func (q *sndQueue) Prune(now time.Time) (int64, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.prunes++
@@ -204,46 +207,46 @@ func (q *fakeQueue) Prune(now time.Time) (int64, error) {
 
 // snapshot helpers (every read takes the lock).
 
-func (q *fakeQueue) doneIDs() []string {
+func (q *sndQueue) doneIDs() []string {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	return append([]string(nil), q.done...)
 }
 
-func (q *fakeQueue) deferred() []fakeDefer {
+func (q *sndQueue) deferred() []sndDefer {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	return append([]fakeDefer(nil), q.defers...)
+	return append([]sndDefer(nil), q.defers...)
 }
 
-func (q *fakeQueue) droppedPeers() []int64 {
+func (q *sndQueue) droppedPeers() []int64 {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	return append([]int64(nil), q.dropped...)
 }
 
-func (q *fakeQueue) storedStats(peerID int64) (Stats, bool) {
+func (q *sndQueue) storedStats(peerID int64) (Stats, bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	st, ok := q.stats[peerID]
 	return st, ok
 }
 
-func (q *fakeQueue) pruneCalls() int {
+func (q *sndQueue) pruneCalls() int {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	return q.prunes
 }
 
-// fakePeerSource is a peer list a test changes while the sender runs.
-type fakePeerSource struct {
+// sndPeerSource is a peer list a test changes while the sender runs.
+type sndPeerSource struct {
 	mu    sync.Mutex
 	peers []*models.Peer
 	err   error
 	reads int
 }
 
-func (p *fakePeerSource) GetEnabledPeers() ([]*models.Peer, error) {
+func (p *sndPeerSource) GetEnabledPeers() ([]*models.Peer, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.reads++
@@ -258,31 +261,31 @@ func (p *fakePeerSource) GetEnabledPeers() ([]*models.Peer, error) {
 	return out, nil
 }
 
-func (p *fakePeerSource) set(peers ...*models.Peer) {
+func (p *sndPeerSource) set(peers ...*models.Peer) {
 	p.mu.Lock()
 	p.peers = peers
 	p.mu.Unlock()
 }
 
-func (p *fakePeerSource) readCount() int {
+func (p *sndPeerSource) readCount() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.reads
 }
 
-// fakeArticles is an in-memory article store keyed by newsgroup and message-id.
-type fakeArticles struct {
+// sndArticles is an in-memory article store keyed by newsgroup and message-id.
+type sndArticles struct {
 	mu    sync.Mutex
 	arts  map[string]map[string]*models.Article
 	err   error
 	calls int
 }
 
-func newFakeArticles() *fakeArticles {
-	return &fakeArticles{arts: make(map[string]map[string]*models.Article)}
+func newSndArticles() *sndArticles {
+	return &sndArticles{arts: make(map[string]map[string]*models.Article)}
 }
 
-func (a *fakeArticles) add(group string, art *models.Article) {
+func (a *sndArticles) add(group string, art *models.Article) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.arts[group] == nil {
@@ -291,7 +294,7 @@ func (a *fakeArticles) add(group string, art *models.Article) {
 	a.arts[group][art.MessageID] = art
 }
 
-func (a *fakeArticles) GetArticlesByIDs(newsgroup *string, wantedIDs []*string) ([]*models.Article, error) {
+func (a *sndArticles) GetArticlesByIDs(newsgroup *string, wantedIDs []*string) ([]*models.Article, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.calls++
@@ -313,27 +316,27 @@ func (a *fakeArticles) GetArticlesByIDs(newsgroup *string, wantedIDs []*string) 
 	return out, nil
 }
 
-func (a *fakeArticles) callCount() int {
+func (a *sndArticles) callCount() int {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.calls
 }
 
-// fakeTransport answers Send from a scripted function.
-type fakeTransport struct {
+// sndTransport answers Send from a scripted function.
+type sndTransport struct {
 	mu     sync.Mutex
 	sent   [][]string
 	closed int
 	block  chan struct{} // non-nil: Send waits for it or for Close
 	reply  func(call int, arts []Outgoing) ([]Result, int, error)
-	d      *fakeDialer
+	d      *sndDialer
 }
 
-func (t *fakeTransport) Mode() string { return "fake" }
+func (t *sndTransport) Mode() string { return "fake" }
 
 // Close is idempotent, like the real transports: the sender may close one connection from the
 // worker and from the watcher of a stopping feed.
-func (t *fakeTransport) Close() {
+func (t *sndTransport) Close() {
 	t.mu.Lock()
 	t.closed++
 	first := t.closed == 1
@@ -348,13 +351,13 @@ func (t *fakeTransport) Close() {
 	}
 }
 
-func (t *fakeTransport) closeCount() int {
+func (t *sndTransport) closeCount() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.closed
 }
 
-func (t *fakeTransport) Send(arts []Outgoing) ([]Result, int, error) {
+func (t *sndTransport) Send(arts []Outgoing) ([]Result, int, error) {
 	t.mu.Lock()
 	ids := make([]string, 0, len(arts))
 	for _, a := range arts {
@@ -368,15 +371,15 @@ func (t *fakeTransport) Send(arts []Outgoing) ([]Result, int, error) {
 
 	if block != nil {
 		<-block
-		return deferAllResults(arts, "closed"), 0, fmt.Errorf("feed: closed while sending")
+		return sndDeferAll(arts, "closed"), 0, fmt.Errorf("feed: closed while sending")
 	}
 	if reply != nil {
 		return reply(call, arts)
 	}
-	return acceptAllResults(arts), len(arts), nil
+	return sndAcceptAll(arts), len(arts), nil
 }
 
-func (t *fakeTransport) batches() [][]string {
+func (t *sndTransport) batches() [][]string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	out := make([][]string, 0, len(t.sent))
@@ -386,7 +389,7 @@ func (t *fakeTransport) batches() [][]string {
 	return out
 }
 
-func acceptAllResults(arts []Outgoing) []Result {
+func sndAcceptAll(arts []Outgoing) []Result {
 	out := make([]Result, 0, len(arts))
 	for _, a := range arts {
 		out = append(out, Result{MessageID: a.Article.MessageID, Code: 239, Outcome: OutcomeDone})
@@ -394,7 +397,7 @@ func acceptAllResults(arts []Outgoing) []Result {
 	return out
 }
 
-func deferAllResults(arts []Outgoing, reason string) []Result {
+func sndDeferAll(arts []Outgoing, reason string) []Result {
 	out := make([]Result, 0, len(arts))
 	for _, a := range arts {
 		out = append(out, Result{MessageID: a.Article.MessageID, Outcome: OutcomeDefer, Err: reason})
@@ -402,18 +405,18 @@ func deferAllResults(arts []Outgoing, reason string) []Result {
 	return out
 }
 
-// fakeDialer counts the connections it hands out and how many are open at once.
-type fakeDialer struct {
+// sndDialer counts the connections it hands out and how many are open at once.
+type sndDialer struct {
 	mu      sync.Mutex
 	dials   int
 	live    int
 	maxLive int
 	err     error
-	newT    func() *fakeTransport
-	last    *fakeTransport
+	newT    func() *sndTransport
+	last    *sndTransport
 }
 
-func (d *fakeDialer) dial(p *models.Peer) (Transport, error) {
+func (d *sndDialer) dial(p *models.Peer) (Transport, error) {
 	d.mu.Lock()
 	d.dials++
 	if d.err != nil {
@@ -428,11 +431,11 @@ func (d *fakeDialer) dial(p *models.Peer) (Transport, error) {
 	mk := d.newT
 	d.mu.Unlock()
 
-	var t *fakeTransport
+	var t *sndTransport
 	if mk != nil {
 		t = mk()
 	} else {
-		t = &fakeTransport{}
+		t = &sndTransport{}
 	}
 	t.d = d
 	d.mu.Lock()
@@ -441,34 +444,34 @@ func (d *fakeDialer) dial(p *models.Peer) (Transport, error) {
 	return t, nil
 }
 
-func (d *fakeDialer) closed() {
+func (d *sndDialer) closed() {
 	d.mu.Lock()
 	d.live--
 	d.mu.Unlock()
 }
 
-func (d *fakeDialer) counts() (dials, live, maxLive int) {
+func (d *sndDialer) counts() (dials, live, maxLive int) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.dials, d.live, d.maxLive
 }
 
-func (d *fakeDialer) setErr(err error) {
+func (d *sndDialer) setErr(err error) {
 	d.mu.Lock()
 	d.err = err
 	d.mu.Unlock()
 }
 
-// testPeer is a peer row with an outgoing feed to a host that is never dialed by the fakes.
-func testPeer(id int64, name string) *models.Peer {
+// sndPeer is a peer row with an outgoing feed to a host that is never dialed by the fakes.
+func sndPeer(id int64, name string) *models.Peer {
 	return &models.Peer{
 		ID: id, Name: name, PathToken: name, Enabled: true,
 		OutEnabled: true, OutHost: "peer.invalid", OutPort: 119, MaxConns: 1,
 	}
 }
 
-// testArticle is a stored article with a complete header block, so the relay path keeps it.
-func testArticle(msgID, group string) *models.Article {
+// sndArticle is a stored article with a complete header block, so the relay path keeps it.
+func sndArticle(msgID, group string) *models.Article {
 	headers := "Path: up.invalid!not-for-mail\n" +
 		"From: A <a@b.invalid>\n" +
 		"Newsgroups: " + group + "\n" +
@@ -486,24 +489,24 @@ func testArticle(msgID, group string) *models.Article {
 	}
 }
 
-// senderFixture is a sender with the fakes wired and short intervals.
-type senderFixture struct {
+// sndFixture is a sender with the fakes wired and short intervals.
+type sndFixture struct {
 	s     *Sender
-	q     *fakeQueue
-	peers *fakePeerSource
-	arts  *fakeArticles
-	clock *fakeClock
-	dial  *fakeDialer
+	q     *sndQueue
+	peers *sndPeerSource
+	arts  *sndArticles
+	clock *sndClock
+	dial  *sndDialer
 }
 
-func newSenderFixture(t *testing.T, tune func(*Config)) *senderFixture {
+func newSndFixture(t *testing.T, tune func(*Config)) *sndFixture {
 	t.Helper()
-	f := &senderFixture{
-		q:     newFakeQueue(),
-		peers: &fakePeerSource{},
-		arts:  newFakeArticles(),
-		clock: newFakeClock(),
-		dial:  &fakeDialer{},
+	f := &sndFixture{
+		q:     newSndQueue(),
+		peers: &sndPeerSource{},
+		arts:  newSndArticles(),
+		clock: newSndClock(),
+		dial:  &sndDialer{},
 	}
 	cfg := Config{
 		Queue:          f.q,
