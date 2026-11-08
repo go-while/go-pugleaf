@@ -41,11 +41,24 @@ type ResponseDemuxer struct {
 // a fresh connection from Pool.Get(MODE_STREAM_MV), never one that saw an error.
 // The caller must not hold conn's lock.
 func NewResponseDemuxer(conn *BackendConn, errChan chan struct{}) *ResponseDemuxer {
+	return NewResponseDemuxerSize(conn, errChan, DemuxerQueueDepth)
+}
+
+// NewResponseDemuxerSize is NewResponseDemuxer with the size of its three channels given, for
+// a caller whose in-flight bound is far below DemuxerQueueDepth: the transit feed
+// (internal/feed) runs one demuxer per peer connection and bounds the commands in flight by
+// one batch, where the depth of a bulk group transfer would cost megabytes per connection.
+// depth <= 0 uses DemuxerQueueDepth. Everything else (the pipeline synchronisation and the
+// precondition on the connection) is NewResponseDemuxer's.
+func NewResponseDemuxerSize(conn *BackendConn, errChan chan struct{}, depth int) *ResponseDemuxer {
+	if depth <= 0 {
+		depth = DemuxerQueueDepth
+	}
 	d := &ResponseDemuxer{
 		conn:              conn,
-		cmdIDChan:         make(chan *CmdIDinfo, DemuxerQueueDepth),    // Buffer for command IDs
-		checkResponseChan: make(chan *ResponseData, DemuxerQueueDepth), // Buffer for CHECK responses
-		ttResponseChan:    make(chan *ResponseData, DemuxerQueueDepth), // Buffer for TAKETHIS responses
+		cmdIDChan:         make(chan *CmdIDinfo, depth),    // Buffer for command IDs
+		checkResponseChan: make(chan *ResponseData, depth), // Buffer for CHECK responses
+		ttResponseChan:    make(chan *ResponseData, depth), // Buffer for TAKETHIS responses
 		//signalChan:        make(chan struct{}, 64*1024),
 		errChan: errChan,
 		started: false,
