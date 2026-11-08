@@ -180,3 +180,18 @@ Before the first run: check the DB file name and whether iafetch runs with an ab
   during a scan or hashing → 0), a failed later scan is retried without counting a round, -dry-run allowed with
   -trackdb off. `claimInput` kept as a wrapper around `claimInputRow`. One run row per process. Merged f9a5449.
   Full check list green on f9a5449.
+
+## Outcome (2026-11-07)
+- Integration branch `plan-mbox-import-tracking` (pushed), merged into testing-001 as 89422ec.
+- Worktree branches (left in place): `worktree-agent-ab233f85c18dc4ccd` (iasource),
+  `worktree-agent-ab6959be19ac4648d` (trackdb), `worktree-agent-a61c4c64fd244d54e` (wave 2), all under
+  `/tank0/claude/trees/go-pugleaf/`.
+- Verification: full check list green; pugleaf-verifier E2E (a)-(j) ALL PASS (dry run, import, rerun, missing
+  file arriving, -follow + SIGINT, -verify-md5 mismatch, log table, read-only rename rule, read-only WAL folder,
+  exit-2 combinations).
+- After the verifier: c84c1ed — `NAME.mbox.csv.gz` offset indexes (~129k on the arc1-ca mirror) are never
+  inputs (`csv`); without it each would have been an input error. arc1-ca dry-run planning on the real
+  iafetch DB: 318,287 planned, 164,253 supported, csv=129,101.
+- Leftovers: dry-run log lines still say "importing"/"imported"; the per-scan pending count covers only
+  missing files.
+- Continued by plan mbox-import-discs (disc images, spools), merged right after.

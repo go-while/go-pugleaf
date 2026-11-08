@@ -177,3 +177,18 @@ Deferred: a present-but-unreadable Date with a good Posted is still rejected by 
   6af2edf (Title gives the Subject, line kept); expect ~+39k stored on utzoo.
 - DOUG floppies: the text was hard-wrapped when written (separators and Newsgroups lines split), so the
   parser skips are damage in the data; left as is.
+
+## Outcome (2026-11-07)
+- Integration branch `plan-mbox-import-discs` (from plan-mbox-import-tracking c84c1ed, pushed), merged into
+  testing-001 as 7cbd929.
+- Worktree branches (left in place) under `/tank0/claude/trees/go-pugleaf/`: `worktree-agent-a40f5ba065af0f505`
+  (spool), `worktree-agent-a9d36174b3c3a1813` (anews), `worktree-agent-a99daf26b16568175` (disc).
+- After verification: 6af2edf (early B-news `Title:` gives the Subject; ~39k utzoo articles), 939c874
+  (`-group-from-name` is ignored by spool inputs — the README's arc1-ca recipe would have failed every disc —
+  and the file-name rule cuts `.YYYYMMDD` / `.(N)` before `.mbox`; the recipe drops `-group-from-name`).
+- Verification: full check list green; local E2E all PASS; arc1-ca read-only dry runs of 7 real images all
+  exit 0 with file-errors=0 (table above).
+- Leftovers: a present-but-unreadable Date with a good Posted is still rejected by the processor
+  (internal/nntp.ParseHeaders drops the fallback fields); the DOUG floppies lose ~200 messages to hard-wrapped
+  lines in the data; `[PC] Netnews CD April 06-20 1992.7z` (.bin/.cue copy of an ISO on the mirror) stays
+  unsupported; `NN_1992_25.zip` is not picked up by -from-iafetch and needs `-spool` by hand.
