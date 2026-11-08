@@ -18,6 +18,7 @@ import (
 	"github.com/go-while/go-pugleaf/internal/common"
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/history"
+	"github.com/go-while/go-pugleaf/internal/models"
 )
 
 // intakeGroupDecision applies the D1/D2 policy to one resolved newsgroup row:
@@ -97,6 +98,73 @@ func releaseClaim(item *history.MessageIdItem) {
 	item.Response = history.CaseError
 	item.CachedEntryExpires = time.Now().Add(history.ErrorCaseTTL)
 	item.Mux.Unlock()
+}
+
+// rememberBulkReject remembers an article-level refusal of the bulk (fetcher/importer) path in
+// the history index (plan nntp-peering, INN remembertrash), so a peer offering the message-id
+// later gets "not wanted". A site post from the web queue is never remembered: PostQueueWorker
+// marks its copies Posted, and like a POST the user may send the article again.
+// Called with article.Mux held.
+func (proc *Processor) rememberBulkReject(article *models.Article) {
+	if article == nil || article.Posted {
+		return
+	}
+	proc.RememberReject(article.MessageID)
+}
+
+// controlRefusalLogMax bounds the groups the bulk-path control refusal logs: past it no
+// further group is logged (decision 6 of plan nntp-peering, bounded memory).
+const controlRefusalLogMax = 4096
+
+// controlRefusalLogSet remembers the groups whose control refusal was already logged, so a
+// feed or an import full of control messages logs one line per group per run.
+type controlRefusalLogSet struct {
+	mu     sync.Mutex
+	groups map[string]struct{}
+	capped bool
+}
+
+// first reports whether this is the first bulk-path control refusal of group in this run.
+func (s *controlRefusalLogSet) first(group string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, seen := s.groups[group]; seen {
+		return false
+	}
+	if len(s.groups) >= controlRefusalLogMax {
+		if !s.capped {
+			s.capped = true
+			log.Printf("[INTAKE] control refusals logged for %d groups, further groups are not logged", len(s.groups))
+		}
+		return false
+	}
+	if s.groups == nil {
+		s.groups = make(map[string]struct{}, 16)
+	}
+	s.groups[group] = struct{}{}
+	return true
+}
+
+// controlRefusals is the process-wide log state of the bulk-path control refusals.
+var controlRefusals controlRefusalLogSet
+
+// bulkControlHeader returns the control command of a bulk (fetcher/importer) article, or ""
+// when it carries no Control header. It looks at the parsed headers first and at the checked
+// header block (nil when the article has none) second, so an article is refused whichever
+// of the two the bulk caller filled.
+func bulkControlHeader(article *models.Article, lines []string) string {
+	ctl := common.GetHeaderFirst(article.Headers, "control")
+	if ctl == "" && lines != nil {
+		ctl = common.HeaderValue(lines, "Control")
+	}
+	ctl = strings.TrimSpace(ctl)
+	if ctl == "" {
+		return ""
+	}
+	if f := strings.Fields(ctl); len(f) > 0 {
+		return f[0] // the control command, never the whole client-supplied line
+	}
+	return ctl
 }
 
 // validateIntakeHeaders checks the header block of a non-bulk (NNTP) article in strict mode:

@@ -138,6 +138,9 @@ func NewProcessorE(db *database.Database, nntpPool *nntp.Pool, useShortHashLen i
 	if err != nil {
 		return nil, fmt.Errorf("history init: %w", err)
 	}
+	// remembered rejects expire after the HistoryRejectDays config key (0 = keep forever):
+	// read through the config cache on every prune cycle, so an admin edit applies (plan nntp-peering)
+	hist.SetRejectDaysFunc(db.HistoryRejectDays)
 
 	proc := &Processor{
 		DB:            db,
@@ -386,7 +389,9 @@ func (proc *Processor) findArticleInGroup(messageID, groupName string) *models.A
 	return article
 }
 
-// ProcessIncomingArticle processes an incoming article and stores it in the database
+// ProcessIncomingArticle processes an incoming article and stores it in the database.
+// It is the feed path (IHAVE/TAKETHIS): a permanent refusal is remembered in the history
+// index, so a peer offering the message-id again gets "not wanted" (plan nntp-peering).
 func (proc *Processor) ProcessIncomingArticle(article *models.Article) (int, error) {
 	if article == nil {
 		return history.CaseError, fmt.Errorf("null article")
@@ -403,7 +408,22 @@ func (proc *Processor) ProcessIncomingArticle(article *models.Article) (int, err
 		article.MessageID, *article.NewsgroupsPtr[0], len(article.NewsgroupsPtr))
 
 	bulkmode := false
-	return proc.ProcessArticle(article, *article.NewsgroupsPtr[0], bulkmode)
+	// read before the call: once it returned, the batch goroutine may own the article
+	messageID := article.MessageID
+	code, err := proc.ProcessArticle(article, *article.NewsgroupsPtr[0], bulkmode)
+	// Remembered rejects (plan nntp-peering, INN remembertrash): every permanent refusal of
+	// the feed path is remembered (CaseError wrapping common.ErrIntakeRejected): bad or
+	// missing headers, a control message, an invalid or out-of-range date, more newsgroups
+	// than MaxCrossPosts, a moderated group without Approved, and no group left to store the
+	// article in (unknown, inactive, refusing it or too small a max_art_size).
+	// Never remembered: a duplicate (CaseDupes: already known), an in-flight claim or a
+	// temporary failure (CaseRetry, common.ErrIntakeTemporary: the peer may offer it again),
+	// and POST (ProcessPostedArticle: the user may fix the article and post it again with the
+	// same message-id).
+	if code == history.CaseError && errors.Is(err, common.ErrIntakeRejected) {
+		proc.RememberReject(messageID)
+	}
+	return code, err
 }
 
 // postWaitCommitted is the commit barrier of ProcessPostedArticle (a seam for tests).
