@@ -86,6 +86,14 @@ type History struct {
 	invalidOps   atomic.Int64
 	closedWarned atomic.Bool
 
+	// Remembered rejects (plan nntp-peering): the retention in days read through the function
+	// the owner wires (nil = the writer never prunes), the clock of the reject days (nil =
+	// time.Now, replaced by tests) and the state of the daily prune, which belongs to the
+	// writer goroutine alone.
+	rejectDaysFn atomic.Pointer[func() int]
+	clock        atomic.Pointer[func() time.Time]
+	prune        rejectPruneState
+
 	// Statistics
 	stats historyCounters
 }
@@ -95,6 +103,8 @@ type historyCounters struct {
 	lookups    atomic.Int64
 	adds       atomic.Int64
 	removes    atomic.Int64
+	rejects    atomic.Int64 // AddReject ops queued
+	pruned     atomic.Int64 // expired rejects deleted
 	duplicates atomic.Int64
 	errors     atomic.Int64
 	flushes    atomic.Int64
@@ -107,6 +117,8 @@ type HistoryStats struct {
 	TotalFileLookups int64 // legacy, always 0
 	TotalAdds        int64 // AddArticle ops queued
 	TotalRemoves     int64 // RemoveArticle ops queued
+	TotalRejects     int64 // AddReject ops queued
+	RejectsPruned    int64 // expired rejects deleted
 	TotalCommitted   int64 // ops written to the index
 	Flushes          int64
 	Pending          int64
