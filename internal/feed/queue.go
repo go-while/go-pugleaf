@@ -144,6 +144,30 @@ func Open(path string) (*SQLiteQueue, error) {
 	return q, nil
 }
 
+// OpenReadOnly opens an existing queue file read-only, for a process that only reads the
+// counters (the web admin page; the file belongs to the nntp-server). It never creates the file
+// or its schema: a missing file returns an error wrapping os.ErrNotExist. Write methods fail.
+func OpenReadOnly(path string) (*SQLiteQueue, error) {
+	if strings.TrimSpace(path) == "" {
+		return nil, fmt.Errorf("feed queue: no path")
+	}
+	if _, err := os.Stat(path); err != nil {
+		return nil, fmt.Errorf("feed queue %s: %w", path, err)
+	}
+	db, err := sql.Open("sqlite3", queueDSN(path)+"&mode=ro")
+	if err != nil {
+		return nil, fmt.Errorf("feed queue %s: %w", path, err)
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	if err := db.Ping(); err != nil {
+		return nil, queueCloseErr(db, fmt.Errorf("feed queue %s: %w", path, err))
+	}
+	q := &SQLiteQueue{path: path, giveUp: DefaultGiveUpAge, now: time.Now}
+	q.db.Store(db)
+	return q, nil
+}
+
 // queueCloseErr closes db on an open that failed and keeps the original error.
 func queueCloseErr(db *sql.DB, err error) error {
 	if cerr := db.Close(); cerr != nil {

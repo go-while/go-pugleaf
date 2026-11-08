@@ -1,6 +1,7 @@
 package feed
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -627,5 +628,44 @@ func TestQueueTrimErrorCutsOnARuneBoundary(t *testing.T) {
 	}
 	if len(got) < queueErrorMax-utf8.UTFMax {
 		t.Errorf("queueTrimError kept only %d bytes, want close to the %d bound", len(got), queueErrorMax)
+	}
+}
+
+// TestQueueOpenReadOnly: a missing file is not created, an existing one is readable
+// (ReadStats) and refuses writes.
+func TestQueueOpenReadOnly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cfg", DefaultQueueFile)
+	if _, err := OpenReadOnly(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("OpenReadOnly on a missing file = %v, want os.ErrNotExist", err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("OpenReadOnly created the file: %v", err)
+	}
+	rw, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rw.Enqueue([]Item{{PeerID: 7, MessageID: "<ro@example>", Newsgroup: "g"}}); err != nil {
+		t.Fatal(err)
+	}
+	ro, err := OpenReadOnly(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stats, err := ro.ReadStats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats[7].QueueDepth != 1 {
+		t.Errorf("read-only ReadStats depth = %d, want 1", stats[7].QueueDepth)
+	}
+	if err := ro.Enqueue([]Item{{PeerID: 7, MessageID: "<ro2@example>", Newsgroup: "g"}}); err == nil {
+		t.Error("Enqueue on a read-only queue: want an error")
+	}
+	if err := ro.Close(); err != nil {
+		t.Error(err)
+	}
+	if err := rw.Close(); err != nil {
+		t.Error(err)
 	}
 }
