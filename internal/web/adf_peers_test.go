@@ -323,6 +323,8 @@ func TestAdfPeersInvalidInput(t *testing.T) {
 		{"port not a number", map[string]string{"out_port": "x"}, "must be a number"},
 		{"max_conns out of range", map[string]string{"max_conns": "65"}, "max_conns"},
 		{"outgoing feed without a host", map[string]string{"out_host": ""}, "without out_host"},
+		{"unknown out flag", map[string]string{"out_flags": "Ap"}, "out_flags"},
+		{"out flag without a number", map[string]string{"out_flags": "<"}, "out_flags"},
 	}
 	for _, tc := range cases {
 		form := adfPeersForm(w0Name("adfpeer"))

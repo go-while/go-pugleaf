@@ -209,7 +209,7 @@ func (s *WebServer) adminCreatePeer(c *Context) {
 		c.Redirect(http.StatusSeeOther, adminPeersRedirect)
 		return
 	}
-	if err := database.ValidatePeer(peer); err != nil {
+	if err := validatePeerForm(peer); err != nil {
 		session.SetError("Peer not created: " + err.Error())
 		c.Redirect(http.StatusSeeOther, adminPeersRedirect)
 		return
@@ -270,7 +270,7 @@ func (s *WebServer) adminUpdatePeer(c *Context) {
 			return
 		}
 	}
-	if err := database.ValidatePeer(peer); err != nil {
+	if err := validatePeerForm(peer); err != nil {
 		session.SetError("Peer not updated: " + err.Error())
 		c.Redirect(http.StatusSeeOther, adminPeersRedirect)
 		return
@@ -489,6 +489,19 @@ func peerFormInt(c *Context, key, label string) (n int, given bool, err error) {
 // separately). An empty number field leaves the stored port or connection limit alone, so an
 // edit that submits no number does not reset it to the column default. The peer is not
 // validated here: database.ValidatePeer does that and fills the defaults of the empty fields.
+// validatePeerForm is database.ValidatePeer plus the out_flags parser of the outgoing feed:
+// internal/database cannot call internal/feed (feed imports database), and a peer whose
+// out_flags do not parse is never fed, so the admin must see the error here.
+func validatePeerForm(peer *models.Peer) error {
+	if err := database.ValidatePeer(peer); err != nil {
+		return err
+	}
+	if _, err := feed.ParseFlags(peer.OutFlags); err != nil {
+		return fmt.Errorf("peer %q: out_flags: %w", peer.Name, err)
+	}
+	return nil
+}
+
 func peerFromForm(c *Context, peer *models.Peer) error {
 	outPort, outPortGiven, err := peerFormInt(c, "out_port", "Outgoing port")
 	if err != nil {
