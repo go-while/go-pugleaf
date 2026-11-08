@@ -335,3 +335,19 @@ func TestAdfHideThreadTreeAPIGroupChecks(t *testing.T) {
 	}
 	w1APINoGroupFile(t, inactive)
 }
+
+// TestAdfTreePageMissingRoot: a thread root that does not exist (expired, deleted, or an old
+// number a crawler remembers) answers 404 on the group and the section tree page, not 500.
+func TestAdfTreePageMissingRoot(t *testing.T) {
+	f := adfHideSeed(t)
+	for _, path := range []string{"/groups/" + f.group + "/tree/999999", "/" + f.section + "/" + f.group + "/tree/999999"} {
+		rec := w0Do(t, w0Req{Path: path})
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("%s = %d, want 404: %.300s", path, rec.Code, rec.Body.String())
+		}
+	}
+	// The existing thread still renders.
+	if rec := w0Do(t, w0Req{Path: "/groups/" + f.group + "/tree/1"}); rec.Code != http.StatusOK {
+		t.Errorf("existing thread = %d, want 200", rec.Code)
+	}
+}
