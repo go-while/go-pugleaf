@@ -30,6 +30,9 @@ const (
 	DefaultBatchMax = 512
 	// DefaultFlushInterval is how long a partial batch waits for more rows.
 	DefaultFlushInterval = 250 * time.Millisecond
+	// DefaultStopWait bounds how long Stop waits for the last batch to be written, so a
+	// queue file that has become unwritable cannot hold up the shutdown of the server.
+	DefaultStopWait = 30 * time.Second
 	// peerListTTL is how long the out-feed peer list is reused before the peers table is
 	// read again, so an admin edit applies without a restart (the same window as
 	// internal/nntp's PeerRegistry).
@@ -60,8 +63,9 @@ type Snapshot struct {
 	Bytes int
 	Lines int
 	// Moderated is the moderation status of the newsgroups, filled by the Enqueuer only
-	// when some peer's out_flags need it (Nm/Nu). A group that is not in the map counts
-	// as unmoderated.
+	// when some peer's out_flags need it (Nm/Nu): true for a moderated group, false for
+	// an unmoderated one. A group that is not in the map has no known status (this
+	// server does not carry it), which Nm and Nu both drop.
 	Moderated map[string]bool
 }
 
@@ -92,6 +96,8 @@ type EnqueuerConfig struct {
 	QueueSize     int
 	BatchMax      int
 	FlushInterval time.Duration
+	// StopWait bounds the drain of Stop (DefaultStopWait when zero).
+	StopWait time.Duration
 }
 
 // outPeer is one peer of the out feed with its selection fields parsed once per peer-list
@@ -104,8 +110,10 @@ type outPeer struct {
 	flags    Flags
 }
 
-// moderationEntry is one cached newsgroup status.
+// moderationEntry is one cached newsgroup status. known is false for a group the main DB
+// has no usable row for, so such a group is not read again on every article either.
 type moderationEntry struct {
+	known     bool
 	moderated bool
 	at        time.Time
 }
@@ -119,6 +127,7 @@ type Enqueuer struct {
 	in       chan Snapshot
 	batchMax int
 	flush    time.Duration
+	stopWait time.Duration
 	wg       sync.WaitGroup
 
 	// submission state: the read lock is held for the (non-blocking) channel send, so
@@ -138,9 +147,13 @@ type Enqueuer struct {
 	peersAt      time.Time
 	peersFailed  bool
 	peersLoading bool
-	peerErrAt    time.Time
-	peerNames    string // the loaded out-feed peers, to log only real changes
-	peerSkipped  string // the peers skipped as unusable, likewise
+	// peerGen is bumped by InvalidatePeers: a read that was already in flight when it
+	// ran may have seen the table before the edit, so its result is dropped instead of
+	// restarting the TTL with stale peers.
+	peerGen     uint64
+	peerErrAt   time.Time
+	peerNames   string // the loaded out-feed peers, to log only real changes
+	peerSkipped string // the peers skipped as unusable, likewise
 
 	modMu sync.Mutex
 	mod   map[string]moderationEntry
@@ -163,12 +176,17 @@ func NewEnqueuer(q Queue, store Store, cfg EnqueuerConfig) *Enqueuer {
 	if flush <= 0 {
 		flush = DefaultFlushInterval
 	}
+	stopWait := cfg.StopWait
+	if stopWait <= 0 {
+		stopWait = DefaultStopWait
+	}
 	e := &Enqueuer{
 		q:        q,
 		store:    store,
 		in:       make(chan Snapshot, size),
 		batchMax: batch,
 		flush:    flush,
+		stopWait: stopWait,
 		mod:      make(map[string]moderationEntry),
 		now:      time.Now,
 	}
@@ -192,8 +210,11 @@ func (e *Enqueuer) Start() {
 	go e.run()
 }
 
-// Stop closes the channel, lets the goroutine drain what is in it and write the last batch,
-// and returns when it has. Submit is a no-op afterwards. Calling it twice is safe.
+// Stop closes the channel and lets the goroutine drain what is in it and write the last
+// batch. The drain is bounded by StopWait (DefaultStopWait): a queue file that has become
+// unwritable must not hold up the shutdown of the server, so Stop logs what it is waiting
+// for before it waits and logs again if it gives up. Submit is a no-op afterwards, and
+// calling Stop twice is safe.
 func (e *Enqueuer) Stop() {
 	if e == nil {
 		return
@@ -208,12 +229,25 @@ func (e *Enqueuer) Stop() {
 	close(e.in)
 	e.subMu.Unlock()
 	if started {
-		e.wg.Wait()
+		// Logged before the wait, so a shutdown that hangs here says why.
+		log.Printf("[FEED] enqueue stopping, draining %d queued article(s) (at most %s)", len(e.in), e.stopWait)
+		drained := make(chan struct{})
+		go func() {
+			e.wg.Wait()
+			close(drained)
+		}()
+		select {
+		case <-drained:
+		case <-time.After(e.stopWait):
+			// The goroutine is left running on purpose: it is inside Queue.Enqueue,
+			// which owns the transaction, and giving up the wait is the only thing
+			// that is safe to do from here.
+			log.Printf("[FEED] enqueue did not drain within %s, giving up the wait: the last queue write is still running",
+				e.stopWait)
+		}
 	}
-	if dropped := e.dropped.Load(); dropped > 0 {
-		log.Printf("[FEED] enqueue stopped: %d article(s) queued, %d dropped on a full queue",
-			e.enqueued.Load(), dropped)
-	}
+	log.Printf("[FEED] enqueue stopped: %d row(s) queued, %d article(s) dropped on a full queue",
+		e.enqueued.Load(), e.dropped.Load())
 }
 
 // Hook returns the function to install with database.SetFeedHook.
@@ -273,6 +307,7 @@ func (e *Enqueuer) InvalidatePeers() {
 	e.peerMu.Lock()
 	e.peersAt = time.Time{}
 	e.peersFailed = false
+	e.peerGen++
 	e.peerMu.Unlock()
 }
 
@@ -322,7 +357,14 @@ func (e *Enqueuer) write(batch []Item) []Item {
 //     rewrite of plan nntp-peering writes the peer's token into the Path);
 //   - its out_patterns do not want the article (INN newsfeeds(5) semantics, including the
 //     "@group" poison that refuses the whole article);
-//   - its out_flags refuse the article (size, Path hops, newsgroup count, moderation).
+//   - its out_flags refuse the article (size, Path hops, newsgroup count), or Nm/Nu leave
+//     none of the groups it subscribes to.
+//
+// The patterns and the Nm/Nu flags work on the subscription, the way INN does it: the
+// wanted groups of out_patterns (nntp.MatchNewsgroupPatterns) are narrowed by Nm/Nu
+// (innd/newsfeeds.c SITEparseone) and the peer is fed when at least one of them survives
+// (innd/art.c ARTpost). A crosspost into a moderated and an unmoderated group therefore
+// still reaches an Nm peer, for the moderated group.
 func (e *Enqueuer) Select(a Snapshot) []Item {
 	peers := e.outPeers()
 	if len(peers) == 0 || a.MessageID == "" {
@@ -334,10 +376,11 @@ func (e *Enqueuer) Select(a Snapshot) []Item {
 		if nntp.PathHasElement(a.Path, p.token) {
 			continue
 		}
-		if !nntp.MatchNewsgroupPatterns(p.patterns, a.Newsgroups).Accept() {
+		res := nntp.MatchNewsgroupPatterns(p.patterns, a.Newsgroups)
+		if res.Poisoned || len(res.Wanted) == 0 {
 			continue
 		}
-		if !p.flags.Allows(a) {
+		if !p.flags.Allows(a, res.Wanted) {
 			continue
 		}
 		items = append(items, Item{PeerID: p.id, MessageID: a.MessageID, Newsgroup: a.Newsgroup})
@@ -364,9 +407,10 @@ func (e *Enqueuer) withModeration(peers []*outPeer, a Snapshot) Snapshot {
 	return a
 }
 
-// moderation returns the moderation status of groups, from the cache or from the main DB.
-// A group whose row cannot be read is left out of the map, which Flags.Allows reads as
-// unmoderated (plan nntp-peering: an unknown status is treated as unmoderated).
+// moderation returns the moderation status of the groups this server carries, from the
+// cache or from the main DB (newsgroups.status 'm'). A group the main DB has no usable row
+// for is left out of the returned map - it has no known status - but its absence is cached
+// too, so a peer with Nm/Nu does not read it again on every article.
 func (e *Enqueuer) moderation(groups []string) map[string]bool {
 	out := make(map[string]bool, len(groups))
 	now := e.now()
@@ -374,7 +418,9 @@ func (e *Enqueuer) moderation(groups []string) map[string]bool {
 	e.modMu.Lock()
 	for _, g := range groups {
 		if entry, ok := e.mod[g]; ok && now.Sub(entry.at) < moderationTTL {
-			out[g] = entry.moderated
+			if entry.known {
+				out[g] = entry.moderated
+			}
 			continue
 		}
 		missing = append(missing, g)
@@ -384,21 +430,24 @@ func (e *Enqueuer) moderation(groups []string) map[string]bool {
 		return out
 	}
 	// Read outside the cache mutex: the main DB may be busy for a moment.
-	fresh := make(map[string]bool, len(missing))
+	fresh := make(map[string]moderationEntry, len(missing))
 	for _, g := range missing {
-		ng, err := e.store.GetIntakeGroup(g)
-		if err != nil || ng == nil {
-			continue
+		entry := moderationEntry{at: now}
+		if ng, err := e.store.GetIntakeGroup(g); err == nil && ng != nil {
+			entry.known = true
+			entry.moderated = strings.EqualFold(strings.TrimSpace(ng.Status), "m")
 		}
-		fresh[g] = strings.EqualFold(strings.TrimSpace(ng.Status), "m")
+		fresh[g] = entry
 	}
 	e.modMu.Lock()
 	if len(e.mod)+len(fresh) > moderationCacheMax {
 		e.mod = make(map[string]moderationEntry, len(fresh))
 	}
-	for g, moderated := range fresh {
-		e.mod[g] = moderationEntry{moderated: moderated, at: now}
-		out[g] = moderated
+	for g, entry := range fresh {
+		e.mod[g] = entry
+		if entry.known {
+			out[g] = entry.moderated
+		}
 	}
 	e.modMu.Unlock()
 	return out
@@ -425,6 +474,7 @@ func (e *Enqueuer) outPeers() []*outPeer {
 		return peers
 	}
 	e.peersLoading = true
+	gen := e.peerGen
 	e.peerMu.Unlock()
 
 	loaded, err := e.store.GetEnabledPeers()
@@ -432,6 +482,12 @@ func (e *Enqueuer) outPeers() []*outPeer {
 	e.peerMu.Lock()
 	defer e.peerMu.Unlock()
 	e.peersLoading = false
+	if gen != e.peerGen {
+		// InvalidatePeers ran while this read was in flight, so its result may predate
+		// the admin edit: it is dropped and the TTL is not restarted (peersAt stays
+		// zero), which makes the next article read the table again.
+		return e.peers
+	}
 	e.peersAt = e.now()
 	if err != nil {
 		e.peersFailed = true

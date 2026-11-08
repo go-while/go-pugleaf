@@ -4,8 +4,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // queue_test.go covers the SQLite outgoing queue (plan nntp-peering, slice feed-queue).
@@ -462,5 +465,167 @@ func TestQueuePathAndDSN(t *testing.T) {
 	}
 	if want := "file:/tmp/odd%3Fname/feed-queue.sq3?"; len(dsn) < len(want) || dsn[:len(want)] != want {
 		t.Errorf("queueDSN = %q, want it to start with %q", dsn, want)
+	}
+}
+
+// TestQueueCloseIsRaceFreeWithOtherMethods: Close may land while a sender is inside any
+// method (the senders and the enqueuer share the queue). Under -race this fails if the
+// database handle is read and written without synchronisation, and it panics if a method
+// uses a handle Close already cleared.
+//
+// Every call must either do its work or answer an error; none may panic. The errors are not
+// asserted on: a call that loaded the handle just before the swap gets database/sql's
+// "sql: database is closed" through the retry helpers, one that loads it after gets
+// ErrQueueClosed, and both are correct.
+func TestQueueCloseIsRaceFreeWithOtherMethods(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed-queue.sq3")
+	q, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := q.Enqueue([]Item{qItem(1, "<seed@x>", "alt.a")}); err != nil {
+		t.Fatalf("Enqueue seed: %v", err)
+	}
+
+	const workers = 8
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			for round := 0; round < 20; round++ {
+				switch (i + round) % 8 {
+				case 0:
+					_ = q.Enqueue([]Item{qItem(1, fmt.Sprintf("<race-%d-%d@x>", i, round), "alt.a")})
+				case 1:
+					_, _ = q.Claim(1, 4, qEpoch, time.Minute)
+				case 2:
+					_ = q.Done(1, []string{"<seed@x>"})
+				case 3:
+					_ = q.Defer(1, "<seed@x>", "429 later", qEpoch)
+				case 4:
+					_, _ = q.Depth(1)
+				case 5:
+					_, _ = q.ReadStats()
+				case 6:
+					_ = q.WriteStats(Stats{PeerID: 1, Offered: int64(round)})
+				case 7:
+					_, _ = q.Prune(qEpoch)
+				}
+			}
+		}(i)
+	}
+	// Two concurrent Closes as well: only one may close the handle.
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if err := q.Close(); err != nil {
+				t.Errorf("Close during use: %v", err)
+			}
+		}()
+	}
+	close(start)
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(testWait):
+		t.Fatalf("the queue workers did not finish within %v", testWait)
+	}
+	// Every method answers ErrQueueClosed once the handle is gone.
+	if _, err := q.Depth(1); err != ErrQueueClosed {
+		t.Errorf("Depth after Close = %v, want ErrQueueClosed", err)
+	}
+}
+
+// TestQueueConcurrentClaimNeverHandsOutTheSameRow: two senders of one peer (max_conns > 1)
+// claim at the same time. The lease is taken in the same transaction as the SELECT, so no
+// message-id may be handed to both.
+func TestQueueConcurrentClaimNeverHandsOutTheSameRow(t *testing.T) {
+	q, _ := qOpen(t)
+	const n = 200
+	items := make([]Item, 0, n)
+	for i := 0; i < n; i++ {
+		items = append(items, qItem(9, fmt.Sprintf("<conc-%d@x>", i), "alt.conc"))
+	}
+	if err := q.Enqueue(items); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	const workers = 4
+	claimed := make([][]Item, workers)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			<-start
+			for {
+				got, err := q.Claim(9, 7, qEpoch, time.Hour)
+				if err != nil {
+					t.Errorf("Claim: %v", err)
+					return
+				}
+				if len(got) == 0 {
+					return
+				}
+				claimed[w] = append(claimed[w], got...)
+			}
+		}(w)
+	}
+	close(start)
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(testWait):
+		t.Fatalf("the claim workers did not finish within %v", testWait)
+	}
+
+	seen := make(map[string]int)
+	total := 0
+	for w, got := range claimed {
+		for _, it := range got {
+			seen[it.MessageID]++
+			total++
+			if seen[it.MessageID] > 1 {
+				t.Fatalf("%s was claimed %d times (worker %d): the lease is not taken with the SELECT",
+					it.MessageID, seen[it.MessageID], w)
+			}
+		}
+	}
+	if total != n {
+		t.Errorf("the workers claimed %d of %d items in total", total, n)
+	}
+	if len(seen) != n {
+		t.Errorf("%d distinct items claimed, want %d", len(seen), n)
+	}
+}
+
+func TestQueueTrimErrorCutsOnARuneBoundary(t *testing.T) {
+	// A multi-byte rune straddling the limit must be dropped whole: '€' is 3 bytes, so
+	// with one filler byte the 200-byte cut lands inside the 67th one.
+	s := "x" + strings.Repeat("€", 100)
+	got := queueTrimError(s)
+	if !utf8.ValidString(got) {
+		t.Fatalf("queueTrimError produced invalid UTF-8 (%d bytes): %q", len(got), got)
+	}
+	if len(got) > queueErrorMax {
+		t.Errorf("queueTrimError kept %d bytes, more than the %d bound", len(got), queueErrorMax)
+	}
+	if len(got) < queueErrorMax-utf8.UTFMax {
+		t.Errorf("queueTrimError kept only %d bytes, want close to the %d bound", len(got), queueErrorMax)
 	}
 }

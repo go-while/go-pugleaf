@@ -191,6 +191,13 @@ func TestEnqueueSelectOutFlags(t *testing.T) {
 	if got := enqPeerIDs(e.Select(enqSnap("<a@x>", []string{"alt.test"}))); !enqSameIDs(got, []int64{2, 4, 6}) {
 		t.Errorf("the 2000-byte article went to %v, want [2 4 6]", got)
 	}
+	// Exactly 1000 bytes satisfies both <1000 and >1000 (INN's comparison).
+	exact := enqSnap("<exact@x>", []string{"alt.test"})
+	exact.Bytes = 1000
+	exact.Path = "ours.invalid!not-for-mail"
+	if got := enqPeerIDs(e.Select(exact)); !enqSameIDs(got, []int64{1, 2, 3, 4, 6}) {
+		t.Errorf("the 1000-byte article went to %v, want [1 2 3 4 6]: exactly N satisfies <N and >N", got)
+	}
 	// A small article with two hops and two groups.
 	small := enqSnap("<b@x>", []string{"alt.test", "alt.two"})
 	small.Bytes = 500
@@ -202,6 +209,28 @@ func TestEnqueueSelectOutFlags(t *testing.T) {
 	moderated := enqSnap("<c@x>", []string{"alt.moderated"})
 	if got := enqPeerIDs(e.Select(moderated)); !enqSameIDs(got, []int64{2, 4, 5}) {
 		t.Errorf("the moderated article went to %v, want [2 4 5]", got)
+	}
+	// A crosspost into a moderated and an unmoderated group reaches BOTH the Nm and the
+	// Nu peer, each for its own group: INN narrows the per-group subscription
+	// (innd/newsfeeds.c SITEparseone) and feeds the site if any group survives
+	// (innd/art.c ARTpost). G1 drops out because the article has two newsgroups.
+	mixed := enqSnap("<d@x>", []string{"alt.moderated", "alt.test"})
+	mixed.Path = "ours.invalid!not-for-mail"
+	if got := enqPeerIDs(e.Select(mixed)); !enqSameIDs(got, []int64{2, 3, 5, 6}) {
+		t.Errorf("the mixed crosspost went to %v, want [2 3 5 6]", got)
+	}
+	// With out_patterns that subscribe only to the unmoderated group, Nm has nothing
+	// left and the Nm peer gets no row.
+	narrow := &enqStore{
+		peers: []*models.Peer{
+			enqPeer(5, "mod", "mod.invalid", "alt.test", "Nm"),
+			enqPeer(6, "unmod", "unmod.invalid", "alt.test", "Nu"),
+		},
+		status: map[string]string{"alt.moderated": "m", "alt.test": "y"},
+	}
+	eNarrow, _ := enqNew(t, nil, narrow, EnqueuerConfig{})
+	if got := enqPeerIDs(eNarrow.Select(mixed)); !enqSameIDs(got, []int64{6}) {
+		t.Errorf("with only alt.test subscribed the mixed crosspost went to %v, want [6]", got)
 	}
 }
 
@@ -318,9 +347,19 @@ func TestEnqueueModerationIsCachedAndOnlyReadWhenNeeded(t *testing.T) {
 	if _, groups := store.counts(); groups != 2 {
 		t.Errorf("the newsgroups row was read %d times after moderationTTL, want 2", groups)
 	}
-	// A group the main DB does not know counts as unmoderated, so Nm refuses it.
+	// A group the main DB has no row for has no known status, so Nm cannot count it as
+	// subscribed: no row. The absence is cached too, so the next article does not read
+	// the main DB again for it.
 	if got := e2.Select(enqSnap("<d@x>", []string{"alt.unknown"})); len(got) != 0 {
-		t.Errorf("Nm accepted an unknown group (%d row(s)); an unknown status is unmoderated", len(got))
+		t.Errorf("Nm accepted a group of unknown status (%d row(s))", len(got))
+	}
+	_, afterUnknown := store.counts()
+	if got := e2.Select(enqSnap("<d2@x>", []string{"alt.unknown"})); len(got) != 0 {
+		t.Errorf("Nm accepted a group of unknown status on the second try (%d row(s))", len(got))
+	}
+	if _, groups := store.counts(); groups != afterUnknown {
+		t.Errorf("the unknown group was read again (%d -> %d): its absence must be cached too",
+			afterUnknown, groups)
 	}
 	// The cache is dropped instead of growing without bound.
 	e2.modMu.Lock()
@@ -509,3 +548,104 @@ func TestEnqueueRateLog(t *testing.T) {
 		t.Errorf("add after the window = %d, %v; want 7, true", n, ok)
 	}
 }
+
+// TestEnqueueInvalidateDuringAnInFlightLoad: InvalidatePeers while a read of the peers table
+// is in flight must not let the stale result restart the TTL - otherwise an admin edit could
+// be ignored for a whole peerListTTL. The store blocks inside GetEnabledPeers so the
+// invalidation lands in the middle of the read.
+func TestEnqueueInvalidateDuringAnInFlightLoad(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	store := &enqBlockingStore{
+		enqStore: enqStore{peers: []*models.Peer{enqPeer(1, "stale", "stale.invalid", "*", "")}},
+		entered:  entered,
+		release:  release,
+	}
+	e, _ := enqNew(t, nil, store, EnqueuerConfig{})
+
+	done := make(chan []int64, 1)
+	go func() {
+		done <- enqPeerIDs(e.Select(enqSnap("<a@x>", []string{"alt.test"})))
+	}()
+	select {
+	case <-entered:
+	case <-time.After(testWait):
+		t.Fatal("the peer read was never entered")
+	}
+	// The edit lands while the read is in flight; the peer list it returns predates it.
+	e.InvalidatePeers()
+	store.mu.Lock()
+	store.peers = []*models.Peer{enqPeer(2, "fresh", "fresh.invalid", "*", "")}
+	store.mu.Unlock()
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(testWait):
+		t.Fatal("Select did not return")
+	}
+	// The next article must read the table again and see the edit.
+	if got := enqPeerIDs(e.Select(enqSnap("<b@x>", []string{"alt.test"}))); !enqSameIDs(got, []int64{2}) {
+		t.Errorf("after an invalidation during the read the next article went to %v, want the edited list [2]: the stale result restarted the TTL", got)
+	}
+}
+
+// enqBlockingStore blocks the first GetEnabledPeers until release is closed, so a test can
+// run InvalidatePeers while that read is in flight.
+type enqBlockingStore struct {
+	enqStore
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (s *enqBlockingStore) GetEnabledPeers() ([]*models.Peer, error) {
+	s.once.Do(func() {
+		close(s.entered)
+		<-s.release
+	})
+	return s.enqStore.GetEnabledPeers()
+}
+
+// TestEnqueueStopBoundsTheDrain: a queue whose Enqueue never returns must not hold up the
+// shutdown for ever - Stop gives up after StopWait and says so.
+func TestEnqueueStopBoundsTheDrain(t *testing.T) {
+	block := make(chan struct{})
+	t.Cleanup(func() { close(block) }) // let the leaked goroutine finish after the test
+	store := &enqStore{peers: []*models.Peer{enqPeer(1, "one", "one.invalid", "*", "")}}
+	e, _ := enqNew(t, &enqStuckQueue{block: block}, store, EnqueuerConfig{
+		BatchMax: 1, FlushInterval: time.Hour, StopWait: 50 * time.Millisecond,
+	})
+	e.Start()
+	e.Submit(enqSnap("<stuck@x>", []string{"alt.test"}))
+
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+		e.Stop()
+	}()
+	select {
+	case <-returned:
+	case <-time.After(testWait):
+		t.Fatalf("Stop did not return within %v although StopWait is %v: the drain is unbounded",
+			testWait, 50*time.Millisecond)
+	}
+}
+
+// enqStuckQueue is a Queue whose Enqueue blocks until block is closed.
+type enqStuckQueue struct {
+	block chan struct{}
+}
+
+func (q *enqStuckQueue) Enqueue(items []Item) error {
+	<-q.block
+	return nil
+}
+
+func (q *enqStuckQueue) Claim(int64, int, time.Time, time.Duration) ([]Item, error) { return nil, nil }
+func (q *enqStuckQueue) Done(int64, []string) error                                 { return nil }
+func (q *enqStuckQueue) Defer(int64, string, string, time.Time) error               { return nil }
+func (q *enqStuckQueue) Depth(int64) (int64, error)                                 { return 0, nil }
+func (q *enqStuckQueue) DropPeer(int64) error                                       { return nil }
+func (q *enqStuckQueue) WriteStats(Stats) error                                     { return nil }
+func (q *enqStuckQueue) ReadStats() (map[int64]Stats, error)                        { return nil, nil }
+func (q *enqStuckQueue) Close() error                                               { return nil }

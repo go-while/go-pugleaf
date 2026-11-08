@@ -200,3 +200,75 @@ func TestFeedSnapshotWithoutAHeaderBlock(t *testing.T) {
 		t.Errorf("Newsgroups from the header block = %v, want [alt.test.a alt.test.b]", snap.Newsgroups)
 	}
 }
+
+// TestFeedHookSkipsAnArticleStoredInNoNewGroup: an article every target group already
+// stores is new to nobody - its rows are ignored duplicates - so it must not be offered to
+// the peers again. The flag the hook gates on is per article (FeedStored), not the article
+// number of the last group copy.
+func TestFeedHookSkipsAnArticleStoredInNoNewGroup(t *testing.T) {
+	logs := &fuBatchLogs{}
+	db := fuBatchIsolatedDB(t)
+	sink := fhInstall(t)
+
+	name := w0Name("fhhook.dupe")
+	task := db.Batch.GetOrCreateTasksMapKey(name)
+	msgID := fhMsgID("dupe")
+
+	// The first run stores it: the hook fires once.
+	adfBatchQueue(db.Batch, task, fhArticle(msgID, []*string{task.Newsgroup}, true))
+	fuBatchRun(t, db, task, adfBatchWait, logs)
+	if got := sink.snapshots(); len(got) != 1 {
+		t.Fatalf("the hook fired %d time(s) for the first copy, want 1", len(got))
+	}
+
+	// The second run offers the same message-id again: INSERT OR IGNORE makes it a no-op,
+	// so nothing is new and the hook must stay silent.
+	adfBatchQueue(db.Batch, task, fhArticle(msgID, []*string{task.Newsgroup}, true))
+	fuBatchRun(t, db, task, adfBatchWait, logs)
+	if got := sink.snapshots(); len(got) != 1 {
+		t.Errorf("the hook fired %d time(s) in total, want 1: an article ignored as a stored duplicate must not be queued again", len(got))
+	}
+}
+
+// TestFeedHookFiresWhenOnlyTheLastCopyIsADuplicate: the group whose batch takes the
+// snapshot may be the one that ignored the row, while an earlier group's batch really
+// inserted it. That article IS new to this server and must be fed, which a plain
+// "article_num > 0 in this group" check would have missed.
+func TestFeedHookFiresWhenOnlyTheLastCopyIsADuplicate(t *testing.T) {
+	logs := &fuBatchLogs{}
+	db := fuBatchIsolatedDB(t)
+	sink := fhInstall(t)
+
+	one := w0Name("fhhook.mixone")
+	two := w0Name("fhhook.mixtwo")
+	task1 := db.Batch.GetOrCreateTasksMapKey(one)
+	task2 := db.Batch.GetOrCreateTasksMapKey(two)
+	msgID := fhMsgID("mixed")
+
+	// Give group two the message-id already, as a bulk article so this run does not fire
+	// the hook at all.
+	adfBatchQueue(db.Batch, task2, fhArticle(msgID, []*string{task2.Newsgroup}, false))
+	fuBatchRun(t, db, task2, adfBatchWait, logs)
+	if got := sink.snapshots(); len(got) != 0 {
+		t.Fatalf("the bulk pre-fill fired the hook %d time(s), want 0", len(got))
+	}
+
+	// Now the crosspost: group one inserts it, group two ignores it as a duplicate and is
+	// the last copy, so group two's batch is the one that takes the snapshot.
+	art := fhArticle(msgID, []*string{task1.Newsgroup, task2.Newsgroup}, true)
+	adfBatchQueue(db.Batch, task1, art)
+	fuBatchRun(t, db, task1, adfBatchWait, logs)
+	adfBatchQueue(db.Batch, task2, art)
+	fuBatchRun(t, db, task2, adfBatchWait, logs)
+
+	got := sink.snapshots()
+	if len(got) != 1 {
+		t.Fatalf("the hook fired %d time(s), want 1: the article was new to group %q", len(got), one)
+	}
+	if got[0].MessageID != msgID {
+		t.Errorf("snapshot MessageID = %q, want %q", got[0].MessageID, msgID)
+	}
+	if got[0].Newsgroup != two {
+		t.Errorf("snapshot Newsgroup = %q, want %q (the group of the last copy)", got[0].Newsgroup, two)
+	}
+}

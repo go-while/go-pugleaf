@@ -1053,6 +1053,14 @@ retry1:
 			latestDate = dateSent
 		}
 		article.Mux.Lock()
+		// Outgoing feed: remember that THIS group's batch really inserted the row, not
+		// that the article was ignored as a stored duplicate. It is a per-article flag
+		// because the last group copy (the one that takes the snapshot below) may well
+		// be a duplicate while an earlier group's batch inserted it; both write it
+		// under article.Mux, so the batches of a crosspost see each other's answer.
+		if _, ok := inserted[article]; ok {
+			article.FeedStored = true
+		}
 		if len(article.NewsgroupsPtr) > 0 {
 			index := -1
 			for j, ptr := range article.NewsgroupsPtr {
@@ -1070,10 +1078,11 @@ retry1:
 				continue
 			}
 		}
-		// The last group copy of this article is done and it is stored (a dropped batch
-		// returns long before this phase): take the feed snapshot before the fields below
-		// are cleared. Once per article, so a crossposted one is offered to a peer once.
-		if onCommitted != nil && article.FeedOut && messageID != "" {
+		// The last group copy of this article is done: take the feed snapshot before the
+		// fields below are cleared. Once per article, so a crossposted one is offered to
+		// a peer once, and only when some group's batch really inserted it (FeedStored):
+		// an article every group already stored is new to nobody and must not be fed.
+		if onCommitted != nil && article.FeedOut && article.FeedStored && messageID != "" {
 			feedSnaps = append(feedSnaps, feedSnapshot(article, *task.Newsgroup))
 		}
 		// clear values and unlink pointers to free memory

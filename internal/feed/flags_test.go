@@ -8,6 +8,18 @@ import (
 // flags_test.go covers the out_flags parser and filter (plan nntp-peering, slice feed-queue):
 // the newsfeeds(5) subset <N, >N, HN, GN, Nm, Nu, and the rule that anything else is a parse
 // error a peer form can show.
+//
+// The size bounds and Nm/Nu follow INN's code, not a loose reading of the manual page: an
+// article of exactly N bytes satisfies both <N and >N (innd compares with > and <), and
+// Nm/Nu narrow the peer's subscription (innd/newsfeeds.c SITEparseone) instead of refusing
+// the article, so a crosspost into a moderated and an unmoderated group still goes to an Nm
+// peer for the moderated group (innd/art.c ARTpost).
+
+// fAllows is Flags.Allows with the subscribed groups defaulting to the article's own
+// newsgroups, which is what out_patterns "*" leaves wanted.
+func fAllows(f Flags, a Snapshot) bool {
+	return f.Allows(a, a.Newsgroups)
+}
 
 func TestParseFlagsEmpty(t *testing.T) {
 	f, err := ParseFlags("   ")
@@ -17,7 +29,7 @@ func TestParseFlagsEmpty(t *testing.T) {
 	if f != (Flags{}) {
 		t.Errorf("ParseFlags(blank) = %+v, want the zero Flags", f)
 	}
-	if !f.Allows(Snapshot{Newsgroups: []string{"alt.test"}, Bytes: 1 << 20}) {
+	if !fAllows(f, Snapshot{Newsgroups: []string{"alt.test"}, Bytes: 1 << 20}) {
 		t.Error("the zero Flags refused an article; an empty out_flags accepts every article")
 	}
 }
@@ -36,34 +48,34 @@ func TestParseFlagsSubset(t *testing.T) {
 	if f.Raw != "<64000,>100,H8,G5,Nu" {
 		t.Errorf("Raw = %q, want the field as given", f.Raw)
 	}
-	// white space separates as well, and a bare H is H1
-	f, err = ParseFlags("H  Nm")
+	// white space separates as well, and a bare H / bare G is H1 / G1 (INN defaults both
+	// counts to 1).
+	f, err = ParseFlags("H  G Nm")
 	if err != nil {
-		t.Fatalf("ParseFlags(\"H  Nm\"): %v", err)
+		t.Fatalf("ParseFlags(\"H  G Nm\"): %v", err)
 	}
-	if f.MaxPathHops != 1 || !f.ModeratedOnly {
-		t.Errorf("parsed %+v, want MaxPathHops 1 and Nm", f)
+	if f.MaxPathHops != 1 || f.MaxGroups != 1 || !f.ModeratedOnly {
+		t.Errorf("parsed %+v, want MaxPathHops 1, MaxGroups 1 and Nm", f)
 	}
 }
 
 func TestParseFlagsErrors(t *testing.T) {
 	for _, bad := range []string{
-		"X",        // unknown letter
-		"h4",       // lower case: not how newsfeeds(5) writes it
-		"T4",       // feed type: not implemented here
-		"Ap",       // A checks: not implemented here
-		"G",        // no count
-		"Gx",       // not a number
-		"G0",       // a count below 1 would refuse everything
-		"<",        // no size
-		"<0",       // zero size
-		">-5",      // negative
-		"N",        // neither m nor u
-		"Nx",       // unknown N flag
-		"Nm,Nu",    // contradiction
-		"<100,>99", // no size can satisfy both
-		"Ws",       // write item
-		"*",        // a pattern, not a flag
+		"X",       // unknown letter
+		"h4",      // lower case: not how newsfeeds(5) writes it
+		"T4",      // feed type: not implemented here
+		"Ap",      // A checks: not implemented here
+		"Gx",      // not a number
+		"G0",      // a count below 1 would refuse everything
+		"<",       // no size
+		"<0",      // zero size
+		">-5",     // negative
+		"N",       // neither m nor u
+		"Nx",      // unknown N flag
+		"Nm,Nu",   // contradiction
+		"<98,>99", // no size can satisfy both
+		"Ws",      // write item
+		"*",       // a pattern, not a flag
 	} {
 		f, err := ParseFlags(bad)
 		if err == nil {
@@ -88,15 +100,28 @@ func TestFlagsAllowsSize(t *testing.T) {
 		bytes int
 		want  bool
 	}{
-		{100, false}, // ">100" is strictly larger
+		{99, false}, // below the ">100" minimum
+		{100, true}, // exactly N satisfies both bounds (innd compares with < and >)
 		{101, true},
 		{999, true},
-		{1000, false}, // "<1000" is strictly smaller
+		{1000, true}, // exactly the "<1000" maximum
+		{1001, false},
 		{5000, false},
 	} {
-		if got := f.Allows(Snapshot{Bytes: tc.bytes, Newsgroups: []string{"alt.test"}}); got != tc.want {
+		if got := fAllows(f, Snapshot{Bytes: tc.bytes, Newsgroups: []string{"alt.test"}}); got != tc.want {
 			t.Errorf("Allows(%d bytes) = %v, want %v", tc.bytes, got, tc.want)
 		}
+	}
+	// "<100,>100" accepts exactly one size instead of being refused as a contradiction.
+	exact, err := ParseFlags("<100,>100")
+	if err != nil {
+		t.Fatalf("ParseFlags(\"<100,>100\"): %v", err)
+	}
+	if !fAllows(exact, Snapshot{Bytes: 100, Newsgroups: []string{"alt.test"}}) {
+		t.Error("<100,>100 refused an article of exactly 100 bytes")
+	}
+	if fAllows(exact, Snapshot{Bytes: 101, Newsgroups: []string{"alt.test"}}) {
+		t.Error("<100,>100 accepted an article of 101 bytes")
 	}
 }
 
@@ -106,16 +131,21 @@ func TestFlagsAllowsGroupsAndHops(t *testing.T) {
 		t.Fatal(err)
 	}
 	two := Snapshot{Newsgroups: []string{"alt.a", "alt.b"}, Path: "a!b!c"}
-	if !f.Allows(two) {
+	if !fAllows(f, two) {
 		t.Error("G2,H3 refused 2 groups and 3 hops, want accepted")
 	}
 	three := Snapshot{Newsgroups: []string{"alt.a", "alt.b", "alt.c"}, Path: "a!b!c"}
-	if f.Allows(three) {
+	if fAllows(f, three) {
 		t.Error("G2 accepted 3 newsgroups")
 	}
 	hops := Snapshot{Newsgroups: []string{"alt.a"}, Path: "a!b!c!d"}
-	if f.Allows(hops) {
+	if fAllows(f, hops) {
 		t.Error("H3 accepted a Path with 4 elements")
+	}
+	// Gcount counts the article's newsgroups, not the subset the peer subscribes to: a
+	// crosspost over the limit is refused even when only one group is wanted.
+	if f.Allows(three, []string{"alt.a"}) {
+		t.Error("G2 accepted a 3-group crosspost because only one group was subscribed")
 	}
 }
 
@@ -134,25 +164,75 @@ func TestFlagsAllowsModeration(t *testing.T) {
 	moderated := Snapshot{Newsgroups: []string{"alt.m"}, Moderated: map[string]bool{"alt.m": true}}
 	plain := Snapshot{Newsgroups: []string{"alt.u"}, Moderated: map[string]bool{"alt.u": false}}
 	unknown := Snapshot{Newsgroups: []string{"alt.unknown"}}
-	mixed := Snapshot{Newsgroups: []string{"alt.m", "alt.u"}, Moderated: map[string]bool{"alt.m": true}}
 
-	if !mod.Allows(moderated) || mod.Allows(plain) {
+	if !fAllows(mod, moderated) || fAllows(mod, plain) {
 		t.Error("Nm must accept a moderated group and refuse an unmoderated one")
 	}
-	if unmod.Allows(moderated) || !unmod.Allows(plain) {
+	if fAllows(unmod, moderated) || !fAllows(unmod, plain) {
 		t.Error("Nu must refuse a moderated group and accept an unmoderated one")
 	}
-	if mod.Allows(unknown) {
-		t.Error("Nm accepted a group of unknown status; an unknown status counts as unmoderated")
+	// A group this server has no row for has no known status, so neither flag can decide
+	// it is subscribed: both drop it.
+	if fAllows(mod, unknown) {
+		t.Error("Nm accepted a group of unknown status")
 	}
-	if !unmod.Allows(unknown) {
-		t.Error("Nu refused a group of unknown status; an unknown status counts as unmoderated")
+	if fAllows(unmod, unknown) {
+		t.Error("Nu accepted a group of unknown status; an unknown status is not 'unmoderated'")
 	}
-	if mod.Allows(mixed) || unmod.Allows(mixed) {
-		t.Error("Nm/Nu must refuse an article crossposted to a moderated and an unmoderated group")
+	// INN applies N to the per-group subscription and feeds the site if any group
+	// survives: a crosspost into a moderated and an unmoderated group reaches BOTH an Nm
+	// and an Nu peer, each for its own group.
+	mixed := Snapshot{
+		Newsgroups: []string{"alt.m", "alt.u"},
+		Moderated:  map[string]bool{"alt.m": true, "alt.u": false},
 	}
-	if mod.Allows(Snapshot{}) || unmod.Allows(Snapshot{}) {
-		t.Error("Nm/Nu accepted an article without newsgroups; there is nothing to decide on")
+	if !fAllows(mod, mixed) {
+		t.Error("Nm refused a crosspost that holds a moderated group: INN feeds the site for that group")
+	}
+	if !fAllows(unmod, mixed) {
+		t.Error("Nu refused a crosspost that holds an unmoderated group: INN feeds the site for that group")
+	}
+	// Only the groups out_patterns subscribe to are narrowed: with just the unmoderated
+	// group wanted, Nm has nothing left.
+	if mod.Allows(mixed, []string{"alt.u"}) {
+		t.Error("Nm accepted an article whose only wanted group is unmoderated")
+	}
+	if !mod.Allows(mixed, []string{"alt.m"}) {
+		t.Error("Nm refused an article whose wanted group is moderated")
+	}
+	if fAllows(mod, Snapshot{}) || fAllows(unmod, Snapshot{}) {
+		t.Error("Nm/Nu accepted an article without newsgroups; there is nothing subscribed")
+	}
+}
+
+func TestFlagsModerationWanted(t *testing.T) {
+	wanted := []string{"alt.m", "alt.u", "alt.unknown"}
+	status := map[string]bool{"alt.m": true, "alt.u": false}
+
+	plain, err := ParseFlags("<9999")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Without Nm/Nu nothing is narrowed, and the status map is not even consulted.
+	if got := plain.ModerationWanted(wanted, nil); len(got) != 3 {
+		t.Errorf("ModerationWanted without Nm/Nu = %v, want every wanted group", got)
+	}
+	mod, err := ParseFlags("Nm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := mod.ModerationWanted(wanted, status); len(got) != 1 || got[0] != "alt.m" {
+		t.Errorf("Nm ModerationWanted = %v, want [alt.m]", got)
+	}
+	unmod, err := ParseFlags("Nu")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := unmod.ModerationWanted(wanted, status); len(got) != 1 || got[0] != "alt.u" {
+		t.Errorf("Nu ModerationWanted = %v, want [alt.u]", got)
+	}
+	if got := mod.ModerationWanted(wanted, nil); len(got) != 0 {
+		t.Errorf("Nm ModerationWanted with no known status = %v, want nothing", got)
 	}
 }
 

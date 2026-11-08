@@ -276,7 +276,10 @@ func (proc *Processor) ProcessArticle(article *models.Article, legacyNewsgroup s
 	// web post queue's own copies) are never queued, so an archive import does not flood
 	// the peers. The batch writer reads the marker at its commit point (db_batch.go,
 	// database.feedSnapshot); it is set either way, never left over from the article pool.
+	// FeedStored is the batch writer's own answer to "was this row really new to some
+	// group?" and starts false for the same reason.
 	article.FeedOut = !bulkmode
+	article.FeedStored = false
 
 	article.ArticleNums = make(map[*string]int64)
 	// One slot per possible target group plus one: the capture sends below must never block.

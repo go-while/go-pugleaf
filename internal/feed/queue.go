@@ -18,7 +18,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-while/go-pugleaf/internal/database"
 	_ "github.com/mattn/go-sqlite3" // the queue uses the driver go-pugleaf already uses
@@ -72,12 +74,25 @@ var queueSchema = []string{
 // second process, the web admin page reading the stats, is covered by WAL plus the busy
 // timeout of the DSN).
 type SQLiteQueue struct {
-	db     *sql.DB
+	// db is behind an atomic pointer because Close may run while a sender is in one of
+	// the methods: every method loads it once and answers ErrQueueClosed on nil, and
+	// Close swaps it out. Without that the plain field was read twice per method and
+	// written by Close with no synchronisation, which is both a data race and a nil
+	// *sql.DB panic in flight.
+	db     atomic.Pointer[sql.DB]
 	path   string
 	giveUp time.Duration
 
 	// now is time.Now in production; the tests replace it to pin enqueued_at.
 	now func() time.Time
+}
+
+// handle returns the open database, or nil when the queue was never opened or is closed.
+func (q *SQLiteQueue) handle() *sql.DB {
+	if q == nil {
+		return nil
+	}
+	return q.db.Load()
 }
 
 // SQLiteQueue is the implementation the contract in api.go describes.
@@ -124,7 +139,9 @@ func Open(path string) (*SQLiteQueue, error) {
 		}
 	}
 	log.Printf("[FEED] queue db=%q", path)
-	return &SQLiteQueue{db: db, path: path, giveUp: DefaultGiveUpAge, now: time.Now}, nil
+	q := &SQLiteQueue{path: path, giveUp: DefaultGiveUpAge, now: time.Now}
+	q.db.Store(db)
+	return q, nil
 }
 
 // queueCloseErr closes db on an open that failed and keeps the original error.
@@ -145,11 +162,17 @@ func (q *SQLiteQueue) Path() string {
 
 // Close closes the queue file. It is safe to call twice.
 func (q *SQLiteQueue) Close() error {
-	if q == nil || q.db == nil {
+	if q == nil {
 		return nil
 	}
-	db := q.db
-	q.db = nil
+	// Swap, so two concurrent Closes cannot both close the same handle. A method that
+	// loaded the handle just before this keeps using it: database/sql makes its calls
+	// fail with "sql: database is closed" instead of panicking, and the queue's own
+	// retry helpers pass that error straight out.
+	db := q.db.Swap(nil)
+	if db == nil {
+		return nil
+	}
 	return db.Close()
 }
 
@@ -157,14 +180,15 @@ func (q *SQLiteQueue) Close() error {
 // is (INSERT OR IGNORE), so a re-offered article does not reset its attempts or its backoff.
 // Items without a peer or a message-id are skipped.
 func (q *SQLiteQueue) Enqueue(items []Item) error {
-	if q == nil || q.db == nil {
+	db := q.handle()
+	if db == nil {
 		return ErrQueueClosed
 	}
 	if len(items) == 0 {
 		return nil
 	}
 	now := q.now().Unix()
-	return database.RetryableTransactionExec(q.db, func(tx *sql.Tx) error {
+	return database.RetryableTransactionExec(db, func(tx *sql.Tx) error {
 		stmt, err := tx.Prepare(`INSERT OR IGNORE INTO feed_queue
 			(peer_id, message_id, newsgroup, enqueued_at, attempts, next_attempt, last_error)
 			VALUES (?, ?, ?, ?, 0, ?, '')`)
@@ -189,14 +213,15 @@ func (q *SQLiteQueue) Enqueue(items []Item) error {
 // transaction: their next attempt moves to now+lease, so a sender that dies with items in
 // flight does not keep them from being sent again (they come back when the lease runs out).
 func (q *SQLiteQueue) Claim(peerID int64, max int, now time.Time, lease time.Duration) ([]Item, error) {
-	if q == nil || q.db == nil {
+	db := q.handle()
+	if db == nil {
 		return nil, ErrQueueClosed
 	}
 	if max <= 0 {
 		return nil, nil
 	}
 	var items []Item
-	err := database.RetryableTransactionExec(q.db, func(tx *sql.Tx) error {
+	err := database.RetryableTransactionExec(db, func(tx *sql.Tx) error {
 		// A retried transaction starts over: never return rows of an aborted attempt.
 		items = nil
 		due, err := queueSelectDue(tx, peerID, now.Unix(), max)
@@ -251,14 +276,15 @@ func queueSelectDue(tx *sql.Tx, peerID, now int64, max int) ([]Item, error) {
 
 // Done deletes the items the peer has settled (sent, or refused/rejected: both are final).
 func (q *SQLiteQueue) Done(peerID int64, messageIDs []string) error {
-	if q == nil || q.db == nil {
+	db := q.handle()
+	if db == nil {
 		return ErrQueueClosed
 	}
 	ids := queueNonEmpty(messageIDs)
 	if len(ids) == 0 {
 		return nil
 	}
-	err := database.RetryableTransactionExec(q.db, func(tx *sql.Tx) error {
+	err := database.RetryableTransactionExec(db, func(tx *sql.Tx) error {
 		for _, chunk := range queueStringChunks(ids) {
 			args := make([]interface{}, 0, len(chunk)+1)
 			args = append(args, peerID)
@@ -282,13 +308,14 @@ func (q *SQLiteQueue) Done(peerID int64, messageIDs []string) error {
 // Defer records a failed attempt: attempts+1, last_error and the next attempt at next. An
 // item that is no longer queued (another sender settled it) is silently not updated.
 func (q *SQLiteQueue) Defer(peerID int64, messageID string, lastErr string, next time.Time) error {
-	if q == nil || q.db == nil {
+	db := q.handle()
+	if db == nil {
 		return ErrQueueClosed
 	}
 	if messageID == "" {
 		return nil
 	}
-	if _, err := database.RetryableExec(q.db,
+	if _, err := database.RetryableExec(db,
 		`UPDATE feed_queue SET attempts = attempts + 1, last_error = ?, next_attempt = ?
 			WHERE peer_id = ? AND message_id = ?`,
 		queueTrimError(lastErr), next.Unix(), peerID, messageID); err != nil {
@@ -299,11 +326,12 @@ func (q *SQLiteQueue) Defer(peerID int64, messageID string, lastErr string, next
 
 // Depth returns how many items are queued for peerID, whether they are due or not.
 func (q *SQLiteQueue) Depth(peerID int64) (int64, error) {
-	if q == nil || q.db == nil {
+	db := q.handle()
+	if db == nil {
 		return 0, ErrQueueClosed
 	}
 	var n int64
-	if err := database.RetryableQueryRowScan(q.db,
+	if err := database.RetryableQueryRowScan(db,
 		"SELECT COUNT(*) FROM feed_queue WHERE peer_id = ?", []interface{}{peerID}, &n); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return 0, nil
@@ -316,10 +344,11 @@ func (q *SQLiteQueue) Depth(peerID int64) (int64, error) {
 // DropPeer deletes every item and the stats of a peer: its row was deleted, or its out feed
 // was turned off and the queued articles are not wanted any more.
 func (q *SQLiteQueue) DropPeer(peerID int64) error {
-	if q == nil || q.db == nil {
+	db := q.handle()
+	if db == nil {
 		return ErrQueueClosed
 	}
-	err := database.RetryableTransactionExec(q.db, func(tx *sql.Tx) error {
+	err := database.RetryableTransactionExec(db, func(tx *sql.Tx) error {
 		if _, err := tx.Exec("DELETE FROM feed_queue WHERE peer_id = ?", peerID); err != nil {
 			return err
 		}
@@ -335,7 +364,8 @@ func (q *SQLiteQueue) DropPeer(peerID int64) error {
 // WriteStats stores a peer's counters, replacing the stored ones. QueueDepth is not stored:
 // ReadStats fills it from the queue itself.
 func (q *SQLiteQueue) WriteStats(s Stats) error {
-	if q == nil || q.db == nil {
+	db := q.handle()
+	if db == nil {
 		return ErrQueueClosed
 	}
 	if s.PeerID <= 0 {
@@ -345,7 +375,7 @@ func (q *SQLiteQueue) WriteStats(s Stats) error {
 	if updated.IsZero() {
 		updated = q.now()
 	}
-	if _, err := database.RetryableExec(q.db,
+	if _, err := database.RetryableExec(db,
 		`INSERT INTO feed_stats (peer_id, offered, accepted, refused, rejected, deferred, last_error, updated_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(peer_id) DO UPDATE SET offered = excluded.offered, accepted = excluded.accepted,
@@ -362,22 +392,23 @@ func (q *SQLiteQueue) WriteStats(s Stats) error {
 // has queued items but no stored counters yet is returned as well (zero counters and its
 // depth), so the admin page shows a backlog before the sender has written anything.
 func (q *SQLiteQueue) ReadStats() (map[int64]Stats, error) {
-	if q == nil || q.db == nil {
+	db := q.handle()
+	if db == nil {
 		return nil, ErrQueueClosed
 	}
 	out := make(map[int64]Stats)
-	if err := q.readStatRows(out); err != nil {
+	if err := readStatRows(db, out); err != nil {
 		return nil, err
 	}
-	if err := q.readDepths(out); err != nil {
+	if err := readDepths(db, out); err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-// readStatRows fills out from feed_stats.
-func (q *SQLiteQueue) readStatRows(out map[int64]Stats) error {
-	rows, err := database.RetryableQuery(q.db,
+// readStatRows fills out from feed_stats of db.
+func readStatRows(db *sql.DB, out map[int64]Stats) error {
+	rows, err := database.RetryableQuery(db,
 		`SELECT peer_id, offered, accepted, refused, rejected, deferred, last_error, updated_at
 			FROM feed_stats`)
 	if err != nil {
@@ -402,10 +433,10 @@ func (q *SQLiteQueue) readStatRows(out map[int64]Stats) error {
 	return nil
 }
 
-// readDepths fills QueueDepth of every peer that has queued items, adding a zero-counter
-// entry for a peer that has no stats row yet.
-func (q *SQLiteQueue) readDepths(out map[int64]Stats) error {
-	rows, err := database.RetryableQuery(q.db,
+// readDepths fills QueueDepth of every peer of db that has queued items, adding a
+// zero-counter entry for a peer that has no stats row yet.
+func readDepths(db *sql.DB, out map[int64]Stats) error {
+	rows, err := database.RetryableQuery(db,
 		"SELECT peer_id, COUNT(*) FROM feed_queue GROUP BY peer_id")
 	if err != nil {
 		return fmt.Errorf("feed queue read depths: %w", err)
@@ -434,7 +465,8 @@ func (q *SQLiteQueue) readDepths(out map[int64]Stats) error {
 // line per peer that lost items and returns how many rows it deleted. The sender calls it;
 // it is not part of the Queue contract because only the queue knows the age.
 func (q *SQLiteQueue) Prune(now time.Time) (int64, error) {
-	if q == nil || q.db == nil {
+	db := q.handle()
+	if db == nil {
 		return 0, ErrQueueClosed
 	}
 	if q.giveUp <= 0 {
@@ -443,7 +475,7 @@ func (q *SQLiteQueue) Prune(now time.Time) (int64, error) {
 	cutoff := now.Add(-q.giveUp).Unix()
 	var perPeer map[int64]int64
 	var total int64
-	err := database.RetryableTransactionExec(q.db, func(tx *sql.Tx) error {
+	err := database.RetryableTransactionExec(db, func(tx *sql.Tx) error {
 		perPeer, total = nil, 0
 		counts, sum, err := queueCountOld(tx, cutoff)
 		if err != nil {
@@ -542,11 +574,17 @@ func queueNonEmpty(ids []string) []string {
 // cannot grow the queue file.
 const queueErrorMax = 200
 
-// queueTrimError bounds and single-lines an error text before it is stored.
+// queueTrimError bounds and single-lines an error text before it is stored. The cut is
+// moved back to a rune boundary, so a multi-byte character at the limit is dropped whole
+// instead of leaving an invalid UTF-8 tail in the queue file.
 func queueTrimError(s string) string {
 	s = strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(s, "\n", " "), "\r", " "))
-	if len(s) > queueErrorMax {
-		return s[:queueErrorMax]
+	if len(s) <= queueErrorMax {
+		return s
 	}
-	return s
+	cut := queueErrorMax
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }
