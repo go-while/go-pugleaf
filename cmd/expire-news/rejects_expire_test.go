@@ -48,11 +48,13 @@ type rejPrunerFake struct {
 	n    int64
 	err  error
 	ret  int64
+	stop <-chan struct{}
 }
 
 func (f *rejPrunerFake) PruneRejects(days int, stop <-chan struct{}) (int64, error) {
 	f.days = days
 	f.n++
+	f.stop = stop
 	return f.ret, f.err
 }
 
@@ -61,7 +63,7 @@ func TestRejectsPruneWiring(t *testing.T) {
 
 	// 0 = keep rejects as long as history: the index is not touched
 	f := &rejPrunerFake{}
-	if ok := pruneExpiredRejects(f, 0); !ok {
+	if ok := pruneExpiredRejects(f, 0, nil); !ok {
 		t.Errorf("pruneExpiredRejects(0) = false, want true")
 	}
 	if f.n != 0 {
@@ -71,8 +73,9 @@ func TestRejectsPruneWiring(t *testing.T) {
 		t.Errorf("no log line about the kept rejects:\n%s", logs.String())
 	}
 
+	stop := make(chan struct{})
 	f = &rejPrunerFake{ret: 3}
-	if ok := pruneExpiredRejects(f, 30); !ok {
+	if ok := pruneExpiredRejects(f, 30, stop); !ok {
 		t.Errorf("pruneExpiredRejects(30) = false, want true")
 	}
 	if f.days != 30 || f.n != 1 {
@@ -81,9 +84,12 @@ func TestRejectsPruneWiring(t *testing.T) {
 	if !strings.Contains(logs.String(), "pruned 3 remembered rejects older than 30 days") {
 		t.Errorf("no log line about the pruned rejects:\n%s", logs.String())
 	}
+	if f.stop == nil {
+		t.Errorf("PruneRejects was called without the stop channel")
+	}
 
 	f = &rejPrunerFake{err: errors.New("boom")}
-	if ok := pruneExpiredRejects(f, 30); ok {
+	if ok := pruneExpiredRejects(f, 30, stop); ok {
 		t.Errorf("pruneExpiredRejects with a failing prune = true, want false")
 	}
 	if !strings.Contains(logs.String(), "Error pruning remembered rejects") {
@@ -117,7 +123,7 @@ func TestRejectsPruneRemovesExpired(t *testing.T) {
 
 	// -trim-history prunes with the HistoryRejectDays setting; PruneRejects(days) is the same
 	// walk with the cutoff computed from it
-	if ok := pruneExpiredRejects(h, 30); !ok {
+	if ok := pruneExpiredRejects(h, 30, nil); !ok {
 		t.Fatalf("pruneExpiredRejects failed")
 	}
 	if ok, err := h.Exists(expired); err != nil || !ok {

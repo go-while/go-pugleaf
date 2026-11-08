@@ -12,6 +12,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -375,11 +376,16 @@ func TestXrefParseTrimToken(t *testing.T) {
 		{in: "0:5", wantFail: true},
 		{in: "x:5", wantFail: true},
 		{in: ":5", wantFail: true},
+		// a remembered reject is skipped, never a group (plan nntp-peering)
+		{in: "r20399", wantFail: true},
 	}
 	for _, c := range cases {
 		id, num, err := parseTrimToken(c.in)
 		if (err != nil) != c.wantFail || id != c.id || num != c.num {
 			t.Errorf("parseTrimToken(%q) = %d, %d, %v; want %d, %d, fail=%t", c.in, id, num, err, c.id, c.num, c.wantFail)
+		}
+		if history.IsRejectToken(c.in) && !errors.Is(err, errTrimRejectToken) {
+			t.Errorf("parseTrimToken(%q) err = %v, want errTrimRejectToken", c.in, err)
 		}
 	}
 }

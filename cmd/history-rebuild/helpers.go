@@ -84,12 +84,21 @@ func skipGroupForResume(groupName, lastDone string) bool {
 	return lastDone != "" && groupName <= lastDone
 }
 
-// countGroupsInCSV returns the number of group IDs in a history newsgroups value ("" = 0)
+// countGroupsInCSV returns the number of group IDs in a history newsgroups value ("" = 0).
+// A remembered reject ("r<unixday>", plan nntp-peering) is no group and is not counted.
 func countGroupsInCSV(newsgroups string) int {
 	if newsgroups == "" {
 		return 0
 	}
-	return strings.Count(newsgroups, ",") + 1
+	n := 0
+	for _, part := range strings.Split(newsgroups, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" || history.IsRejectToken(part) {
+			continue
+		}
+		n++
+	}
+	return n
 }
 
 // openHistoryFileReadOnly opens one history database file read-only

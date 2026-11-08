@@ -61,23 +61,24 @@ func rejTestFeedArticle(t *testing.T, group, msgid, control string) *models.Arti
 	return art
 }
 
-// rejTestWaitRemembered waits until messageID is a reject-only row of the history index
+// rejTestWaitRemembered waits until messageID is a remembered reject: the history index knows
+// it (Exists, so the feed path refuses it) but reports no location for it.
 func rejTestWaitRemembered(t *testing.T, h *history.History, messageID string) {
 	t.Helper()
 	deadline := time.Now().Add(testWait)
 	for {
-		exists, rejectOnly, err := h.LookupReject(messageID)
+		exists, err := h.Exists(messageID)
 		if err != nil {
-			t.Fatalf("LookupReject(%s): %v", messageID, err)
+			t.Fatalf("Exists(%s): %v", messageID, err)
 		}
-		if exists && rejectOnly {
+		if exists {
 			if ids, err := h.LookupGroups(messageID); err != nil || len(ids) != 0 {
-				t.Fatalf("LookupGroups(%s) = %v, %v; want empty", messageID, ids, err)
+				t.Fatalf("LookupGroups(%s) = %v, %v; want empty (a reject has no location)", messageID, ids, err)
 			}
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("%s was not remembered as rejected (exists=%v rejectOnly=%v)", messageID, exists, rejectOnly)
+			t.Fatalf("%s was not remembered as rejected", messageID)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

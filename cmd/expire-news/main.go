@@ -145,9 +145,16 @@ func main() {
 		log.Printf("TRIM HISTORY: remembered rejects older than %d days will be pruned (0 = kept)", db.HistoryRejectDays())
 	}
 
-	// Set up signal handling for graceful shutdown
+	// Set up signal handling for graceful shutdown. stopChan is closed on the first signal, so
+	// the group loop and the reject prune (which does not read the signal channel) both see it.
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	stopChan := make(chan struct{})
+	go func() {
+		<-sigChan
+		log.Printf("Received shutdown signal, stopping...")
+		close(stopChan)
+	}()
 
 	// Get newsgroups to process
 	newsgroups, err := getNewsgroupsToExpire(db, *targetGroup)
@@ -186,8 +193,7 @@ func main() {
 groupLoop:
 	for i, ng := range newsgroups {
 		select {
-		case <-sigChan:
-			log.Printf("Received shutdown signal, stopping...")
+		case <-stopChan:
 			interrupted = true
 			break groupLoop
 		default:
@@ -291,8 +297,13 @@ groupLoop:
 	// Remembered rejects are not bound to a newsgroup: the expired ones are pruned once per
 	// run, after the groups (plan nntp-peering). An interrupted run leaves them for the next one.
 	if hist != nil && !interrupted {
-		if !pruneExpiredRejects(hist, db.HistoryRejectDays()) {
+		if !pruneExpiredRejects(hist, db.HistoryRejectDays(), stopChan) {
 			errorCount++
+		}
+		select {
+		case <-stopChan: // a signal during the prune ended the walk early
+			interrupted = true
+		default:
 		}
 	}
 
@@ -355,14 +366,15 @@ type rejectPruner interface {
 }
 
 // pruneExpiredRejects removes the remembered rejects (plan nntp-peering) that are older than
-// days days from the history index; days <= 0 keeps them as long as history. It logs the
-// result and reports whether the prune succeeded.
-func pruneExpiredRejects(p rejectPruner, days int) (ok bool) {
+// days days from the history index; days <= 0 keeps them as long as history. stop (closed by
+// the signal handler) ends the walk between batches. It logs the result and reports whether the
+// prune succeeded.
+func pruneExpiredRejects(p rejectPruner, days int, stop <-chan struct{}) (ok bool) {
 	if days <= 0 {
 		log.Printf("TRIM HISTORY: HistoryRejectDays is 0, remembered rejects are kept")
 		return true
 	}
-	n, err := p.PruneRejects(days, nil)
+	n, err := p.PruneRejects(days, stop)
 	if err != nil {
 		log.Printf("Error pruning remembered rejects older than %d days (removed %d): %v", days, n, err)
 		return false
