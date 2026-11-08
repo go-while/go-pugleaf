@@ -299,7 +299,9 @@ func (h *History) pruneRejectTable(dbIndex int, tableName string, day int64) (de
 		return 0, false, err
 	}
 	h.stats.pruned.Add(n)
-	return n, len(ids) == pruneRejectBatch, nil
+	// a full batch may be followed by more rows; a batch that deleted nothing never is, so a
+	// row another op refreshed between the select and the delete can not spin the walk
+	return n, n > 0 && len(ids) == pruneRejectBatch, nil
 }
 
 // pruneRetry runs fn, retrying a busy/locked database pruneRetries times with a short pause.
