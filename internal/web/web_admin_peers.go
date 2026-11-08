@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
+	"github.com/mattn/go-sqlite3"
 )
 
 // Admin peers page (/admin/peers, plan nntp-peering). A peer is a news server that may feed us
@@ -46,7 +47,6 @@ type PeerView struct {
 type AdminPeersPageData struct {
 	TemplateData
 	Peers              []*PeerView
-	CurrentUser        *models.User
 	DefaultInPatterns  string
 	DefaultOutPatterns string
 	DefaultOutPort     int
@@ -75,13 +75,6 @@ func (s *WebServer) adminPeersPage(c *Context) {
 	}
 	session := s.getWebSession(c)
 
-	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-	if err != nil {
-		session.SetError("Failed to load user")
-		c.Redirect(http.StatusSeeOther, "/profile")
-		return
-	}
-
 	peers, err := s.DB.GetPeers()
 	if err != nil {
 		log.Printf("[WEB]: Failed to load peers: %v", err)
@@ -96,7 +89,6 @@ func (s *WebServer) adminPeersPage(c *Context) {
 	data := AdminPeersPageData{
 		TemplateData:       s.getBaseTemplateData(c, "Admin: NNTP Peers"),
 		Peers:              views,
-		CurrentUser:        currentUser,
 		DefaultInPatterns:  "*",
 		DefaultOutPatterns: "*,!control*,!junk",
 		DefaultOutPort:     119,
@@ -235,7 +227,9 @@ func (s *WebServer) adminUpdatePeer(c *Context) {
 	c.Redirect(http.StatusSeeOther, adminPeersRedirect)
 }
 
-// adminDeletePeer handles POST /admin/peers/delete.
+// adminDeletePeer handles POST /admin/peers/delete. Only a disabled peer is deleted: a peer
+// that is still feeding or being fed is not removed by one click (the page disables the button
+// for an enabled peer, and this is the same rule for every other client).
 func (s *WebServer) adminDeletePeer(c *Context) {
 	if !s.requireAdminAuth(c) {
 		return
@@ -244,6 +238,11 @@ func (s *WebServer) adminDeletePeer(c *Context) {
 
 	peer, ok := s.peerFromFormID(c, session)
 	if !ok {
+		return
+	}
+	if peer.Enabled {
+		session.SetError("Peer " + peer.Name + " is enabled: disable it first")
+		c.Redirect(http.StatusSeeOther, adminPeersRedirect)
 		return
 	}
 	if err := s.DB.DeletePeer(peer.ID); err != nil {
@@ -273,7 +272,7 @@ func (s *WebServer) adminTogglePeer(c *Context) {
 	peer.Enabled = !peer.Enabled
 	if err := s.DB.UpdatePeer(peer); err != nil {
 		log.Printf("[WEB]: Failed to toggle peer %d: %v", peer.ID, err)
-		session.SetError("Failed to change the peer: " + err.Error())
+		session.SetError("Failed to change the peer")
 		c.Redirect(http.StatusSeeOther, adminPeersRedirect)
 		return
 	}
@@ -360,10 +359,13 @@ func peerInPasswordLen(password string) error {
 	return fmt.Errorf("the peer login password must be between %d and %d bytes", nntpAdminPasswordMin, nntpAdminPasswordMax)
 }
 
-// peerUniqueConflict reports whether err is a UNIQUE violation of the peers table (name or the
-// in_username index), so the admin gets a message instead of a 500.
+// peerUniqueConflict reports whether err is a UNIQUE violation, that is the name column or the
+// in_username index of the peers table, so the admin gets a message instead of a 500. The
+// extended result code is what decides (as in database.IsWebUserMappingConflict), never the
+// error text.
 func peerUniqueConflict(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed")
+	var se sqlite3.Error
+	return errors.As(err, &se) && se.ExtendedCode == sqlite3.ErrConstraintUnique
 }
 
 // peerFormBool reads a checkbox: on when any submitted value is "on", off when the field is
@@ -379,29 +381,31 @@ func peerFormBool(c *Context, key string) bool {
 	return false
 }
 
-// peerFormInt reads an optional number: an empty field returns 0, which lets ValidatePeer fill
-// the column default. The returned error is shown to the admin.
-func peerFormInt(c *Context, key, label string) (int, error) {
+// peerFormInt reads an optional number. An empty field is reported as not given, so the caller
+// keeps the value the peer already has (and a create, whose peer is zero, lets ValidatePeer
+// fill the column default). The returned error is shown to the admin.
+func peerFormInt(c *Context, key, label string) (n int, given bool, err error) {
 	raw := strings.TrimSpace(c.PostForm(key))
 	if raw == "" {
-		return 0, nil
+		return 0, false, nil
 	}
-	n, err := strconv.Atoi(raw)
+	n, err = strconv.Atoi(raw)
 	if err != nil || n < 0 {
-		return 0, errors.New(label + " must be a number")
+		return 0, false, errors.New(label + " must be a number")
 	}
-	return n, nil
+	return n, true, nil
 }
 
 // peerFromForm fills every editable field of peer from the form (the passwords are handled
-// separately). The peer is not validated here: database.ValidatePeer does that and fills the
-// defaults of the empty fields.
+// separately). An empty number field leaves the stored port or connection limit alone, so an
+// edit that submits no number does not reset it to the column default. The peer is not
+// validated here: database.ValidatePeer does that and fills the defaults of the empty fields.
 func peerFromForm(c *Context, peer *models.Peer) error {
-	outPort, err := peerFormInt(c, "out_port", "Outgoing port")
+	outPort, outPortGiven, err := peerFormInt(c, "out_port", "Outgoing port")
 	if err != nil {
 		return err
 	}
-	maxConns, err := peerFormInt(c, "max_conns", "Max connections")
+	maxConns, maxConnsGiven, err := peerFormInt(c, "max_conns", "Max connections")
 	if err != nil {
 		return err
 	}
@@ -412,12 +416,16 @@ func peerFromForm(c *Context, peer *models.Peer) error {
 	peer.InPatterns = strings.TrimSpace(c.PostForm("in_patterns"))
 	peer.OutEnabled = peerFormBool(c, "out_enabled")
 	peer.OutHost = strings.TrimSpace(c.PostForm("out_host"))
-	peer.OutPort = outPort
+	if outPortGiven {
+		peer.OutPort = outPort
+	}
 	peer.OutTLS = peerFormBool(c, "out_tls")
 	peer.OutUsername = strings.TrimSpace(c.PostForm("out_username"))
 	peer.OutPatterns = strings.TrimSpace(c.PostForm("out_patterns"))
 	peer.OutFlags = strings.TrimSpace(c.PostForm("out_flags"))
-	peer.MaxConns = maxConns
+	if maxConnsGiven {
+		peer.MaxConns = maxConns
+	}
 	peer.Enabled = peerFormBool(c, "enabled")
 	peer.Notes = strings.TrimSpace(c.PostForm("notes"))
 	return nil

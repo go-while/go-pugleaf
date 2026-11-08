@@ -196,6 +196,39 @@ func TestAdfPeersUpdateKeepsPasswords(t *testing.T) {
 	}
 }
 
+// TestAdfPeersUpdateKeepsNumbers: an edit that submits no port and no connection limit keeps
+// the stored ones instead of resetting them to the column defaults.
+func TestAdfPeersUpdateKeepsNumbers(t *testing.T) {
+	_, cookie := w0NewUser(t, true)
+	name := w0Name("adfpeer")
+	p := adfPeersCreate(t, cookie, adfPeersForm(name))
+	if p.OutPort != 1119 || p.MaxConns != 3 {
+		t.Fatalf("created peer has out_port=%d max_conns=%d, want 1119/3", p.OutPort, p.MaxConns)
+	}
+
+	form := adfPeersForm(name)
+	form.Set("in_password", "")
+	form.Set("out_password", "")
+	form.Set("out_port", "")
+	form.Set("max_conns", "")
+	if _, failure := adfPeersUpdate(t, cookie, p.ID, form); failure != "" {
+		t.Fatalf("update without the numbers: refused: %q", failure)
+	}
+	if got := adfPeersGet(t, p.ID); got.OutPort != 1119 || got.MaxConns != 3 {
+		t.Errorf("after an update without the numbers: out_port=%d max_conns=%d, want 1119/3", got.OutPort, got.MaxConns)
+	}
+
+	// A submitted number still wins.
+	form.Set("out_port", "563")
+	form.Set("max_conns", "8")
+	if _, failure := adfPeersUpdate(t, cookie, p.ID, form); failure != "" {
+		t.Fatalf("update with new numbers: refused: %q", failure)
+	}
+	if got := adfPeersGet(t, p.ID); got.OutPort != 563 || got.MaxConns != 8 {
+		t.Errorf("after the update: out_port=%d max_conns=%d, want 563/8", got.OutPort, got.MaxConns)
+	}
+}
+
 // TestAdfPeersInPasswordLength: the peer login password is bcrypt-hashed, so the form bounds it
 // like the NNTP user form (10..72 bytes); the outgoing password is the remote's choice and is
 // stored whatever its length.
@@ -365,6 +398,17 @@ func TestAdfPeersToggleAndDelete(t *testing.T) {
 		t.Errorf("toggle changed a stored password")
 	}
 
+	// An enabled peer is not deleted: the handler refuses it, like the disabled button does.
+	if _, failure := adfPeersPost(t, cookie, "/admin/peers/delete", id); !strings.Contains(failure, "disable it first") {
+		t.Errorf("delete of an enabled peer: error flash %q, want \"disable it first\"", failure)
+	}
+	if _, err := w0DB(t).GetPeerByID(p.ID); err != nil {
+		t.Fatalf("refused delete removed peer %d: %v", p.ID, err)
+	}
+
+	if _, failure := adfPeersPost(t, cookie, "/admin/peers/toggle", id); failure != "" {
+		t.Fatalf("toggle peer %d off before the delete: refused: %q", p.ID, failure)
+	}
 	if _, failure := adfPeersPost(t, cookie, "/admin/peers/delete", id); failure != "" {
 		t.Fatalf("delete peer %d: refused: %q", p.ID, failure)
 	}
