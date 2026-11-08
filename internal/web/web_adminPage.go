@@ -558,6 +558,7 @@ func (s *WebServer) adminPage(c *Context) {
 		CurrentHostname:            currentHostname,
 		WebPostMaxArticleSize:      webPostMaxSize,
 		MaxCrossPosts:              s.DB.MaxCrossPosts(),
+		Maintenance:                s.maintenanceStatus(),
 		MaxCrossPostsLimit:         config.MaxCrossPostsLimit,
 		AbuseMail:                  abuseMail,
 		WebLocalNNTPServerAddrInfo: webLocalNNTPServerAddrInfo,

@@ -173,6 +173,9 @@ func (s *WebServer) Shutdown(ctx context.Context) error {
 		}
 	}
 
+	// A running global maintenance job stops on stopCh after the groups in progress.
+	s.waitMaintenance(shutdownGrace)
+
 	if s.tokenUsageDone != nil {
 		select {
 		case <-s.tokenUsageDone:

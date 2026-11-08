@@ -665,7 +665,8 @@ func (sq *SQ3batch) getOrCreateInterfaceSlice() []interface{} {
 // resurrect deleted or unknown groups (SEC-2). Arguments: inserted count, max article number
 // (twice, for last_article), max article number (twice, for high_water), the latest article
 // date as "2006-01-02 15:04:05" (three times; "" keeps updated_at, and an older date never
-// moves it backwards, A-db-4), newsgroup name. last_article and high_water only ever grow: a
+// moves it backwards, A-db-4, except on the group's first articles: a new row's updated_at is
+// its creation time, which an import of older articles must replace), newsgroup name. last_article and high_water only ever grow: a
 // smaller batch maximum never lowers them. SQLite evaluates every SET expression against the
 // row as it was before the UPDATE, so the CASEs compare with the stored values.
 const query_updateNewsgroupsStats = `
@@ -674,7 +675,7 @@ const query_updateNewsgroupsStats = `
 					last_article = CASE WHEN ? > COALESCE(last_article, 0) THEN ? ELSE last_article END,
 					high_water = CASE WHEN ? > COALESCE(high_water, 0) THEN ? ELSE high_water END,
 					updated_at = CASE WHEN ? = '' THEN updated_at
-					                  WHEN updated_at IS NULL OR ? > updated_at THEN ? ELSE updated_at END
+					                  WHEN updated_at IS NULL OR COALESCE(message_count, 0) = 0 OR ? > updated_at THEN ? ELSE updated_at END
 				WHERE name = ?`
 
 // batchGroupDBAttempts is how often processNewsgroupBatch opens a group database that

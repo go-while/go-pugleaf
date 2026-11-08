@@ -570,3 +570,92 @@ func TestAdfOptProviderEditFormZeroValues(t *testing.T) {
 		t.Error(`edit form renders max_art_size 0 with min="1024": the form cannot be saved`)
 	}
 }
+
+// TestAdfOptMaintenanceFNAFTA: the CFG tab starts FNA and FTA over all newsgroups as a
+// background job; the per-group buttons stay on the groups tab. The job fixes a group whose
+// updated_at is its creation time ("now") after an import of old articles, and the CFG tab
+// shows its result.
+func TestAdfOptMaintenanceFNAFTA(t *testing.T) {
+	db := w0DB(t)
+	_, cookie := w0NewUser(t, true)
+	settings := w0Do(t, w0Req{Path: "/admin?tab=settings", Cookies: []*http.Cookie{cookie}}).Body.String()
+	if !strings.Contains(settings, `action="/admin/maintenance/start"`) || !strings.Contains(settings, `value="FNA"`) || !strings.Contains(settings, `value="FTA"`) {
+		t.Error("CFG tab lacks the global FNA/FTA buttons")
+	}
+	if strings.Contains(settings, `name="newsgroup_name"`) {
+		t.Error("CFG tab asks for a newsgroup: the jobs are global")
+	}
+
+	// A group with one old article whose updated_at is "now" (its creation time).
+	name := w0Name("adfopt.maint")
+	if _, err := db.GetMainDB().Exec(`INSERT INTO newsgroups (name, active, message_count, updated_at) VALUES (?, 1, 1, CURRENT_TIMESTAMP)`, name); err != nil {
+		t.Fatal(err)
+	}
+	groupDB, err := db.GetGroupDB(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := groupDB.DB.Exec(`INSERT INTO articles (article_num, message_id, subject, from_header, date_sent, date_string, "references", bytes, lines, hide)
+		VALUES (1, '<adfopt-maint@test.invalid>', 's', 'f <f@test.invalid>', '2020-01-02 03:04:05', 'Thu, 02 Jan 2020 03:04:05 +0000', '', 10, 1, 0)`); err != nil {
+		groupDB.Return()
+		t.Fatal(err)
+	}
+	if _, err := groupDB.DB.Exec(`INSERT INTO thread_cache (thread_root, root_date, message_count, child_articles, last_child_number, last_activity)
+		VALUES (1, '2020-01-02 03:04:05', 1, '', 1, CURRENT_TIMESTAMP)`); err != nil {
+		groupDB.Return()
+		t.Fatal(err)
+	}
+	groupDB.Return()
+
+	resp, success, failure := adfOptPost(t, cookie, "/admin/maintenance/start", url.Values{"job": {"FNA"}})
+	if resp.Header.Get("Location") != "/admin?tab=settings" || failure != "" || !strings.Contains(success, "FNA started") {
+		t.Fatalf("start FNA: location=%q success=%q error=%q", resp.Header.Get("Location"), success, failure)
+	}
+	waitJob := func(kind string) {
+		t.Helper()
+		deadline := time.Now().Add(testWait) // hang guard only
+		for s := w0Srv.maintenanceStatus(); s.Running; s = w0Srv.maintenanceStatus() {
+			if time.Now().After(deadline) {
+				t.Fatalf("the %s job did not finish", kind)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	waitJob("FNA")
+	var got string
+	if err := db.GetMainDB().QueryRow(`SELECT updated_at FROM newsgroups WHERE name = ?`, name).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(got, "2020-01-02") {
+		t.Errorf("updated_at after FNA all = %q, want the article date 2020-01-02", got)
+	}
+	settings = w0Do(t, w0Req{Path: "/admin?tab=settings", Cookies: []*http.Cookie{cookie}}).Body.String()
+	if !strings.Contains(settings, "FNA finished") {
+		t.Error("CFG tab does not show the finished FNA job")
+	}
+
+	if _, success, failure := adfOptPost(t, cookie, "/admin/maintenance/start", url.Values{"job": {"FTA"}}); failure != "" || !strings.Contains(success, "FTA started") {
+		t.Fatalf("start FTA: success=%q error=%q", success, failure)
+	}
+	waitJob("FTA")
+	groupDB, err = db.GetGroupDB(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lastActivity string
+	err = groupDB.DB.QueryRow(`SELECT last_activity FROM thread_cache WHERE thread_root = 1`).Scan(&lastActivity)
+	groupDB.Return()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(lastActivity, "2020-01-02") {
+		t.Errorf("thread last_activity after FTA all = %q, want the article date 2020-01-02", lastActivity)
+	}
+
+	if _, _, failure := adfOptPost(t, cookie, "/admin/maintenance/start", url.Values{"job": {"nope"}}); !strings.Contains(failure, "Unknown") {
+		t.Errorf("unknown job: error flash %q", failure)
+	}
+	if _, _, failure := adfOptPost(t, cookie, "/admin/maintenance/stop", url.Values{}); !strings.Contains(failure, "No maintenance job") {
+		t.Errorf("stop without a job: error flash %q", failure)
+	}
+}

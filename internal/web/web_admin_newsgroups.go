@@ -663,10 +663,20 @@ func (s *WebServer) fixGroupThreadActivity(groupName string) error {
 		return fmt.Errorf("failed to get group DB: %w", err)
 	}
 	defer groupDB.Return()
+	updated, err := s.fixThreadActivityInDB(groupDB, groupName)
+	if updated > 0 {
+		log.Printf("[WEB]: fix thread activity '%s': %d thread(s) updated", groupName, updated)
+	}
+	return err
+}
 
+// fixThreadActivityInDB sets the last_activity of every thread of an open group database to the
+// newest visible article of the thread and returns how many threads changed (FTA; the global job
+// of the CFG tab calls it for every group).
+func (s *WebServer) fixThreadActivityInDB(groupDB *database.GroupDB, groupName string) (int, error) {
 	rows, err := database.RetryableQuery(groupDB.DB, query_fixGroupThreadActivity1)
 	if err != nil {
-		return fmt.Errorf("failed to query thread cache: %w", err)
+		return 0, fmt.Errorf("failed to query thread cache: %w", err)
 	}
 	defer rows.Close()
 
@@ -680,7 +690,7 @@ func (s *WebServer) fixGroupThreadActivity(groupName string) error {
 		var thread threadInfo
 		var lastActivityStr sql.NullString
 		if err := rows.Scan(&thread.root, &thread.childArticles, &lastActivityStr); err != nil {
-			return fmt.Errorf("failed to scan thread in '%s': %w", groupName, err)
+			return updatedCount, fmt.Errorf("failed to scan thread in '%s': %w", groupName, err)
 		}
 		if lastActivityStr.Valid {
 			// Try SQLite format first, then RFC3339 format (same as recover-db/main.go)
@@ -721,7 +731,6 @@ func (s *WebServer) fixGroupThreadActivity(groupName string) error {
 			err := database.RetryableQueryRowScan(groupDB.DB, query_fixGroupThreadActivity2, []interface{}{articleNum}, &dateStr)
 
 			if err != nil || !dateStr.Valid {
-				log.Printf("Skipping article %d in thread %d: no valid date_sent\n", articleNum, thread.root)
 				continue
 			}
 
@@ -771,16 +780,15 @@ func (s *WebServer) fixGroupThreadActivity(groupName string) error {
 				log.Print("Failed to update thread activity for thread ", thread.root, ": ", err)
 				continue // Skip threads that fail to update
 			}
-			log.Printf("Updated thread %d last_activity to %s\n", thread.root, utcTimeStr)
 			updatedCount++
 		}
 	}
 
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("error iterating threads: %w", err)
+		return updatedCount, fmt.Errorf("error iterating threads: %w", err)
 	}
 
-	return nil
+	return updatedCount, nil
 }
 
 // adminHideFuturePosts handles hiding future-dated posts for a specific newsgroup using the spam system
