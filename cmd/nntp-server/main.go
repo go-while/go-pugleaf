@@ -30,6 +30,7 @@ var (
 	maxConnections  int
 	dataDir         string
 	feedOut         bool
+	noPostThreads   bool
 	useHistory      bool
 
 	idleTimeout         time.Duration
@@ -73,6 +74,7 @@ func main() {
 	flag.DurationVar(&local430TTL, "local430ttl", nntp.DefaultLocal430TTL, "how long a message-id that answered 430 is answered from the negative cache without a new lookup")
 	flag.StringVar(&xrefMode, "xref", "partial", "Xref: header: off (none), partial (serving group only, no lookups) or full (all groups from the history index, one lookup per served article or per range chunk, see -xref-batched-lookup)")
 	flag.BoolVar(&xrefBatchedLookup, "xref-batched-lookup", true, "in -xref full, look up the Xref locations of each OVER/XOVER/HDR/XHDR range chunk (up to 1000 lines) with one history statement per shard database instead of one lookup per line")
+	flag.BoolVar(&noPostThreads, "disable-webserver-post-threads", false, "do not build the threads of stored articles (threads, thread_cache, reply_count): only the web view needs them; for a standalone NNTP server (recover-db -rebuild-threads builds them later)")
 	flag.BoolVar(&feedOut, "feed", true, "outgoing transit feed: queue accepted feed and POST articles for the peers with an outgoing feed (out_enabled) and send them (data/cfg/feed-queue.sq3)")
 	flag.DurationVar(&postCommitWait, "post-commit-wait", nntp.DefaultPostCommitWait, "wait for the batch writer to commit a POSTed article before answering 240 (0 = answer at once, the article is still stored)")
 	flag.Parse()
@@ -151,6 +153,10 @@ func main() {
 	// Initialize database (this would normally come from your main application)
 	dbConfig := database.DefaultDBConfig()
 	dbConfig.DataDir = dataDir
+	dbConfig.DisableThreading = noPostThreads
+	if noPostThreads {
+		log.Printf("[NNTP]: -disable-webserver-post-threads: stored articles get no threads (web view only; recover-db -rebuild-threads builds them later)")
+	}
 
 	db, err := database.OpenDatabase(dbConfig)
 	if err != nil {
