@@ -243,6 +243,22 @@ other's peer (`hosts 127.0.0.1`, path tokens = hostnames), same test group on bo
 - Deferred: an index for rejects older than the upgrade is built during the first prune cycle
   (one CREATE INDEX per step, may exceed 20 ms on HDD; busy_timeout 30 s covers the writer).
 
+### Waves 2+3 — run in parallel against internal/feed/api.go (inline contract)
+- internal/feed/api.go: Item (peer, message-id, newsgroup, attempts, last error), Stats (per-peer
+  counters, written to the queue file by the sender so the web process can read them), Queue
+  interface (Enqueue, Claim with lease, Done, Defer, Depth, DropPeer, WriteStats, ReadStats, Close).
+- Decisions: only articles accepted through the NNTP feed (IHAVE/TAKETHIS) or NNTP POST are queued
+  (non-bulk ProcessArticle); fetched and imported (bulk) articles never are, so an archive import
+  does not flood peers. Web site posts (post_queue, bulk) are not queued either (open item). The
+  peer an article came from is skipped through its path_token in the Path (our rewrite puts it
+  there), so no origin field is needed. No catch-up scan on enqueue overflow in this plan: drops are
+  counted and logged. cmd/nntp-server wiring (queue open, enqueue hook, senders, -feed) is done inline
+  after both slices merge.
+- slice feed-queue: internal/feed/queue.go, enqueue.go (+ tests), out_flags parser, the commit hook
+  in internal/database (db_batch.go + a small feed_hook.go), the non-bulk marker.
+- slice feed-sender: internal/feed/sender.go (+ tests against nntp-testkit or a fake server), the
+  counters on the admin peers page (internal/web/web_admin_peers.go, web/templates/admin_peers.html).
+
 ## Open questions (answered 2026-11-08 with the recommendations, user said "run the peering plan")
 1. Control: (a) refuse everywhere now; PGP-verified newgroup/rmgroup is a later plan.
 2. Waves 2-3 stay in this plan.
