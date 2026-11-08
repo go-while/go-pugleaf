@@ -815,7 +815,10 @@ func artLocal430Miss(t *testing.T, test string) *artLocal430Env {
 		}
 		return art, nil
 	}
-	hs := newTestServer(t, hServerOpts{Proc: proc})
+	// A peer may feed this server from 127.0.0.1 without a login (plan nntp-peering), so
+	// the IHAVE of the ihave-arrival subtest gets past the feed gate.
+	peers, _ := hPeerIP("")
+	hs := newTestServer(t, hServerOpts{Proc: proc, Peers: peers})
 	c := hs.dial(t)
 
 	// RFC 3977 §6.2.4.2: 430 no article with that message-id.
@@ -869,19 +872,10 @@ func TestArtLocal430(t *testing.T) {
 	t.Run("ihave-arrival", func(t *testing.T) {
 		env := artLocal430Miss(t, "local430-ihave")
 
-		// A peer with transfer permission delivers the article.
-		user, pass := hUser(t, true, true)
+		// A peer delivers the article (matched by its address, no AUTHINFO needed).
 		peer := env.hs.dial(t)
-		code, line := peer.Cmd("AUTHINFO USER %s", user)
-		if err := client.ExpectCode(code, line, 381); err != nil {
-			t.Fatalf("AUTHINFO USER: %v", err)
-		}
-		code, line = peer.Cmd("AUTHINFO PASS %s", pass)
-		if err := client.ExpectCode(code, line, 281); err != nil {
-			t.Fatalf("AUTHINFO PASS: %v", err)
-		}
 		// RFC 3977 §6.3.2.2: IHAVE of a wanted article → 335, then 235 after transfer.
-		code, line = peer.Cmd("IHAVE %s", env.a.MessageID)
+		code, line := peer.Cmd("IHAVE %s", env.a.MessageID)
 		if err := client.ExpectCode(code, line, 335); err != nil {
 			t.Fatalf("IHAVE: %v", err)
 		}
@@ -1130,7 +1124,9 @@ type artGraceEnv struct {
 }
 
 // artGraceServer is newTestServer with Config.Hostname set before Serve, so no connection
-// goroutine can see the write.
+// goroutine can see the write, and with a peer that may feed from 127.0.0.1: the poster
+// connection is a peer connection as well, so it can POST (as the user) and feed (as the
+// peer) — see artGraceSetup.
 func artGraceServer(t *testing.T, proc ArticleProcessor) *hServer {
 	t.Helper()
 	db := hTestDB(t)
@@ -1145,6 +1141,7 @@ func artGraceServer(t *testing.T, proc ArticleProcessor) *hServer {
 	s.ArticleCmdDelay = 0
 	s.GroupCmdDelay = 0
 	s.ErrorDelay = 0
+	s.Peers, _ = hPeerIP("")
 	hs.S = s
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -1158,7 +1155,8 @@ func artGraceServer(t *testing.T, proc ArticleProcessor) *hServer {
 	return hs
 }
 
-// artGraceSetup builds the shared server.
+// artGraceSetup builds the shared server. The poster logs in as a posting user (POST) and is
+// at the same time the peer of artGraceServer (IHAVE/TAKETHIS).
 func artGraceSetup(t *testing.T) *artGraceEnv {
 	t.Helper()
 	proc := &hFakeProcessor{

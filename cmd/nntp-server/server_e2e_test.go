@@ -53,6 +53,10 @@ import (
 // e2eHostname is processor.LocalNNTPHostname in the in-process tests.
 const e2eHostname = "news.test.invalid"
 
+// e2ePeerPathToken is the Path token of the e2e peer: the leftmost element of the Path that
+// e2eHead writes, so a fed article matches its peer's token (no ".MISMATCH").
+const e2ePeerPathToken = "e2e.client.invalid"
+
 // testWait is the hang guard of the e2e tests: client dial and per-operation deadlines, polls for
 // asynchronous commits, server and post-queue waits. It only stops a hung test; a passing test
 // never waits on it. Override with PUGLEAF_TEST_DEADLINE (a Go duration, e.g. 120s).
@@ -180,6 +184,17 @@ func e2eMain(m *testing.M) int {
 	db.Batch.SetProcessor(proc)
 	hist.SetDatabaseWorkChecker(db.Batch)
 	e2eProc = proc
+
+	// Only a peer may feed (plan nntp-peering): one peer that may feed from 127.0.0.1
+	// without a login, with the Path token the test articles write, so the IHAVE,
+	// TAKETHIS, CHECK and MODE STREAM tests below run as a real peer would.
+	if _, err := db.InsertPeer(&models.Peer{
+		Name: "e2e-peer", PathToken: e2ePeerPathToken, Hosts: "127.0.0.1",
+		InPatterns: "*", MaxConns: 4, Enabled: true,
+	}, ""); err != nil {
+		fmt.Fprintln(os.Stderr, "[E2E] InsertPeer:", err)
+		return e2eTeardown(2, keep, nil, nil)
+	}
 
 	srvCfg := &config.ServerConfig{Hostname: e2eHostname}
 	srvCfg.NNTP.MaxConns = 100
@@ -1981,8 +1996,9 @@ func TestE2EInjectionPathColumn(t *testing.T) {
 		t.Fatalf("IHAVE article: code=%d line=%q err=%v, want 235", code, line, err)
 	}
 	for _, tc := range []struct{ id, path string }{
-		{pid, e2eHostname + "!.POSTED!e2e.client.invalid!not-for-mail"},
-		{iid, e2eHostname + "!.SEEN.127.0.0.1!e2e.client.invalid!not-for-mail"},
+		{pid, e2eHostname + "!.POSTED!" + e2ePeerPathToken + "!not-for-mail"},
+		// plan nntp-peering: the feed Path, with the peer's own token matched
+		{iid, e2eHostname + "!" + e2ePeerPathToken + "!not-for-mail"},
 	} {
 		e2eWaitStored(t, tc.id, g)
 		gdb, err := e2eDB.GetGroupDB(g)
@@ -2056,28 +2072,94 @@ func TestE2EProtoArticleRejects(t *testing.T) {
 	}
 }
 
-// TestE2ERelayPath (D7): an article received by IHAVE is served with
-// "<identity>!.SEEN.<peer IP>!" in front of the received Path.
-func TestE2ERelayPath(t *testing.T) {
+// TestE2EFeedPath (plan nntp-peering): an article received from a peer is served with
+// "<identity>!" in front of the received Path when its leftmost element is the peer's
+// path_token, and with "<identity>!<token>.MISMATCH!" when it is not. No ".SEEN.<ip>" is
+// written any more.
+func TestE2EFeedPath(t *testing.T) {
 	e2eNeedDB(t)
-	g := e2eGroupWith(t, "relay", true, "y", 0)
+	g := e2eGroupWith(t, "feedpath", true, "y", 0)
 	c := e2ePoster(t)
-	id := fmt.Sprintf("<t7-relay-%d@test.invalid>", e2eSeq.Add(1))
+	for _, tc := range []struct {
+		name   string
+		path   string
+		prefix string
+	}{
+		{"token-match", e2ePeerPathToken + "!not-for-mail", e2eHostname + "!" + e2ePeerPathToken + "!"},
+		{"mismatch", "somewhere.else.invalid!not-for-mail", e2eHostname + "!" + e2ePeerPathToken + ".MISMATCH!"},
+	} {
+		id := fmt.Sprintf("<t7-feedpath-%s-%d@test.invalid>", tc.name, e2eSeq.Add(1))
+		if code, line := c.cmd(t, "IHAVE %s", id); code != 335 {
+			t.Fatalf("%s: IHAVE %s: %q, want 335", tc.name, id, line)
+		}
+		head := e2eHead(id, g, "E2E feed path", e2eNow())
+		head[0] = "Path: " + tc.path
+		if err := c.send(e2eWire(head, []string{"feed path"})); err != nil {
+			t.Fatal(err)
+		}
+		if code, line, err := c.readStatus(); err != nil || code != 235 {
+			t.Fatalf("%s: IHAVE article: code=%d line=%q err=%v, want 235", tc.name, code, line, err)
+		}
+		e2eWaitStored(t, id, g)
+		if code, line := c.cmd(t, "HEAD %s", id); code != 221 {
+			t.Fatalf("%s: HEAD %s: %q, want 221", tc.name, id, line)
+		}
+		p := e2eHeaderValue(c.readDotLines(t), "Path")
+		if !strings.HasPrefix(p, tc.prefix) {
+			t.Fatalf("%s: served Path %q, want the prefix %q", tc.name, p, tc.prefix)
+		}
+		if strings.Contains(p, ".SEEN") {
+			t.Fatalf("%s: served Path %q still carries a .SEEN element", tc.name, p)
+		}
+	}
+}
+
+// TestE2EFeedLoopRefused (plan nntp-peering): an article whose Path already holds this
+// server's identity is a loop: IHAVE answers 437, TAKETHIS 439 with the id, and nothing is
+// stored. That the id is remembered as rejected is checked where RememberReject is
+// implemented (slice history-rejects).
+func TestE2EFeedLoopRefused(t *testing.T) {
+	e2eNeedDB(t)
+	g := e2eGroupWith(t, "feedloop", true, "y", 0)
+	c := e2ePoster(t)
+	looped := func(id string) []string {
+		head := e2eHead(id, g, "E2E feed loop", e2eNow())
+		head[0] = "Path: upstream.invalid!" + e2eHostname + "!origin.invalid"
+		return head
+	}
+
+	id := fmt.Sprintf("<t7-feedloop-%d@test.invalid>", e2eSeq.Add(1))
 	if code, line := c.cmd(t, "IHAVE %s", id); code != 335 {
 		t.Fatalf("IHAVE %s: %q, want 335", id, line)
 	}
-	if err := c.send(e2eWire(e2eHead(id, g, "E2E relay path", e2eNow()), []string{"relay"})); err != nil {
+	if err := c.send(e2eWire(looped(id), []string{"loop"})); err != nil {
 		t.Fatal(err)
 	}
-	if code, line, err := c.readStatus(); err != nil || code != 235 {
-		t.Fatalf("IHAVE article: code=%d line=%q err=%v, want 235", code, line, err)
+	code, line, err := c.readStatus()
+	if err != nil || code != 437 {
+		t.Fatalf("IHAVE of a looped article: code=%d line=%q err=%v, want 437", code, line, err)
 	}
-	e2eWaitStored(t, id, g)
-	if code, line := c.cmd(t, "HEAD %s", id); code != 221 {
-		t.Fatalf("HEAD %s: %q, want 221", id, line)
+	if !strings.Contains(line, "path loop") {
+		t.Fatalf("IHAVE reply %q, want the loop reason", line)
 	}
-	if p := e2eHeaderValue(c.readDotLines(t), "Path"); !strings.HasPrefix(p, e2eHostname+"!.SEEN.127.0.0.1!") {
-		t.Fatalf("served Path %q, want the prefix %q", p, e2eHostname+"!.SEEN.127.0.0.1!")
+	if _, err := e2eStored(id, g); err == nil {
+		t.Fatalf("the looped article %s was stored", id)
+	}
+
+	id2 := fmt.Sprintf("<t7-feedloop-%d@test.invalid>", e2eSeq.Add(1))
+	if err := c.send("TAKETHIS " + id2 + "\r\n" + e2eWire(looped(id2), []string{"loop"})); err != nil {
+		t.Fatal(err)
+	}
+	code, line, err = c.readStatus()
+	if err != nil || code != 439 {
+		t.Fatalf("TAKETHIS of a looped article: code=%d line=%q err=%v, want 439", code, line, err)
+	}
+	if f := strings.Fields(line); len(f) < 2 || f[1] != id2 {
+		t.Fatalf("TAKETHIS reply %q does not carry %s", line, id2)
+	}
+	// the connection is still in sync
+	if code, line := c.cmd(t, "MODE READER"); code != 200 && code != 201 {
+		t.Fatalf("MODE READER after the refusals: %q", line)
 	}
 }
 
@@ -2210,28 +2292,33 @@ func TestE2EPostNoPostingStatus(t *testing.T) {
 	}
 }
 
-// TestE2ETakeThisUnauthenticatedCarriesID (A-nntp-rfc-8, RFC 4644 §2.5.2): the 480 reply
-// to an unauthenticated TAKETHIS carries the message-id, and the article is consumed.
-func TestE2ETakeThisUnauthenticatedCarriesID(t *testing.T) {
+// TestE2ETakeThisPeerByAddress (plan nntp-peering, A-nntp-rfc-8, RFC 4644 §2.5.2): a peer
+// matched by its address may feed without any AUTHINFO, and the reply carries the
+// message-id. The 480/502 replies of a connection that is no peer (and their message-id)
+// are covered by the unit tests of internal/nntp, where the peer registry of the server
+// can be chosen per test.
+func TestE2ETakeThisPeerByAddress(t *testing.T) {
 	e2eNeedDB(t)
-	g := e2eGroupWith(t, "unauth", true, "y", 0)
+	g := e2eGroupWith(t, "peeraddr", true, "y", 0)
 	c := e2eDial(t)
-	id := fmt.Sprintf("<t7-unauth-%d@test.invalid>", e2eSeq.Add(1))
-	if err := c.send("TAKETHIS " + id + "\r\n" + e2eWire(e2eHead(id, g, "E2E unauthenticated", e2eNow()), []string{"body"})); err != nil {
+	id := fmt.Sprintf("<t7-peeraddr-%d@test.invalid>", e2eSeq.Add(1))
+	if err := c.send("TAKETHIS " + id + "\r\n" + e2eWire(e2eHead(id, g, "E2E peer by address", e2eNow()), []string{"body"})); err != nil {
 		t.Fatal(err)
 	}
 	code, line, err := c.readStatus()
 	if err != nil {
 		t.Fatalf("TAKETHIS reply: %v", err)
 	}
-	if f := strings.Fields(line); code != 480 || len(f) < 2 || f[1] != id {
-		t.Fatalf("unauthenticated TAKETHIS: %q, want 480 %s", line, id)
+	if f := strings.Fields(line); code != 239 || len(f) < 2 || f[1] != id {
+		t.Fatalf("TAKETHIS without AUTHINFO: %q, want 239 %s", line, id)
 	}
 	// the article was consumed: the next command is answered
 	if code, line := c.cmd(t, "MODE READER"); code != 200 && code != 201 {
-		t.Fatalf("MODE READER after the 480: %q", line)
+		t.Fatalf("MODE READER after the 239: %q", line)
 	}
-	if _, err := e2eStored(id, g); err == nil {
-		t.Fatalf("the unauthenticated article %s was stored", id)
+	e2eWaitStored(t, id, g)
+	// POST is not granted by being a peer (no user login on this connection)
+	if code, line, err := c.tryCmd("POST"); err != nil || code != 480 {
+		t.Fatalf("POST on a peer connection: code=%d line=%q err=%v, want 480", code, line, err)
 	}
 }

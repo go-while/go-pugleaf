@@ -10,12 +10,14 @@ This package holds the NNTP **server** (reader side plus IHAVE/TAKETHIS/POST int
 |------|----------|
 | `nntp-server.go` | `NNTPServer`, `NewNNTPServer`, `Start`/`Serve`/`Stop`, accept loop, connection limit, per-user slots, `PlaintextAuthPolicy` |
 | `nntp-server-cliconns.go` | `ClientConnection`, the command loop (`Handle`), greeting, dispatch (`handleCommand`), `getServerCapabilities` |
-| `nntp-server-commands.go` | `commandMaxArgs`, `readerCommands`, the gates `argCountOK`, `readGateOK`, `authinfoAdvertised`, `postingAllowed` |
+| `nntp-server-commands.go` | `commandMaxArgs`, `readerCommands`, the gates `argCountOK`, `readGateOK`, `authinfoAdvertised`, `postingAllowed`, `feedAllowed`, `feedDeniedCode` |
 | `nntp-server-lineio.go` | bounded command-line reader `readCommandLine`, bounded article reader `readArticleBlock`, `MaxArticleBytes` |
 | `nntp-server-dataio.go` | `dataBlockWriter` (one buffered writer per connection, dot-stuffing, flush every 256 lines), `sendDataBlock` |
 | `nntp-server-statistics.go` | `ServerStats` (connections, per-command counts, auth successes/failures) |
 | `nntp-cache-local.go` | `Local430`, the negative cache of message-ids that answered 430 |
 | `nntp-auth-manager.go` | `AuthManager.AuthenticateUser` (bcrypt check through `database.AuthenticateNNTPUser`) |
+| `nntp-peers.go` | `PeerRegistry` (the cached `peers` table, address/CIDR/host-name matching, peer AUTHINFO), the feed Path (`feedPath`), the Path loop check (`pathHasIdentity`) and the feed checks (`feedCheck`) |
+| `nntp-peering-pattern.go` | `MatchNewsgroupPatterns`: a peer's `in_patterns`/`out_patterns` subscription list (INN `newsfeeds(5)`, `!` and `@`) |
 | `nntp-cmd-basic.go` | CAPABILITIES, MODE READER, HELP, QUIT |
 | `nntp-cmd-date.go`, `nntp-cmd-nextlast.go` | DATE, NEXT, LAST |
 | `nntp-cmd-newgroups.go`, `nntp-cmd-list-wildmat.go`, `nntp-wildmat.go` | NEWGROUPS, LIST ACTIVE/NEWSGROUPS with a wildmat (RFC 3977 §4) |
@@ -29,7 +31,7 @@ This package holds the NNTP **server** (reader side plus IHAVE/TAKETHIS/POST int
 | `nntp-cmd-xover.go`, `nntp-cmd-xhdr.go` | XOVER, XHDR (`overviewLine`, `sanitizeOverviewField`) |
 | `nntp-cmd-range.go` | `parseRangeArg`, `requireGroup` (412 without a selected group), current-group helpers |
 | `nntp-xref.go` | `XrefMode` (`SetXrefMode`), `XrefLocation`, `xrefLine`/`xrefFor`: the local Xref: header |
-| `nntp-cmd-posting.go` | POST, IHAVE, TAKETHIS, POST injection (`injectProtoArticle`), feed Path (`relayPath`), reply mapping (`intakeReply`) |
+| `nntp-cmd-posting.go` | POST, IHAVE, TAKETHIS, POST injection (`injectProtoArticle`), reply mapping (`intakeReply`) |
 | `nntp-cmd-helpers.go` | `rateLimitOnError` (the error delay) |
 
 Command list: CAPABILITIES, MODE READER, MODE STREAM, STARTTLS (only with a certificate), AUTHINFO
@@ -61,6 +63,8 @@ matching `cmd/nntp-server` flags:
 | `SetLocal430TTL` | `-local430ttl` | 60s | TTL of the local430 negative cache (see below) |
 | `SetXrefMode` | `-xref` | `partial` | local Xref: header: `off`, `partial` or `full` (see below); may be changed while serving |
 | `ShutdownTimeout` | - | 10s | how long `Stop` waits for client handlers |
+| `Peers` | - | the `peers` table | who may feed (`PeerRegistry`; `nil` = nobody). `NewNNTPServer` wires the main DB |
+| `Peers.Invalidate()` | - | - | apply a peers-table edit at once instead of within 30 s |
 
 `Start` fails when no port is configured, or when a TLS port is set without a usable certificate and
 key; nothing is left listening then. `NewNNTPServer` starts no goroutine; `Start`/`Serve` start the
@@ -77,7 +81,62 @@ accept loops and the local430 cleanup, `Stop` ends all of them (the caller's Wai
   advertised and any further AUTHINFO answers `502`. The password is the raw rest of the line, so
   passwords with spaces work. Replies never echo the username or other client input.
 - **Greeting and MODE READER.** `200` when this client may post (server has a processor and the
-  user, if logged in, has posting rights), else `201`. Other MODE variants answer `501`.
+  user, if logged in, has posting rights), else `201`. Other MODE variants answer `501`. The
+  posting flag of LIST ACTIVE and NEWGROUPS follows the same rule; neither says anything about
+  feeding.
+- **Peers: only a peer may feed** (plan `nntp-peering`, table `peers`). IHAVE, CHECK, TAKETHIS and
+  MODE STREAM are peer-only, and CAPABILITIES lists IHAVE and STREAMING on a peer connection only.
+  `nntp_users.posting` means POST and nothing else: a posting user gets `502` on all four commands.
+  A connection becomes a peer connection
+  - by its address, before the greeting: an enabled peer without `in_username` whose `hosts` hold
+    the client IP (`hosts` entries are addresses, CIDRs and host names). A literal address or CIDR
+    needs no lookup. Host names are resolved with a 2 s timeout and cached 5 min, re-resolved
+    after a miss at most every 10 s and only by one connection at a time (every other one answers
+    from the cached addresses meanwhile, so a feed's burst of connections costs one lookup and
+    only one of them can wait on the resolver); a resolver fault keeps the last answer for at most
+    15 min, while an authoritative "no such host" drops it at once. Such a peer may feed without
+    AUTHINFO;
+  - by a peer login: AUTHINFO USER/PASS with an enabled peer's `in_username` is checked against
+    `peers.in_password_hash` (never against `nntp_users`) and, when that peer has `hosts`, only
+    from one of them. A failed peer login is the same `481 Authentication failed` as a failed user
+    login, so the reply does not say which table holds a name. A peer login grants the feed
+    commands only: not POST, and not the reader commands behind `ReadRequiresAuth`.
+  A connection that may not feed gets `480` while a peer login could still help (an enabled peer
+  with a login matches this address, no AUTHINFO has succeeded yet, and AUTHINFO is possible at
+  all: with `-plaintextauth refuse` a plaintext connection gets `502`, since a login it cannot
+  send would leave the peer with nothing to try) and `502` otherwise. The peer list is cached 30 s
+  and read again after that, so an admin edit applies without a restart
+  (`PeerRegistry.Invalidate` applies it at once); a failed read keeps the peers already known and
+  is retried after 5 s, and until the table could be read once nothing may feed. The registry
+  starts no goroutine. STARTTLS is refused after a peer login as after a user login, and its
+  session reset (RFC 4642 §2.2.2) discards a peer login and takes the address match again. A peer
+  row without a `path_token` is ignored with a log line (`database.ValidatePeer` refuses such a
+  row, so it can only be hand-edited into the table): there would be nothing to compare the
+  incoming Path against, so it can never feed.
+- **Behind a proxy.** `hosts` matches the address of the TCP connection. Behind a local proxy
+  (`cmd/tcp2tor`, an SSH tunnel, a load balancer) every client arrives with the proxy's address,
+  so a `hosts` entry would let every client of that proxy feed: give such a peer an `in_username`
+  and leave `hosts` empty (or keep both, so the login is also bound to the proxy's address).
+- **Feed checks** (plan `nntp-peering`). Before an IHAVE/TAKETHIS article reaches the processor the
+  server refuses, with `437`/`439` and `Processor.RememberReject(messageID)` so the peer stops
+  offering it:
+  - a **Path loop**: the received Path already holds `Config.Hostname` as one of its elements,
+    compared without case and without a keyword suffix, so `ours`, `ours.MISMATCH` and
+    `ours.SEEN.192.0.2.1` all count. Only a whole dot-separated `SEEN`/`MISMATCH`/`POSTED`
+    component is a keyword, so a host named `ours.seenix.example` is not read as this server.
+    Reason `path loop`;
+  - **`in_patterns`**: none of the article's newsgroups is wanted, or one of them is poisoned by an
+    `@pattern` (`MatchNewsgroupPatterns`, INN `newsfeeds(5)`: last match per newsgroup wins, `!`
+    drops one newsgroup, `@` the whole article). `!group` alone therefore only refuses an article
+    whose *every* newsgroup is unwanted: a crosspost that also carries a wanted newsgroup is
+    taken (use `@group` to refuse the article itself). The patterns support `*` and `?` as
+    wildcards against the whole name; character ranges (`[...]`) and backslash escapes are not
+    supported, and a pattern without a wildcard has to match the name exactly (`!junk` leaves
+    `junk.local` alone);
+  - an article over `MaxArticleBytes`, one whose header block does not parse, and one whose
+    `Message-ID` header is not the message-id of the command.
+  Refusals the processor decides are remembered by the processor, not here, and a temporary
+  failure (436/431/400) or a duplicate is never remembered.
 - **Command lines** (RFC 3977 §3.1). At most 512 octets including CRLF: a longer line that ends
   within 4096 bytes gets `501 Command line too long` and the session continues; 4096 bytes without
   a line end get `400 Command line too long` and the connection is closed. Surplus arguments get
@@ -95,17 +154,21 @@ accept loops and the local430 cleanup, `Stop` ends all of them (the caller's Wai
   most 501 replies (not the IHAVE/TAKETHIS argument checks), before 500 for unknown and empty
   commands, before the intake rejections for "too large" and "invalid" (441, IHAVE 437, TAKETHIS
   439 for too large or a bad message-id) and the IHAVE 436 history error, and before the 480/502 of
-  IHAVE and TAKETHIS without login or rights. Never before 2xx/3xx, 205, 400, 403, 411, 435, 440,
-  483, or the 480 of the read gate and POST.
-- **Intake.** POST, IHAVE and TAKETHIS need a processor (else POST `440`, IHAVE/TAKETHIS `500`), a
-  successful AUTHINFO (`480`) and posting rights. Articles go through `readArticleBlock` with
+  IHAVE and TAKETHIS on a connection that may not feed. Never before 2xx/3xx, 205, 400, 403, 411,
+  435, 440, 483, the 480 of the read gate and POST, the 480/502 of CHECK and MODE STREAM, or the
+  437/439 of a loop or `in_patterns` refusal (those are ordinary peering answers, like 435/438, and
+  must not slow a peer's stream).
+- **Intake.** POST, IHAVE and TAKETHIS need a processor (else POST `440`, IHAVE/TAKETHIS `500`);
+  POST needs a successful AUTHINFO (`480`) and posting rights, IHAVE and TAKETHIS a peer
+  connection (see above). Articles go through `readArticleBlock` with
   `MaxArticleBytes`: too large gives 441/437/439 with the stream in sync, past the drain bound
   `400` and close. POST is injected (`injectProtoArticle`, RFC 5537 §3.5): Message-ID and Date are
   generated when missing (then also Injection-Date), Injection-Info is always added, the Path gets
   `<hostname>!.POSTED!`; a proto-article with Injection-Info, Xref or `.POSTED` in its Path is refused,
   and so is a Date older than `PostDateMaxAge` (72 h) or more than 24 h in the future.
-  IHAVE/TAKETHIS prepend `<hostname>!.SEEN.<ip>!` (`relayPath`) and need a Message-ID header equal
-  to the command argument.
+  IHAVE/TAKETHIS need a Message-ID header equal to the command argument and get the feed Path
+  (`feedPath`, INN convention): `<hostname>!` when the leftmost received Path element is the peer's
+  `path_token`, else `<hostname>!<path_token>.MISMATCH!`. No `.SEEN.<ip>` element is written.
 - **Connection limit.** Counted at accept: over `MaxConns` the client gets
   `400 Too many connections, try again later` and is closed. With `EnforceUserMaxConns` a user with
   `maxconns > 0` gets at most that many authenticated connections on this server (`maxconns <= 0`:

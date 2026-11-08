@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/config"
+	"github.com/go-while/go-pugleaf/internal/history"
 	"github.com/go-while/nntp-testkit/client"
 )
 
@@ -235,6 +236,12 @@ func TestRfcDispatch(t *testing.T) {
 	g := hGroup(t, "rc6.dispatch", 2, nil)
 	proc := newTestServer(t, hServerOpts{Proc: &hFakeProcessor{}})
 	plain := newTestServer(t, hServerOpts{}) // no processor, no certificate
+	// a server whose peer may feed from 127.0.0.1: only there do the feed commands work
+	peerReg, _ := hPeerIP("")
+	peerSrv := newTestServer(t, hServerOpts{Proc: &hFakeProcessor{checkResult: history.CasePass}, Peers: peerReg})
+	// a server whose peer still has to log in: the feed commands answer 480 there
+	loginReg, _, _ := hPeerLogin(t, "127.0.0.1")
+	loginSrv := newTestServer(t, hServerOpts{Proc: &hFakeProcessor{}, Peers: loginReg})
 
 	t.Run("DATE", func(t *testing.T) {
 		line := rfcExpect(t, plain.dial(t), 111, "DATE")
@@ -307,10 +314,13 @@ func TestRfcDispatch(t *testing.T) {
 		rfcExpect(t, plain.dial(t), 412, "HDR Subject")
 	})
 	t.Run("MODE-STREAM", func(t *testing.T) {
-		line := rfcExpect(t, proc.dial(t), 203, "MODE STREAM")
+		line := rfcExpect(t, peerSrv.dial(t), 203, "MODE STREAM")
 		if !strings.Contains(line, "Streaming permitted") {
 			t.Fatalf("got %q, want handleModeStream's 203", line)
 		}
+		// plan nntp-peering: 502 without peers, 480 while a peer login could help
+		rfcExpect(t, proc.dial(t), 502, "MODE STREAM")
+		rfcExpect(t, loginSrv.dial(t), 480, "MODE STREAM")
 	})
 	t.Run("MODE-READER", func(t *testing.T) {
 		// the hardened handleMode still answers MODE READER
@@ -321,10 +331,17 @@ func TestRfcDispatch(t *testing.T) {
 		rfcExpect(t, plain.dial(t), 201, "MODE READER")
 	})
 	t.Run("CHECK", func(t *testing.T) {
-		line := rfcExpect(t, proc.dial(t), 480, "CHECK <x@y>")
+		// plan nntp-peering: 480 while a peer login could help, 502 without peers,
+		// each reply carrying the message-id (RFC 4644 §2.4.2)
+		line := rfcExpect(t, loginSrv.dial(t), 480, "CHECK <x@y>")
 		if !strings.HasPrefix(line, "480 <x@y> ") {
 			t.Fatalf("got %q, want 480 carrying <x@y>", line)
 		}
+		line = rfcExpect(t, proc.dial(t), 502, "CHECK <x@y>")
+		if !strings.HasPrefix(line, "502 <x@y> ") {
+			t.Fatalf("got %q, want 502 carrying <x@y>", line)
+		}
+		rfcExpect(t, peerSrv.dial(t), 238, "CHECK <x@y>")
 	})
 	t.Run("CHECK-args", func(t *testing.T) {
 		// commandMaxArgs["CHECK"] = 1: the table's 501 comes before the handler's
@@ -358,6 +375,8 @@ func TestRfcCapabilities(t *testing.T) {
 	readUser, readPass := hUser(t, false, true)
 
 	base := []string{rfcCapLIST, "OVER MSGID", "HDR"}
+	// IHAVE and STREAMING are listed on a peer connection only (plan nntp-peering)
+	peerReg, _ := hPeerIP("")
 	cases := []struct {
 		name    string
 		session func(t *testing.T) *client.Conn // returns the client in the state of the row
@@ -369,15 +388,24 @@ func TestRfcCapabilities(t *testing.T) {
 			session: func(t *testing.T) *client.Conn {
 				return rfcNewCertServer(t, certFile, keyFile, nil, &hFakeProcessor{}).dial(t)
 			},
-			present: append(append([]string{}, base...), "STREAMING", "STARTTLS"),
-			never:   []string{"NEWNEWS", "TAKETHIS"},
+			present: append(append([]string{}, base...), "STARTTLS"),
+			never:   []string{"NEWNEWS", "TAKETHIS", "IHAVE", "STREAMING"},
 		},
 		{
 			name: "plaintext-before-auth-no-cert",
 			session: func(t *testing.T) *client.Conn {
 				return newTestServer(t, hServerOpts{Proc: &hFakeProcessor{}}).dial(t)
 			},
-			present: append(append([]string{}, base...), "STREAMING"),
+			present: base,
+			never:   []string{"STARTTLS", "IHAVE", "STREAMING"},
+		},
+		{
+			// plan nntp-peering: a peer connection is the only one that may feed
+			name: "peer-connection",
+			session: func(t *testing.T) *client.Conn {
+				return newTestServer(t, hServerOpts{Proc: &hFakeProcessor{}, Peers: peerReg}).dial(t)
+			},
+			present: append(append([]string{}, base...), "IHAVE", "STREAMING"),
 			never:   []string{"STARTTLS"},
 		},
 		{
@@ -387,8 +415,8 @@ func TestRfcCapabilities(t *testing.T) {
 				rfcAuth(t, c, postUser, postPass)
 				return c
 			},
-			present: append(append([]string{}, base...), "STREAMING"),
-			never:   []string{"STARTTLS"},
+			present: append(append([]string{}, base...), "POST"),
+			never:   []string{"STARTTLS", "IHAVE", "STREAMING"},
 		},
 		{
 			name: "after-auth-user-without-posting",
@@ -398,7 +426,7 @@ func TestRfcCapabilities(t *testing.T) {
 				return c
 			},
 			present: base,
-			never:   []string{"STREAMING", "STARTTLS"},
+			never:   []string{"POST", "IHAVE", "STREAMING", "STARTTLS"},
 		},
 		{
 			name: "no-processor",
@@ -406,15 +434,15 @@ func TestRfcCapabilities(t *testing.T) {
 				return rfcNewCertServer(t, certFile, keyFile, nil, nil).dial(t)
 			},
 			present: append(append([]string{}, base...), "STARTTLS"),
-			never:   []string{"STREAMING"},
+			never:   []string{"IHAVE", "STREAMING"},
 		},
 		{
 			name: "tls-port",
 			session: func(t *testing.T) *client.Conn {
 				return rfcNewCertServer(t, certFile, keyFile, tlsCfg, &hFakeProcessor{}).dial(t)
 			},
-			present: append(append([]string{}, base...), "STREAMING"),
-			never:   []string{"STARTTLS"},
+			present: base,
+			never:   []string{"STARTTLS", "IHAVE", "STREAMING"},
 		},
 		{
 			name: "after-starttls",
@@ -424,8 +452,8 @@ func TestRfcCapabilities(t *testing.T) {
 				rfcUpgrade(t, c)
 				return c
 			},
-			present: append(append([]string{}, base...), "STREAMING"),
-			never:   []string{"STARTTLS"},
+			present: base,
+			never:   []string{"STARTTLS", "IHAVE", "STREAMING"},
 		},
 	}
 	for _, tc := range cases {
@@ -452,20 +480,26 @@ func TestRfcCapabilities(t *testing.T) {
 func TestRfcStreamingConsistent(t *testing.T) {
 	postUser, postPass := hUser(t, true, true)
 	readUser, readPass := hUser(t, false, true)
+	peerReg, _ := hPeerIP("")
+	loginReg, _, _ := hPeerLogin(t, "127.0.0.1")
 	for _, tc := range []struct {
 		name      string
 		proc      bool
+		peers     *PeerRegistry
 		user      string
 		pass      string
 		streaming bool
 	}{
-		{"processor-unauthenticated", true, "", "", true},
-		{"posting-user", true, postUser, postPass, true},
-		{"user-without-posting", true, readUser, readPass, false},
-		{"no-processor", false, "", "", false},
+		// plan nntp-peering: STREAMING is a peer-only capability
+		{"peer", true, peerReg, "", "", true},
+		{"no-peers", true, nil, "", "", false},
+		{"peer-login-pending", true, loginReg, "", "", false},
+		{"posting-user", true, nil, postUser, postPass, false},
+		{"user-without-posting", true, nil, readUser, readPass, false},
+		{"no-processor", false, peerReg, "", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			opts := hServerOpts{}
+			opts := hServerOpts{Peers: tc.peers}
 			if tc.proc {
 				opts.Proc = &hFakeProcessor{}
 			}
@@ -482,6 +516,10 @@ func TestRfcStreamingConsistent(t *testing.T) {
 			}
 			if has != tc.streaming {
 				t.Fatalf("STREAMING listed=%v, want %v (MODE STREAM %q)", has, tc.streaming, line)
+			}
+			// IHAVE is listed under the same condition (plan nntp-peering)
+			if ihave := rfcHasLabel(caps, "IHAVE"); ihave != tc.streaming {
+				t.Fatalf("IHAVE listed=%v, want %v: %q", ihave, tc.streaming, caps)
 			}
 		})
 	}

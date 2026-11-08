@@ -26,6 +26,8 @@ type ClientConnection struct {
 	authenticated  bool
 	user           *models.NNTPUser // Currently authenticated NNTP user
 	authUsername   string           // Username from AUTHINFO USER command
+	peer           *models.Peer     // the peer of a peer connection (plan nntp-peering), else nil
+	peerLoggedIn   bool             // a peer login succeeded on this connection (AUTHINFO is done)
 	currentGroup   string
 	currentFirst   int64
 	currentLast    int64
@@ -58,6 +60,10 @@ func (c *ClientConnection) Handle() error {
 	// Evaluated at the end, not now: STARTTLS replaces c.textConn, and closing the
 	// current one sends the TLS close_notify (T-rfc-commands-2).
 	defer func() { _ = c.textConn.Close() }()
+
+	// A peer without a login is recognised by its address before the greeting (plan
+	// nntp-peering); peers with a login follow in handleAuthInfo.
+	c.resolvePeer()
 
 	// Send welcome message
 	if err := c.sendWelcome(); err != nil {
@@ -238,9 +244,14 @@ func (c *ClientConnection) getServerCapabilities() []string {
 	}
 	capabilities = append(capabilities, "LIST ACTIVE NEWSGROUPS OVERVIEW.FMT HEADERS", "XOVER", "XHDR", "OVER MSGID", "HDR")
 	if c.postingAllowed() {
-		capabilities = append(capabilities, "POST", "IHAVE")
+		capabilities = append(capabilities, "POST")
 	}
-	if c.streamingAllowed() { // == postingAllowed(): RFC 4644 §2.2
+	// IHAVE and STREAMING are listed on a peer connection only (plan nntp-peering): a
+	// client that may not feed must not be told to try.
+	if c.feedAllowed() {
+		capabilities = append(capabilities, "IHAVE")
+	}
+	if c.streamingAllowed() { // == feedAllowed(): RFC 4644 §2.2
 		capabilities = append(capabilities, "STREAMING")
 	}
 	if c.starttlsAvailable() { // cert configured, plaintext, before AUTHINFO: RFC 4642 §2.2.2
