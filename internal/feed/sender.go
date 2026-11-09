@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/models"
+	"github.com/go-while/go-pugleaf/internal/peerstats"
 )
 
 // Defaults of the Config fields; a zero field takes the default.
@@ -101,6 +102,9 @@ type Config struct {
 
 	Clock Clock  // nil: the real time
 	Dial  Dialer // nil: DialPeer with the timeouts below
+	// Stats counts the outgoing traffic per peer and hour (plan peering-stats); nil counts
+	// nothing (peerstats.Nop). The per-peer counters of Stats/feed_stats are kept as well.
+	Stats peerstats.Collector
 
 	PollInterval   time.Duration
 	ReloadInterval time.Duration
@@ -120,6 +124,9 @@ type Config struct {
 func (cfg Config) withDefaults() Config {
 	if cfg.Clock == nil {
 		cfg.Clock = realClock{}
+	}
+	if cfg.Stats == nil {
+		cfg.Stats = peerstats.Nop
 	}
 	if cfg.PollInterval <= 0 {
 		cfg.PollInterval = DefaultPollInterval
@@ -518,6 +525,51 @@ func newPeerFeed(s *Sender, p *models.Peer) *peerFeed {
 	}
 }
 
+// ref names this peer in the peering statistics (plan peering-stats).
+func (pf *peerFeed) ref() peerstats.PeerRef {
+	return peerstats.PeerRef{ID: pf.peer.ID, Name: pf.peer.Name}
+}
+
+// connStats accumulates the statistics counters of one sender connection, so Closed can
+// report the totals of that connection. Only the worker goroutine that owns the connection
+// touches it, so it needs no lock.
+type connStats struct {
+	start time.Time
+	total peerstats.Counters
+}
+
+// addStats counts delta for this peer in the peering statistics, and in the totals of the
+// open connection when cs is not nil (a counter that belongs to no connection, a missing
+// article or a failed connect, passes nil). It is never called while pf.mu is held.
+func (pf *peerFeed) addStats(cs *connStats, delta peerstats.Counters) {
+	if delta.IsZero() {
+		return
+	}
+	if cs != nil {
+		cs.total.Add(delta)
+	}
+	pf.s.cfg.Stats.Add(pf.ref(), peerstats.Out, delta)
+}
+
+// statsConnected opens the statistics of one sender connection.
+func (pf *peerFeed) statsConnected() *connStats {
+	pf.s.cfg.Stats.Connected(pf.ref(), peerstats.Out, fmt.Sprintf("%s:%d", pf.peer.OutHost, pf.port()))
+	return &connStats{start: pf.s.now()}
+}
+
+// statsClosed closes the statistics of one sender connection (its totals and how long it
+// was open).
+func (pf *peerFeed) statsClosed(cs *connStats) {
+	if cs == nil {
+		return
+	}
+	dur := pf.s.now().Sub(cs.start)
+	if dur < 0 {
+		dur = 0
+	}
+	pf.s.cfg.Stats.Closed(pf.ref(), peerstats.Out, cs.total, dur)
+}
+
 func (pf *peerFeed) port() int {
 	if pf.peer.OutPort > 0 {
 		return pf.peer.OutPort
@@ -632,10 +684,12 @@ func (pf *peerFeed) connWorker(idx int) {
 		t         Transport
 		connFails int
 		idleSince time.Time
+		cs        *connStats // the statistics of the open connection (plan peering-stats)
 	)
 	defer func() {
 		if t != nil {
 			pf.dropConn(idx, t)
+			pf.statsClosed(cs)
 		}
 	}()
 	for {
@@ -658,7 +712,8 @@ func (pf *peerFeed) connWorker(idx int) {
 			}
 			if t != nil && now.Sub(idleSince) >= pf.s.cfg.IdleClose {
 				pf.dropConn(idx, t)
-				t = nil
+				pf.statsClosed(cs)
+				t, cs = nil, nil
 			}
 			if !pf.sleep(pf.s.cfg.PollInterval) {
 				return
@@ -678,7 +733,7 @@ func (pf *peerFeed) connWorker(idx int) {
 		for _, it := range items {
 			attempts[it.MessageID] = it.Attempts
 		}
-		out, done, deferred := pf.load(items)
+		out, done, deferred := pf.load(items, cs)
 		pf.finish(done, deferred, attempts)
 		if pf.stopping() {
 			return // the rest of the batch stays claimed
@@ -693,6 +748,11 @@ func (pf *peerFeed) connWorker(idx int) {
 				return // the batch stays claimed, see above
 			}
 			if err != nil {
+				if isPeerDenied(err) {
+					// The peer refuses our feed (502/480): visible as Denied, so the
+					// backlog below has a reason (plan peering-stats).
+					pf.addStats(nil, peerstats.Counters{Denied: 1})
+				}
 				pf.deferAll(out, attempts, err.Error())
 				pf.setLastError(err.Error())
 				connFails++
@@ -704,14 +764,16 @@ func (pf *peerFeed) connWorker(idx int) {
 				continue
 			}
 			connFails = 0
+			cs = pf.statsConnected()
 		}
 
-		if pf.sendBatch(t, out, attempts) {
+		if pf.sendBatch(t, out, attempts, cs) {
 			continue
 		}
 		// The connection is unusable: close it and wait before the next connect.
 		pf.dropConn(idx, t)
-		t = nil
+		pf.statsClosed(cs)
+		t, cs = nil, nil
 		connFails++
 		if !pf.sleep(pf.backoff(connFails - 1)) {
 			return
@@ -773,13 +835,16 @@ func backoffDelay(n int, base, max time.Duration) time.Duration {
 // runs of at most BatchBytes octets (one article always goes alone when it is larger), so a
 // batch of large articles does not sit in one pipeline. It returns false when the connection
 // must be closed; the articles of the runs that were not sent are deferred with that reason.
-func (pf *peerFeed) sendBatch(t Transport, out []Outgoing, attempts map[string]int) bool {
+func (pf *peerFeed) sendBatch(t Transport, out []Outgoing, attempts map[string]int, cs *connStats) bool {
 	for len(out) > 0 {
 		run := pf.byteRun(out)
-		ok, err := pf.sendRun(t, out[:run], attempts)
+		ok, err := pf.sendRun(t, out[:run], attempts, cs)
 		if ok {
 			out = out[run:]
 			continue
+		}
+		if isPeerDenied(err) {
+			pf.addStats(cs, peerstats.Counters{Denied: 1}) // the peer refuses our feed
 		}
 		pf.setLastError(err.Error())
 		log.Printf("[FEED] peer %s: %s connection lost: %v", pf.peer.Name, t.Mode(), err)
@@ -810,9 +875,9 @@ func (pf *peerFeed) byteRun(out []Outgoing) int {
 }
 
 // sendRun offers one run of articles and acknowledges every one of them.
-func (pf *peerFeed) sendRun(t Transport, out []Outgoing, attempts map[string]int) (bool, error) {
+func (pf *peerFeed) sendRun(t Transport, out []Outgoing, attempts map[string]int, cs *connStats) (bool, error) {
 	res, offered, err := t.Send(out)
-	pf.record(res, offered, err == nil)
+	pf.record(out, res, offered, err == nil, cs)
 	var (
 		done     []string
 		deferred []deferItem
@@ -869,12 +934,14 @@ func (pf *peerFeed) deferAll(out []Outgoing, attempts map[string]int, reason str
 	pf.mu.Lock()
 	pf.stats.Deferred += int64(len(deferred))
 	pf.mu.Unlock()
+	pf.addStats(nil, peerstats.Counters{Deferred: int64(len(deferred))})
 }
 
 // load reads the articles of a batch from their newsgroups (one query per newsgroup). An
 // article that is not stored any more (expired or deleted) is finished with a log line; a
 // newsgroup that cannot be read is temporary, so its items are deferred.
-func (pf *peerFeed) load(items []Item) (out []Outgoing, done []string, deferred []deferItem) {
+func (pf *peerFeed) load(items []Item, cs *connStats) (out []Outgoing, done []string, deferred []deferItem) {
+	var missing int64
 	byGroup := make(map[string][]int, 4)
 	for i, it := range items {
 		byGroup[it.Newsgroup] = append(byGroup[it.Newsgroup], i)
@@ -930,10 +997,13 @@ func (pf *peerFeed) load(items []Item) (out []Outgoing, done []string, deferred 
 			log.Printf("[FEED] peer %s: %s is no longer stored in %s: dropped from the queue",
 				pf.peer.Name, it.MessageID, it.Newsgroup)
 			done = append(done, it.MessageID)
+			missing++
 			continue
 		}
 		out = append(out, Outgoing{Article: a, Newsgroup: it.Newsgroup})
 	}
+	// Articles that are gone from the database are the innfeed "missing" counter.
+	pf.addStats(cs, peerstats.Counters{Missing: missing})
 	return out, done, deferred
 }
 
@@ -946,24 +1016,36 @@ func hasDefer(deferred []deferItem, id string) bool {
 	return false
 }
 
-// record adds the verdicts of one run to the peer's counters. A run that the peer answered for
-// every article, with nothing deferred or dropped, clears the last error: the feed works again.
-func (pf *peerFeed) record(res []Result, offered int, connOK bool) {
+// record adds the verdicts of one run to the peer's counters (and to the peering statistics,
+// where the sizes of out carry the accepted and rejected octets). A run that the peer answered
+// for every article, with nothing deferred or dropped, clears the last error: the feed works
+// again. out is index-aligned with res.
+func (pf *peerFeed) record(out []Outgoing, res []Result, offered int, connOK bool, cs *connStats) {
+	delta := peerstats.Counters{Offered: int64(offered)}
 	pf.mu.Lock()
-	defer pf.mu.Unlock()
 	pf.stats.Offered += int64(offered)
 	clean := connOK && len(res) > 0
-	for _, r := range res {
+	for i, r := range res {
+		var size int64
+		if i < len(out) {
+			size = statsArticleBytes(out[i])
+		}
 		switch r.Code {
 		case 235, 239:
 			pf.stats.Accepted++
+			delta.Accepted++
+			delta.AccBytes += size
 		case 435, 438:
 			pf.stats.Refused++
+			delta.Refused++
 		case 437, 439:
 			pf.stats.Rejected++
+			delta.Rejected++
+			delta.RejBytes += size
 		default:
 			if r.Outcome == OutcomeDefer {
 				pf.stats.Deferred++
+				delta.Deferred++
 			}
 		}
 		if r.Outcome != OutcomeDone || r.Err != "" {
@@ -976,6 +1058,20 @@ func (pf *peerFeed) record(res []Result, offered int, connOK bool) {
 	if clean {
 		pf.stats.LastError = ""
 	}
+	pf.mu.Unlock()
+	pf.addStats(cs, delta) // never under pf.mu
+}
+
+// statsArticleBytes is the size of one outgoing article for the statistics: the wire size
+// the intake counted, or the stored header block and body when the row has none.
+func statsArticleBytes(o Outgoing) int64 {
+	if o.Article == nil {
+		return 0
+	}
+	if o.Article.Bytes > 0 {
+		return int64(o.Article.Bytes)
+	}
+	return int64(len(o.Article.HeadersJSON) + len(o.Article.BodyText))
 }
 
 // markBadGroup records that this newsgroup could not be read and reports whether this is the
@@ -1039,6 +1135,8 @@ func (pf *peerFeed) flush(final bool) {
 	if derr != nil {
 		log.Printf("[FEED] peer %s: queue depth failed: %v", pf.peer.Name, derr)
 		pf.setLastError("queue depth: " + derr.Error())
+	} else {
+		pf.s.cfg.Stats.SetQueue(pf.ref(), depth) // plan peering-stats
 	}
 	pf.mu.Lock()
 	st := pf.stats

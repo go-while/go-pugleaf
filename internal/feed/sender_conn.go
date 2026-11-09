@@ -140,6 +140,30 @@ func DialPeer(p *models.Peer, o DialOptions) (Transport, error) {
 // errConnLost is the transport's "the connection is gone" error.
 var errConnLost = errors.New("feed: connection lost")
 
+// deniedErr marks an error the peer caused by refusing our feed (480 or 502 on the greeting,
+// IHAVE or CHECK): the sender counts it as Denied in the peering statistics (plan
+// peering-stats) and otherwise treats it like any other connection error. Its message is the
+// wrapped one, so nothing in the log or in the item's last_error changes.
+type deniedErr struct{ err error }
+
+func (d *deniedErr) Error() string { return d.err.Error() }
+func (d *deniedErr) Unwrap() error { return d.err }
+
+// denied wraps err as a refusal of our feed when code says so, and returns it unchanged
+// otherwise.
+func denied(code int, err error) error {
+	if err == nil || (code != 480 && code != 502) {
+		return err
+	}
+	return &deniedErr{err: err}
+}
+
+// isPeerDenied reports whether err is the peer refusing our feed.
+func isPeerDenied(err error) bool {
+	var d *deniedErr
+	return errors.As(err, &d)
+}
+
 // sendableMessageID reports whether an id may be put on the wire at all (the client refuses
 // the rest before writing anything; an id that reaches here invalid can never be sent).
 func sendableMessageID(id string) bool { return common.ValidMessageID(id) }
@@ -244,7 +268,7 @@ func (t *streamTransport) Send(arts []Outgoing) ([]Result, int, error) {
 			res[i] = Result{MessageID: id, Code: code, Outcome: OutcomeDone}
 		default:
 			// 480, 500, 501, 502, 403: the peer does not take CHECK from us (any more).
-			err := fmt.Errorf("feed: peer %s: CHECK %s answered %d", t.peerName, id, code)
+			err := denied(code, fmt.Errorf("feed: peer %s: CHECK %s answered %d", t.peerName, id, code))
 			t.fail(res, checked[n:], err)
 			return res, offered, err
 		}
@@ -410,7 +434,7 @@ func (t *ihaveTransport) Send(arts []Outgoing) ([]Result, int, error) {
 			if code != 0 {
 				offered++
 			}
-			perr := fmt.Errorf("feed: peer %s: IHAVE %s: %w", t.peerName, id, err)
+			perr := denied(code, fmt.Errorf("feed: peer %s: IHAVE %s: %w", t.peerName, id, err))
 			res[i] = Result{MessageID: id, Code: 0, Outcome: OutcomeDefer, Err: perr.Error()}
 			return res, offered, perr
 		}
