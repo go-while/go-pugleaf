@@ -27,9 +27,13 @@
   <div class="col-12">
     <div class="card">
       <div class="card-header bg-dark text-white">
-        <div class="d-flex justify-content-between align-items-center">
+        <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
           <h5 class="card-title mb-0">🤝 NNTP Peers</h5>
-          <span class="badge bg-light text-dark">{{len .Peers}} peers</span>
+          <div class="d-flex align-items-center gap-2">
+            <!-- What the peers sent us and what we sent them, per hour (plan peering-stats). -->
+            <a href="/admin/peers/stats" class="btn btn-sm btn-light" title="what peers send us and what we send them">📊 Statistics</a>
+            <span class="badge bg-light text-dark">{{len .Peers}} peers</span>
+          </div>
         </div>
       </div>
       <div class="card-body">
