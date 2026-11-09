@@ -132,7 +132,6 @@ type SQ3batch struct {
 	TmpTasksChans      chan chan *BatchTasks  // holds temporary batchTasks channels
 	TmpArticleSlices   chan []*models.Article // holds temporary article slices
 	TmpStringSlices    chan []string          // holds temporary string slices for valuesClauses, messageIDs etc
-	TmpStringPtrSlices chan []*string         // holds temporary string slices for valuesClauses, messageIDs etc
 	TmpInterfaceSlices chan []interface{}     // holds temporary interface slices for args in threading operations
 	queued             int                    // articles routed into a BATCHchan and not yet batched (GMux); counted per article by BatchDivider
 	LimitChan          chan struct{}          // limits number of concurrent db batch threads
@@ -206,7 +205,6 @@ func NewSQ3batch(db *Database) *SQ3batch {
 		TmpTasksChans:      make(chan chan *BatchTasks, 128),
 		TmpArticleSlices:   make(chan []*models.Article, 128),
 		TmpStringSlices:    make(chan []string, 128),
-		TmpStringPtrSlices: make(chan []*string, 128),
 		TmpInterfaceSlices: make(chan []interface{}, 128),
 		LimitChan:          make(chan struct{}, db.dbconfig.MaxDBthreads),
 		LPending:           make(chan struct{}, 1),
@@ -616,28 +614,6 @@ func (sq *SQ3batch) returnStringSlice(slice []string) {
 	}
 }
 
-func (sq *SQ3batch) getOrCreateStringPtrSlice() []*string {
-	select {
-	case retslice := <-sq.TmpStringPtrSlices:
-		return retslice
-	default:
-	}
-	return make([]*string, 0, sq.maxDBbatch)
-}
-
-func (sq *SQ3batch) returnStringPtrSlice(slice []*string) {
-	// Clear the slice contents
-	for i := range slice {
-		slice[i] = nil
-	}
-	slice = slice[:0]
-	select {
-	case sq.TmpStringPtrSlices <- slice:
-	default:
-		// Pool is full, discard the slice
-	}
-}
-
 func (sq *SQ3batch) returnInterfaceSlice(slice []interface{}) {
 	// Clear the slice contents
 	for i := range slice {
@@ -970,9 +946,9 @@ retry1:
 	// PHASE 2: Process threading for all articles (reusing the same DB connection)
 	//log.Printf("[BATCH] processNewsgroupBatch Starting threading phase for %d articles in group '%s'", len(batches), *task.Newsgroup)
 	//start := time.Now()
-	// There is no retry loop here, by decision (E6). batchProcessThreading logs the failures
-	// of batchProcessThreadRoots/batchProcessReplies ("Continue processing - don't fail the
-	// whole batch") and returns nil on every path, so the retry2 loop this line used to carry
+	// There is no retry loop here, by decision (E6). batchProcessThreading logs the failures of
+	// its own phases (the threads rows, the thread caches, the reply counts) and returns nil on
+	// every path, so the retry2 loop this line used to carry
 	// - its own shutdown clock, its attempt counter and a group database reacquire - could
 	// never be entered, and the "committed without threading/history/stats (rebuild needed)"
 	// it logged promised a state that cannot occur: control falls straight through into
@@ -1344,236 +1320,473 @@ func (sq *SQ3batch) processOverviewBatch(groupDB *GroupDB, batches []*models.Art
 	return nil
 }
 
-// batchProcessThreading processes all threading operations using existing GroupDB connection
+// threadIntakeCandidate is one article of a batch that really got an article number in this
+// group, with the fields the per-group threading rule needs. They are read once, under the
+// article lock, so the rule itself runs without holding any article mutex (a database lookup
+// per reference may sit in RetryableStmtQueryRowScan's backoff).
+type threadIntakeCandidate struct {
+	articleNum int64
+	messageID  string
+	refs       []string
+	dateSent   time.Time
+}
+
+// threadIntakeRow is the threads row one candidate turns into: a root of this group
+// (parent == 0, root == articleNum, depth 0) or a reply (parent > 0, depth = parent's + 1).
+// It is the row shape the rebuild writes too (db_rescan.go), so in-order intake and a rebuild
+// produce the same threads table.
+type threadIntakeRow struct {
+	articleNum int64
+	root       int64
+	parent     int64 // 0: this article is a thread root in this group
+	depth      int
+	dateSent   time.Time
+}
+
+// threadIntakePlacement is where an article already stored in this group sits in one of its
+// threads: its number, its thread root and its own depth.
+type threadIntakePlacement struct {
+	articleNum int64
+	root       int64
+	depth      int
+}
+
+// threadIntakeLink is what the reference walk found for one candidate: its parent, either an
+// article of this same batch (batchParent, an index into the candidates) or one already stored
+// and threaded in the group (dbParent). messageID is that parent's message-id, which is what
+// articles.reply_count is keyed by. No parent: batchParent -1, dbParent zero, messageID "".
+type threadIntakeLink struct {
+	batchParent int
+	dbParent    threadIntakePlacement
+	messageID   string
+}
+
+// threadIntakePlan is a batch's threading work: the threads rows to write and, per parent
+// message-id, how many direct replies this batch adds to it.
+type threadIntakePlan struct {
+	roots        []threadIntakeRow
+	replies      []threadIntakeRow
+	parentCounts map[string]int
+}
+
+// query_threadIntakeLookup answers "which thread of THIS group is the article with this
+// message-id in, and at what depth?". A root's own row is (root, NULL, root, 0), so the join on
+// child_article covers roots and replies alike; idx_threads_child (migration 0001) serves it.
+// An article of this group that is in no thread (stored before this rule existed, or its
+// batch's threading write failed) has no row and counts as not found, exactly like a message-id
+// this group never carried.
+const query_threadIntakeLookup = `SELECT t.root_article, t.depth, a.article_num FROM articles a JOIN threads t ON t.child_article = a.article_num WHERE a.message_id = ? LIMIT 1`
+
+// batchProcessThreading threads a committed batch inside its group, using the existing GroupDB
+// connection.
+//
+// The rule is per group, not per article (plan thread-orphan-followups): an article whose
+// References name no article of THIS group that is in a thread is a thread root here, with or
+// without a References header; otherwise it joins the thread of the nearest referenced article
+// (refs walked last to first, the batch's own articles first, then the group database). That is
+// what newsreaders show for a follow-up whose thread lives in another group, for an
+// out-of-order import and for trimmed References (RFC 5537 3.4.4), and it is the rule the
+// rebuild applies.
+//
+// models.Article.IsThrRoot/IsReply stay header facts ("has a References header"): they are set
+// once per article by the processor and cannot express a per-group answer for a crosspost, so
+// the decision here is local to the batch.
+//
+// No re-parenting: an article placed as a root stays a root when its parent arrives in a later
+// batch (pinned decision; recover-db -rebuild-threads merges them).
+//
+// It returns nil on every path, by decision (E6): see the PHASE 2 call site in
+// processNewsgroupBatch. Threading is derived data a rescan rebuilds, so a failure here must
+// not cost the batch its history entries and newsgroup counters.
 func (sq *SQ3batch) batchProcessThreading(taskNewsgroup *string, batches []*models.Article, groupDB *GroupDB) error {
 	if len(batches) == 0 {
 		return nil
 	}
 	//log.Printf("[THR-BATCH] group '%s': %d articles to process", *taskNewsgroup, len(batches))
-	roots, replies := 0, 0
+	candidates := make([]threadIntakeCandidate, 0, len(batches))
 	for _, article := range batches {
 		if article == nil {
 			continue
 		}
 		article.Mux.RLock()
-		if article.ArticleNums[taskNewsgroup] <= 0 {
+		articleNum := article.ArticleNums[taskNewsgroup]
+		if articleNum <= 0 {
 			// when reaching here, we got a duplicate in remote servers overview and we already processed the article earlier...
 			log.Printf("[THR-BATCH] INFO: Did not insert into '%s' skipping msgId='%s'", *taskNewsgroup, article.MessageID)
 			article.Mux.RUnlock()
 			continue
 		}
-		if article.IsThrRoot && !article.IsReply {
-			roots++
-		} else if article.IsReply && !article.IsThrRoot {
-			replies++
-		}
+		candidates = append(candidates, threadIntakeCandidate{
+			articleNum: articleNum,
+			messageID:  article.MessageID,
+			refs:       article.RefSlice,
+			dateSent:   article.DateSent,
+		})
 		article.Mux.RUnlock()
 	}
+	if len(candidates) == 0 {
+		return nil
+	}
 
-	// Process thread roots first (they need to exist before replies can reference them)
-	if roots > 0 {
-		if err := sq.batchProcessThreadRoots(groupDB, batches, taskNewsgroup); err != nil {
+	// Oldest first, article number breaking the tie. This is the order the threads rows are
+	// written in and the order the thread caches list a thread's children in; placement itself
+	// does NOT depend on it (batchThreadPlacements sees the whole batch at once), because a
+	// poster's clock or an importer's missing Date can put a parent behind its own reply.
+	slices.SortStableFunc(candidates, func(a, b threadIntakeCandidate) int {
+		if a.dateSent.Before(b.dateSent) {
+			return -1
+		}
+		if b.dateSent.Before(a.dateSent) {
+			return 1
+		}
+		if a.articleNum < b.articleNum {
+			return -1
+		}
+		if a.articleNum > b.articleNum {
+			return 1
+		}
+		return 0
+	})
+
+	plan, err := sq.batchThreadPlacements(groupDB, candidates)
+	if err != nil {
+		log.Printf("[THR-BATCH] group '%s': Failed to place %d articles in their threads: %v", *taskNewsgroup, len(candidates), err)
+		return nil
+	}
+
+	// One transaction for the batch's threads rows, roots and replies together: a reply row
+	// whose root row was rolled back would name a thread that does not exist.
+	if err := sq.batchInsertThreadRows(groupDB, plan.roots, plan.replies); err != nil {
+		// Logged per kind so the line names what is missing from the threads table. The caller
+		// swallows this (see above); a rescan rebuilds it.
+		if len(plan.roots) > 0 {
 			log.Printf("[THR-BATCH] group '%s': Failed to batch process thread roots: %v", *taskNewsgroup, err)
-			// Continue processing - don't fail the whole batch
 		}
+		if len(plan.replies) > 0 {
+			log.Printf("[THR-BATCH] group '%s': Failed to batch process replies: %v", *taskNewsgroup, err)
+		}
+		return nil
 	}
 
-	// Process replies
-	if replies > 0 {
-		if err := sq.batchProcessReplies(groupDB, batches, taskNewsgroup); err != nil {
-			log.Printf("[THR-BATCH] group '%s': Failed to batch process replies: %v", *taskNewsgroup, err)
-			// Continue processing - don't fail the whole batch
-		}
-	}
+	// Caches after the commit, roots before replies: batchUpdateThreadCache appends a reply to
+	// its root's row and would otherwise create that row from the reply's own date.
+	sq.batchInitRootThreadCaches(groupDB, plan.roots)
+	sq.batchProcessReplies(groupDB, plan.replies, plan.parentCounts)
 
 	return nil
+}
+
+// batchThreadPlacements applies the per-group rule to the whole batch at once and returns its
+// threads rows. plan.parentCounts counts the direct replies this batch adds per parent
+// message-id, and only for parents that really are in this group: it is what
+// articles.reply_count is bumped by.
+//
+// The result does not depend on the order of candidates: the batch's own articles are indexed
+// by message-id before anything is placed, so a parent whose Date (or article number) puts it
+// behind its own reply is still found. Only the order of the returned rows is the caller's sort
+// order. That independence is what makes an in-order intake and a rebuild agree.
+//
+// The lookup statement is prepared at most once per batch, on the first reference neither the
+// batch nor the negative cache can answer, and closed before returning: a batch of articles
+// without References (or one whose parents all arrived with it) needs no statement at all.
+func (sq *SQ3batch) batchThreadPlacements(groupDB *GroupDB, candidates []threadIntakeCandidate) (threadIntakePlan, error) {
+	plan := threadIntakePlan{
+		roots:        make([]threadIntakeRow, 0, len(candidates)),
+		replies:      make([]threadIntakeRow, 0, len(candidates)),
+		parentCounts: make(map[string]int, len(candidates)),
+	}
+	n := len(candidates)
+
+	// Every article of this batch is visible to every other one, whatever order they are
+	// written in. First wins: a message-id cannot be in one batch twice (the second copy is an
+	// ignored duplicate with no article number), but first-wins keeps the index in step with
+	// the rows that are written.
+	index := make(map[string]int, n)
+	for i := range candidates {
+		if _, dup := index[candidates[i].messageID]; !dup {
+			index[candidates[i].messageID] = i
+		}
+	}
+
+	// Pass 1: each candidate's parent is the nearest reference that names an article of this
+	// group - one of this batch, or one already stored and threaded here. Only the parent: the
+	// thread root and the depth follow from it in pass 2, because an in-batch parent may itself
+	// be unplaced at this point.
+	links := make([]threadIntakeLink, n)
+	// Refs this group does not carry, remembered for the rest of the batch: the articles of one
+	// batch share their ancestry, so the same dead reference would otherwise be looked up again
+	// for every one of them.
+	missing := make(map[string]struct{}, n)
+	var lookup *sql.Stmt
+	defer func() {
+		if lookup != nil {
+			lookup.Close()
+		}
+	}()
+	for i := range candidates {
+		links[i].batchParent = -1
+		candidate := &candidates[i]
+		// Nearest reference first: the last reference is the article this one answers.
+		for r := len(candidate.refs) - 1; r >= 0; r-- {
+			ref := candidate.refs[r]
+			if ref == candidate.messageID {
+				continue // a self-reference is no parent (the rebuild makes such an article a root too)
+			}
+			if parent, ok := index[ref]; ok {
+				links[i].batchParent = parent
+				links[i].messageID = ref
+				break
+			}
+			// Checked after the batch, so a reference the batch carries is never taken for a
+			// dead one, whatever order the two candidates are in.
+			if _, dead := missing[ref]; dead {
+				continue
+			}
+			if lookup == nil {
+				stmt, err := groupDB.DB.Prepare(query_threadIntakeLookup)
+				if err != nil {
+					return plan, fmt.Errorf("failed to prepare thread lookup statement: %w", err)
+				}
+				lookup = stmt
+			}
+			var rootArticle, parentNum int64
+			var parentDepth int
+			err := RetryableStmtQueryRowScan(lookup, []interface{}{ref}, &rootArticle, &parentDepth, &parentNum)
+			if err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					// This group does not carry that reference, or it is in no thread.
+					missing[ref] = struct{}{}
+					continue
+				}
+				// Not a missing row, and no retry left: the walk cannot tell a root from a reply
+				// any more, and guessing would file the article under a thread it may not belong
+				// to. Fail the batch's threading instead - the articles are committed and a
+				// rescan rebuilds the threads.
+				return plan, fmt.Errorf("thread lookup for reference '%s' of msgId='%s' failed: %w", ref, candidate.messageID, err)
+			}
+			if parentNum <= 0 || rootArticle <= 0 {
+				// A threads row that points at nothing (a hand-repaired database): ignore it
+				// rather than write a reply row hanging off article 0.
+				log.Printf("[THR-BATCH] group '%s': reference '%s' of msgId='%s' resolves to article %d in thread %d, ignoring it",
+					groupDB.Newsgroup, ref, candidate.messageID, parentNum, rootArticle)
+				missing[ref] = struct{}{}
+				continue
+			}
+			links[i].dbParent = threadIntakePlacement{articleNum: parentNum, root: rootArticle, depth: parentDepth}
+			links[i].messageID = ref
+			break
+		}
+	}
+
+	// Pass 2: the thread root and the depth, by following the in-batch parent chain with a memo
+	// (state) and the chain itself as the visited set (path). A chain that leads back into
+	// itself - a reference cycle an importer or a forged header produced - makes the article
+	// where the cycle is detected a root, as the rebuild does; without that guard the walk
+	// would not terminate. A chain that reaches a parent from the group database, or an article
+	// without a parent, ends there.
+	const (
+		threadIntakeUnresolved uint8 = iota
+		threadIntakeOnPath
+		threadIntakeResolved
+	)
+	state := make([]uint8, n)
+	parent := make([]int64, n)
+	root := make([]int64, n)
+	depth := make([]int, n)
+	path := make([]int, 0, n)
+	cycles := 0
+	for i := range candidates {
+		if state[i] == threadIntakeResolved {
+			continue
+		}
+		path = path[:0]
+		for node := i; ; node = links[node].batchParent {
+			if state[node] == threadIntakeResolved {
+				break // an earlier chain ended here
+			}
+			if state[node] == threadIntakeOnPath {
+				// The chain leads back to an article of this same walk: break it here, this one
+				// is a root. Its link is cleared so it is not counted as somebody's reply.
+				links[node] = threadIntakeLink{batchParent: -1}
+				parent[node], root[node], depth[node] = 0, candidates[node].articleNum, 0
+				state[node] = threadIntakeResolved
+				cycles++
+				break
+			}
+			state[node] = threadIntakeOnPath
+			path = append(path, node)
+			if links[node].dbParent.articleNum > 0 || links[node].batchParent < 0 {
+				break // the chain ends here: a parent of the group database, or no parent at all
+			}
+		}
+		// Deepest ancestor first, so every node's parent is resolved when the node is reached.
+		for k := len(path) - 1; k >= 0; k-- {
+			node := path[k]
+			if state[node] == threadIntakeResolved {
+				continue // the cycle breaker above already made it a root
+			}
+			switch {
+			case links[node].dbParent.articleNum > 0:
+				parent[node] = links[node].dbParent.articleNum
+				root[node] = links[node].dbParent.root
+				depth[node] = links[node].dbParent.depth + 1
+			case links[node].batchParent >= 0:
+				above := links[node].batchParent
+				parent[node] = candidates[above].articleNum
+				root[node] = root[above]
+				depth[node] = depth[above] + 1
+			default:
+				parent[node], root[node], depth[node] = 0, candidates[node].articleNum, 0
+			}
+			state[node] = threadIntakeResolved
+		}
+	}
+	if cycles > 0 {
+		log.Printf("[THR-BATCH] group '%s': %d article(s) of this batch reference themselves or close a reference cycle, each of them is a thread root", groupDB.Newsgroup, cycles)
+	}
+
+	for i := range candidates {
+		row := threadIntakeRow{
+			articleNum: candidates[i].articleNum,
+			root:       root[i],
+			parent:     parent[i],
+			depth:      depth[i],
+			dateSent:   candidates[i].dateSent,
+		}
+		if row.parent > 0 {
+			plan.replies = append(plan.replies, row)
+			plan.parentCounts[links[i].messageID]++
+		} else {
+			plan.roots = append(plan.roots, row)
+		}
+	}
+	return plan, nil
 }
 
 const query_batchProcessThreadRoots = "INSERT INTO threads (root_article, parent_article, child_article, depth, thread_order) VALUES (?, ?, ?, 0, 0)"
+const query_batchInsertThreadReplies = "INSERT INTO threads (root_article, parent_article, child_article, depth, thread_order) VALUES (?, ?, ?, ?, 0)"
 
-// batchProcessThreadRoots processes thread root articles in TRUE batch
-func (sq *SQ3batch) batchProcessThreadRoots(groupDB *GroupDB, rootBatches []*models.Article, taskNewsgroup *string) error {
-	if len(rootBatches) == 0 {
+// batchInsertThreadRows writes the batch's threads rows in one retryable transaction: the roots
+// first (they are the rows every later lookup and the thread cache key on), then the replies.
+// A busy database makes RetryableTransactionExec roll the whole batch back and run the closure
+// again, so a retry never doubles a row.
+func (sq *SQ3batch) batchInsertThreadRows(groupDB *GroupDB, roots, replies []threadIntakeRow) error {
+	if len(roots) == 0 && len(replies) == 0 {
 		return nil
 	}
-
-	// Use a transaction with prepared statement for cleaner, more efficient execution
-	tx, err := groupDB.DB.Begin()
+	err := RetryableTransactionExec(groupDB.DB, func(tx *sql.Tx) error {
+		if len(roots) > 0 {
+			stmt, err := tx.Prepare(query_batchProcessThreadRoots)
+			if err != nil {
+				return fmt.Errorf("failed to prepare root statement: %w", err)
+			}
+			defer stmt.Close()
+			for _, row := range roots {
+				// For thread roots, parent_article is NULL and depth is 0
+				if _, err := stmt.Exec(row.articleNum, nil, row.articleNum); err != nil {
+					return fmt.Errorf("failed to execute thread insert for root %d: %w", row.articleNum, err)
+				}
+			}
+		}
+		if len(replies) > 0 {
+			stmt, err := tx.Prepare(query_batchInsertThreadReplies)
+			if err != nil {
+				return fmt.Errorf("failed to prepare reply statement: %w", err)
+			}
+			defer stmt.Close()
+			for _, row := range replies {
+				if _, err := stmt.Exec(row.root, row.parent, row.articleNum, row.depth); err != nil {
+					return fmt.Errorf("failed to execute thread insert for reply %d: %w", row.articleNum, err)
+				}
+			}
+		}
+		return nil
+	})
 	if err != nil {
-		return fmt.Errorf("failed to begin transaction in batchProcessThreadRoots: %w", err)
+		return fmt.Errorf("failed to execute threads batch transaction: %w", err)
 	}
-	defer tx.Rollback()
-
-	// Prepare the INSERT statement once
-	stmt, err := tx.Prepare(query_batchProcessThreadRoots)
-	if err != nil {
-		return fmt.Errorf("failed to prepare statement in batchProcessThreadRoots: %w", err)
-	}
-	defer stmt.Close()
-
-	// Single loop: execute statement for each valid root article
-	processedCount := 0
-	var threadCacheEntries []struct {
-		articleNum int64
-		article    *models.Article
-	}
-
-	for _, article := range rootBatches {
-		if article == nil {
-			continue
-		}
-
-		article.Mux.RLock()
-		if article.ArticleNums[taskNewsgroup] <= 0 || !article.IsThrRoot {
-			article.Mux.RUnlock()
-			continue
-		}
-
-		articleNum := article.ArticleNums[taskNewsgroup]
-
-		// Execute the prepared statement directly - for thread roots, parent_article is NULL
-		_, err := stmt.Exec(articleNum, nil, articleNum) // root_article, parent_article, child_article
-		if err != nil {
-			article.Mux.RUnlock()
-			return fmt.Errorf("failed to execute thread insert in batchProcessThreadRoots for article %d: %w", articleNum, err)
-		}
-
-		// Collect data for post-processing OUTSIDE the transaction
-		threadCacheEntries = append(threadCacheEntries, struct {
-			articleNum int64
-			article    *models.Article
-		}{articleNum, article})
-
-		processedCount++
-		article.Mux.RUnlock()
-	}
-
-	if processedCount == 0 {
-		return nil // No articles were processed
-	}
-
-	// Commit the transaction BEFORE doing thread cache operations
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit transaction in batchProcessThreadRoots: %w", err)
-	}
-
-	// Do post-processing AFTER transaction is committed to avoid SQLite lock conflicts
-	for _, entry := range threadCacheEntries {
-		entry.article.Mux.RLock()
-		if err := sq.db.InitializeThreadCache(groupDB, entry.articleNum, entry.article); err != nil {
-			log.Printf("[P-BATCH] group '%s': Failed to initialize thread cache for root %d: %v", groupDB.Newsgroup, entry.articleNum, err)
-			// Don't fail the whole operation for cache errors
-		}
-		entry.article.Mux.RUnlock()
-	}
-
 	return nil
 }
 
-// batchProcessReplies processes reply articles in TRUE batch
-func (sq *SQ3batch) batchProcessReplies(groupDB *GroupDB, replyBatches []*models.Article, taskNewsgroup *string) error {
-	if len(replyBatches) == 0 {
-		return nil
+// batchInitRootThreadCaches initializes the thread cache of the batch's new roots. It runs
+// after the threads transaction has committed, to avoid SQLite lock conflicts, and a cache
+// error never fails the batch: a rescan rebuilds the cache.
+//
+// InitializeThreadCache reads the root's DateSent, nothing else, so it gets the snapshot the
+// placement was computed from instead of the live article: the batch holds no article mutex
+// across a database write, and the row cannot change under it either.
+func (sq *SQ3batch) batchInitRootThreadCaches(groupDB *GroupDB, roots []threadIntakeRow) {
+	for _, row := range roots {
+		snapshot := &models.Article{DateSent: row.dateSent}
+		if err := sq.db.InitializeThreadCache(groupDB, row.articleNum, snapshot); err != nil {
+			log.Printf("[P-BATCH] group '%s': Failed to initialize thread cache for root %d: %v", groupDB.Newsgroup, row.articleNum, err)
+			// Don't fail the whole operation for cache errors
+		}
 	}
-	parentMessageIDs := make(map[*string]int, sq.maxDBbatch) // Pre-allocate map with expected size
-	defer func() {
-		for k := range parentMessageIDs {
-			delete(parentMessageIDs, k)
-		}
-	}()
-	// Create replyData slice (keep as direct allocation since it contains complex struct)
-	replyData := make([]struct {
-		articleNum int64
-		threadRoot int64
-		childDate  time.Time
-	}, 0, len(replyBatches)) // Pre-allocate slice with capacity
+}
 
-	// Process each reply to gather data
-	preAllocThreadRoots := 0
-	for _, article := range replyBatches {
-		if article == nil {
-			continue
-		}
-
-		article.Mux.RLock()
-		if article.ArticleNums[taskNewsgroup] <= 0 || !article.IsReply {
-			article.Mux.RUnlock()
-			continue
-		}
-		//parentMessageID := article.RefSlice[len(article.RefSlice)-1] // Use the last reference as the parent
-		parentMessageIDs[&article.RefSlice[len(article.RefSlice)-1]]++
-
-		// Find thread root and collect data
-		var threadRoot int64
-		if root, err := sq.findThreadRoot(groupDB, article.RefSlice); err == nil {
-			threadRoot = root
-		}
-
-		replyData = append(replyData, struct {
-			articleNum int64
-			threadRoot int64
-			childDate  time.Time
-		}{article.ArticleNums[taskNewsgroup], threadRoot, article.DateSent})
-		if threadRoot > 0 {
-			preAllocThreadRoots++
-		}
-		article.Mux.RUnlock()
+// batchProcessReplies bumps articles.reply_count of the parents this batch found in the group
+// and appends the batch's replies to the thread cache of their roots. The threads rows are
+// committed by then; this is the derived state a rescan rebuilds, so a failure is logged, not
+// propagated.
+func (sq *SQ3batch) batchProcessReplies(groupDB *GroupDB, replies []threadIntakeRow, parentCounts map[string]int) {
+	if len(replies) == 0 {
+		return
 	}
 
 	// Batch update reply counts for articles table (single call since overview is unified)
-	if len(parentMessageIDs) > 0 {
-		if err := sq.batchUpdateReplyCounts(groupDB, parentMessageIDs); err != nil {
+	if len(parentCounts) > 0 {
+		if err := sq.batchUpdateReplyCounts(groupDB, parentCounts); err != nil {
 			log.Printf("[P-BATCH] group '%s': Failed to batch update article reply counts: %v", groupDB.Newsgroup, err)
 		}
 	}
 
-	if preAllocThreadRoots > 0 {
-		threadUpdates := make(map[int64][]threadCacheUpdateData, preAllocThreadRoots)
-		//log.Printf("[P-BATCH] group '%s': Pre-allocated thread updates map with capacity %d", groupDB.Newsgroup, preAllocThreadRoots)
-		for _, data := range replyData {
-			if data.threadRoot > 0 {
-				threadUpdates[data.threadRoot] = append(threadUpdates[data.threadRoot], threadCacheUpdateData{
-					childArticleNum: data.articleNum,
-					childDate:       data.childDate,
-				})
-			}
-		}
-
-		// Execute ALL thread cache updates in a single transaction
-		if len(threadUpdates) > 0 {
-			// batchUpdateReplyCounts above has already committed on its own connection, so a
-			// failure here leaves articles.reply_count counting these replies while
-			// thread_cache does not list them. Say so: it names what the operator has to
-			// rebuild, and the only other log that mentioned the hazard sat on the
-			// batchProcessThreading error branch, which never fires (E6).
-			if err := sq.batchUpdateThreadCache(groupDB, threadUpdates); err != nil {
-				log.Printf("[P-BATCH] group '%s': Failed to batch update thread cache for %d thread roots, articles.reply_count is already bumped for these replies and is not rebuilt by this path (a rescan repairs both): %v",
-					groupDB.Newsgroup, len(threadUpdates), err)
-			} else {
-				log.Printf("[P-BATCH] group '%s': Updated thread cache for %d thread roots", groupDB.Newsgroup, len(threadUpdates))
-			}
-		}
+	threadUpdates := make(map[int64][]threadCacheUpdateData, len(replies))
+	for _, row := range replies {
+		threadUpdates[row.root] = append(threadUpdates[row.root], threadCacheUpdateData{
+			childArticleNum: row.articleNum,
+			childDate:       row.dateSent,
+		})
 	}
 
-	return nil
+	// Execute ALL thread cache updates in a single transaction
+	if len(threadUpdates) > 0 {
+		// batchUpdateReplyCounts above has already committed on its own connection, so a
+		// failure here leaves articles.reply_count counting these replies while
+		// thread_cache does not list them. Say so: it names what the operator has to
+		// rebuild, and the only other log that mentioned the hazard sat on the
+		// batchProcessThreading error branch, which never fires (E6).
+		if err := sq.batchUpdateThreadCache(groupDB, threadUpdates); err != nil {
+			log.Printf("[P-BATCH] group '%s': Failed to batch update thread cache for %d thread roots, articles.reply_count is already bumped for these replies and is not rebuilt by this path (a rescan repairs both): %v",
+				groupDB.Newsgroup, len(threadUpdates), err)
+		} else {
+			log.Printf("[P-BATCH] group '%s': Updated thread cache for %d thread roots", groupDB.Newsgroup, len(threadUpdates))
+		}
+	}
 }
 
 var query_batchUpdateReplyCounts1 string = "WHEN message_id = ? THEN reply_count + ? "
 var query_batchUpdateReplyCounts2 string = "UPDATE articles SET reply_count = CASE %s END WHERE message_id IN (%s)"
 
-// batchUpdateReplyCounts performs batch update of reply counts using CASE WHEN
-func (sq *SQ3batch) batchUpdateReplyCounts(groupDB *GroupDB, parentCounts map[*string]int) error {
+// batchUpdateReplyCounts performs batch update of reply counts using CASE WHEN.
+//
+// parentCounts is keyed by the parent's message-id STRING. Keyed by a *string into each reply's
+// RefSlice it held one entry per reply, so two replies to one parent in a batch produced two
+// "WHEN message_id = ?" arms for the same id, of which SQLite's CASE applies only the first
+// (+1 instead of +2). Its parents are the ones the per-group walk really found in this group,
+// so the column counts the direct replies stored here.
+func (sq *SQ3batch) batchUpdateReplyCounts(groupDB *GroupDB, parentCounts map[string]int) error {
 	if len(parentCounts) == 0 {
 		return nil
 	}
 
 	// Get pooled slices to avoid repeated memory allocations
-	messageIDs := sq.getOrCreateStringPtrSlice()
+	messageIDs := sq.getOrCreateStringSlice()
 	args := sq.getOrCreateInterfaceSlice()
 
 	defer func() {
 		// Reset and return all to pools
-		sq.returnStringPtrSlice(messageIDs)
+		sq.returnStringSlice(messageIDs)
 		sq.returnInterfaceSlice(args)
 	}()
 
@@ -1599,29 +1812,37 @@ func (sq *SQ3batch) batchUpdateReplyCounts(groupDB *GroupDB, parentCounts map[*s
 	return err
 }
 
-// findThreadRootForBatch is a simplified version for batch processing
-func (sq *SQ3batch) findThreadRoot(groupDB *GroupDB, refs []string) (int64, error) {
-	if len(refs) == 0 || sq.proc == nil {
-		return 0, fmt.Errorf("no references or processor not available")
-	}
-	for i := len(refs) - 1; i >= 0; i-- {
-		refMessageID := refs[i]
+// findThreadRoot was deleted with the per-group rule: it asked "is this reference a thread ROOT
+// of this group?" (threads WHERE root_article = <the reference's number>), so a reply whose refs
+// named only local replies got no thread at all, and a reply to an orphan was lost as well.
+// batchThreadPlacements asks "is this reference in a thread of this group?" instead, which
+// covers roots and replies alike.
 
-		// Check if this article is a thread root with retryable logic
-		var rootArticle int64
-		threadQuery := `SELECT root_article FROM threads WHERE root_article = (SELECT article_num FROM articles WHERE message_id = ? LIMIT 1) LIMIT 1`
-		err := RetryableQueryRowScan(groupDB.DB, threadQuery, []interface{}{refMessageID}, &rootArticle)
-		if err == nil {
-			return rootArticle, nil
-		}
-	}
-
-	return 0, fmt.Errorf("could not find thread root for any reference")
-}
-
-const query_batchUpdateThreadCacheSelect = `SELECT child_articles, message_count FROM thread_cache WHERE thread_root = ?`
+// query_batchUpdateThreadCacheSelect reads the row this batch adds children to. It also reads
+// last_child_number and last_activity, because both are maxed with the batch's own values
+// instead of being overwritten by them (see below): they are nullable, and last_activity is a
+// DATETIME this writer stores as "2006-01-02 15:04:05" while older repairs left RFC3339, so
+// both are scanned NULL-safe and parsed with either layout.
+const query_batchUpdateThreadCacheSelect = `SELECT child_articles, message_count, last_child_number, last_activity FROM thread_cache WHERE thread_root = ?`
 const query_batchUpdateThreadCacheUpdate = `UPDATE thread_cache SET child_articles = ?, message_count = ?, last_child_number = ?, last_activity = ? WHERE thread_root = ?`
 const query_batchUpdateThreadCacheInsert = `INSERT INTO thread_cache (thread_root, root_date, message_count, child_articles, last_child_number, last_activity) VALUES (?, ?, 1, '', ?, ?) ON CONFLICT(thread_root) DO UPDATE SET root_date = excluded.root_date, last_child_number = excluded.last_child_number, last_activity = excluded.last_activity`
+
+// threadCacheParseActivity reads a stored thread_cache.last_activity. The zero time stands for
+// "no usable value" (NULL, or a string no layout matches), which makes the caller's max() fall
+// back to this batch's own newest child - the behaviour before last_activity was maxed at all.
+// The layouts are the two this schema has seen, in the order web_admin_newsgroups.go tries them.
+func threadCacheParseActivity(stored sql.NullString) time.Time {
+	if !stored.Valid {
+		return time.Time{}
+	}
+	if parsed, err := time.Parse(time.RFC3339, stored.String); err == nil {
+		return parsed
+	}
+	if parsed, err := time.Parse("2006-01-02 15:04:05", stored.String); err == nil {
+		return parsed.UTC()
+	}
+	return time.Time{}
+}
 
 // batchUpdateThreadCache performs TRUE batch update of thread cache entries in a single transaction with retry logic
 func (sq *SQ3batch) batchUpdateThreadCache(groupDB *GroupDB, threadUpdates map[int64][]threadCacheUpdateData) error {
@@ -1673,9 +1894,11 @@ func (sq *SQ3batch) batchUpdateThreadCache(groupDB *GroupDB, threadUpdates map[i
 			// Get current cache state - NO retry needed, outer transaction handles it
 			var currentChildren string
 			var currentCount int
+			var storedLastChild sql.NullInt64
+			var storedActivity sql.NullString
 
 			row := selectStmt.QueryRow(threadRoot)
-			err := row.Scan(&currentChildren, &currentCount)
+			err := row.Scan(&currentChildren, &currentCount, &storedLastChild, &storedActivity)
 			if err != nil && !errors.Is(err, sql.ErrNoRows) {
 				// The row exists and could not be read, so the fallback below must not run on
 				// it: its upsert leaves child_articles alone and the UPDATE then overwrites
@@ -1715,13 +1938,22 @@ func (sq *SQ3batch) batchUpdateThreadCache(groupDB *GroupDB, threadUpdates map[i
 				// outside a rescan (E5).
 				currentChildren = ""
 				currentCount = 1
+				// initStmt wrote the first update's values, which the max below covers anyway.
+				storedLastChild = sql.NullInt64{}
+				storedActivity = sql.NullString{}
 				initializedCount++
 			}
 
-			// Calculate new state by applying all updates for this thread
+			// Calculate new state by applying all updates for this thread. last_child_number and
+			// last_activity are the maximum over the row and this batch, not this batch's own
+			// values: a reply that is backfilled (an archive import, a peer offering an old
+			// article, a group whose articles arrive by Date) is older and lower-numbered than
+			// what the thread already holds, and overwriting moved the thread down the group
+			// listing (which orders by last_activity DESC) and lowered the cache invalidation
+			// mark. The rebuild writes both maxed as well, so a rebuild no longer changes them.
 			newChildren := currentChildren
-			var lastChildNum int64
-			var lastActivity time.Time
+			lastChildNum := storedLastChild.Int64
+			lastActivity := threadCacheParseActivity(storedActivity)
 
 			for _, update := range updates {
 				// Add child to the list
@@ -1730,7 +1962,9 @@ func (sq *SQ3batch) batchUpdateThreadCache(groupDB *GroupDB, threadUpdates map[i
 				} else {
 					newChildren = newChildren + "," + fmt.Sprintf("%d", update.childArticleNum)
 				}
-				lastChildNum = update.childArticleNum
+				if update.childArticleNum > lastChildNum {
+					lastChildNum = update.childArticleNum
+				}
 				if update.childDate.After(lastActivity) {
 					lastActivity = update.childDate
 				}
