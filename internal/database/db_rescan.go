@@ -857,7 +857,9 @@ func (db *Database) buildThreadParentMap(groupDB *GroupDB, st *threadRebuildStat
 
 			refs := db.parseReferences(references)
 			for i := len(refs) - 1; i >= 0; i-- {
-				if parentNum, exists := st.msgIDToArticleNum[refs[i]]; exists {
+				// A reference to the article itself is skipped and the walk goes on to the
+				// older refs, as intake does (db_batch.go batchThreadPlacements).
+				if parentNum, exists := st.msgIDToArticleNum[refs[i]]; exists && parentNum != articleNum {
 					st.parentOf[articleNum] = parentNum
 					break
 				}
