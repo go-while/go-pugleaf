@@ -140,10 +140,11 @@ func DialPeer(p *models.Peer, o DialOptions) (Transport, error) {
 // errConnLost is the transport's "the connection is gone" error.
 var errConnLost = errors.New("feed: connection lost")
 
-// deniedErr marks an error the peer caused by refusing our feed (480 or 502 on the greeting,
-// IHAVE or CHECK): the sender counts it as Denied in the peering statistics (plan
-// peering-stats) and otherwise treats it like any other connection error. Its message is the
-// wrapped one, so nothing in the log or in the item's last_error changes.
+// deniedErr marks an error the peer caused by refusing our feed (480 or 502 on CHECK or
+// IHAVE): the sender counts it as Denied in the peering statistics (plan peering-stats) and
+// otherwise treats it like any other connection error. Its message is the wrapped one, so
+// nothing in the log or in the item's last_error changes. A refusal in the greeting is not
+// marked: Connect reports it without its status code.
 type deniedErr struct{ err error }
 
 func (d *deniedErr) Error() string { return d.err.Error() }
