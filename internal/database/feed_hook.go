@@ -4,14 +4,17 @@ package database
 //
 // internal/feed must not be imported here (the feed imports this package for the SQLite
 // retry helpers and the peers table), so the batch writer calls a registered function
-// instead: cmd/nntp-server installs internal/feed's enqueuer with SetFeedHook, and without
-// it the whole thing costs one atomic load per batch.
+// instead: cmd/nntp-server installs internal/feed's enqueuer with SetFeedHook (and cmd/web,
+// for the web posts its post queue worker files), and without it the whole thing costs one
+// atomic load per batch.
 //
 // The hook is called once per ARTICLE, not once per group copy: processNewsgroupBatch takes
 // the snapshot where the last group copy of an article is done (NewsgroupsPtr has become
-// empty), just before the fields are cleared. Only articles the NNTP feed or an NNTP POST
-// brought in are passed on (models.Article.FeedOut, set by the processor for a non-bulk
-// ProcessArticle); fetched, imported and web-queued articles are never queued for a peer.
+// empty), just before the fields are cleared. Only articles the NNTP feed, an NNTP POST or a
+// web post brought in are passed on (models.Article.FeedOut, set by the processor for a
+// non-bulk ProcessArticle or a Posted article); fetched and imported articles are never
+// queued for a peer. A web post is filed as one copy per group, so a crosspost may call the
+// hook once per copy; the queue keeps one row per peer and message-id.
 
 import (
 	"strings"

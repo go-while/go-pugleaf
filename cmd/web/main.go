@@ -58,6 +58,7 @@ var (
 	findOrphanDBs         bool
 	verbose               bool
 	dataDir               string
+	webFeedOut            bool
 	useHistory            bool
 	//ignoreInitialTinyGroups int64 // code path disabled
 
@@ -130,6 +131,7 @@ func main() {
 	flag.BoolVar(&rsyncForce, "force", false, "confirm -rsync-remove-source (deletes the moved group databases from the data directory)")
 	flag.BoolVar(&editCronjobs, "edit-cronjobs", false, "Safety Warning / Shell Execution: Adding/Editing Crons is disabled by default. Use this flag only temporarily!")
 	flag.BoolVar(&noCronjobs, "no-cronjobs", false, "use this flag to not run cron jobs")
+	flag.BoolVar(&webFeedOut, "feed", true, "queue web posts for the peers with an outgoing feed (data/cfg/feed-queue.sq3; nntp-server -feed sends them)")
 	flag.BoolVar(&findOrphanDBs, "find-orphan-dbs", false, "Find orphaned database folders in data/db that don't correspond to any newsgroup in main database")
 	flag.StringVar(&compareActiveFile, "compare-active", "", "Compare active file with database and show missing groups (format: groupname highwater lowwater status)")
 	flag.StringVar(&disableActiveFile, "disable-active", "", "Disable newsgroups not listed in active file (format: groupname [highwater lowwater status], one group per line); refused when the file lists no group")
@@ -338,6 +340,11 @@ func main() {
 		fatalAfterDB(db, "[WEB]: Error booting processor: %v", err)
 	}
 
+	if webFeedOut {
+		if err := startWebFeed(db, dataDir); err != nil {
+			log.Printf("[WEB]: web posts are not queued for the peers: %v", err)
+		}
+	}
 	postQueueWorker := proc.NewPostQueueWorker()
 	postQueueWorker.Start()
 	log.Printf("[WEB]: PostQueueWorker started for web posting")
