@@ -16,6 +16,7 @@ import (
 	"github.com/go-while/go-pugleaf/internal/feed"
 	"github.com/go-while/go-pugleaf/internal/history"
 	"github.com/go-while/go-pugleaf/internal/nntp"
+	"github.com/go-while/go-pugleaf/internal/peerstats"
 	"github.com/go-while/go-pugleaf/internal/processor"
 )
 
@@ -30,6 +31,8 @@ var (
 	maxConnections  int
 	dataDir         string
 	feedOut         bool
+	innLogPath      string
+	peerStatsDays   int
 	noPostThreads   bool
 	useHistory      bool
 
@@ -76,6 +79,8 @@ func main() {
 	flag.BoolVar(&xrefBatchedLookup, "xref-batched-lookup", true, "in -xref full, look up the Xref locations of each OVER/XOVER/HDR/XHDR range chunk (up to 1000 lines) with one history statement per shard database instead of one lookup per line")
 	flag.BoolVar(&noPostThreads, "disable-webserver-post-threads", false, "do not build the threads of stored articles (threads, thread_cache, reply_count): only the web view needs them; for a standalone NNTP server (recover-db -rebuild-threads builds them later)")
 	flag.BoolVar(&feedOut, "feed", true, "outgoing transit feed: queue accepted feed and POST articles for the peers with an outgoing feed (out_enabled) and send them (data/cfg/feed-queue.sq3)")
+	flag.StringVar(&innLogPath, "inn-log", "", "write peer statistics lines in INN's innd/innfeed log format to this file (for innreport); empty = off")
+	flag.IntVar(&peerStatsDays, "peer-stats-days", 90, "keep the hourly peer statistics (data/cfg/peer-stats.sq3, web /admin/peers/stats) this many days")
 	flag.DurationVar(&postCommitWait, "post-commit-wait", nntp.DefaultPostCommitWait, "wait for the batch writer to commit a POSTed article before answering 240 (0 = answer at once, the article is still stored)")
 	flag.Parse()
 	history.ENABLE_HISTORY = useHistory
@@ -232,6 +237,29 @@ func main() {
 	// Outgoing transit feed (plan nntp-peering): the batch writer hands every committed feed
 	// or POST article to the enqueuer (database.SetFeedHook), the sender drains the queue to
 	// the peers with out_enabled. Without such a peer both stay idle.
+	// Peer statistics (plan peering-stats): hourly counters of what peers send us and what we
+	// send them, for the web page and the optional INN-style log. Started before the server and
+	// the sender so their first events are counted.
+	if peerStatsDays < 1 {
+		log.Fatalf("[PEERSTATS] -peer-stats-days must be at least 1")
+	}
+	peerStore, err := peerstats.Open(peerstats.Path(dataDir))
+	if err != nil {
+		log.Fatalf("[PEERSTATS] %v", err)
+	}
+	peerStats, err := peerstats.New(peerstats.Config{
+		Store:      peerStore,
+		INNLogPath: innLogPath,
+		Host:       processor.LocalNNTPHostname,
+		Retention:  time.Duration(peerStatsDays) * 24 * time.Hour,
+	})
+	if err != nil {
+		log.Fatalf("[PEERSTATS] %v", err)
+	}
+	peerStats.Start()
+	nntpServer.SetPeerStats(peerStats)
+	log.Printf("[PEERSTATS] on (%s, %d days, inn-log %q)", peerstats.Path(dataDir), peerStatsDays, innLogPath)
+
 	var feedQueue *feed.SQLiteQueue
 	var feedEnq *feed.Enqueuer
 	var feedSender *feed.Sender
@@ -244,7 +272,7 @@ func main() {
 		feedEnq = feed.NewEnqueuer(q, db, feed.EnqueuerConfig{})
 		feedEnq.Start()
 		database.SetFeedHook(feedEnq.Hook())
-		feedSender, err = feed.NewSender(feed.Config{Queue: q, Peers: db, Articles: db, Hostname: processor.LocalNNTPHostname})
+		feedSender, err = feed.NewSender(feed.Config{Queue: q, Peers: db, Articles: db, Hostname: processor.LocalNNTPHostname, Stats: peerStats})
 		if err != nil {
 			log.Fatalf("[FEED] %v", err)
 		}
@@ -273,6 +301,11 @@ func main() {
 	// The sender reads articles from the group DBs: stop it before the database goes.
 	if feedSender != nil {
 		feedSender.Stop()
+	}
+	// Every connection that counts has ended: write the last counters and close the store.
+	peerStats.Stop()
+	if err := peerStore.Close(); err != nil {
+		log.Printf("[PEERSTATS] closing the store: %v", err)
 	}
 	log.Printf("[NNTP]: Server stopped, initiating database shutdown...")
 

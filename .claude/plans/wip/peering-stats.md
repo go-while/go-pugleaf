@@ -106,3 +106,21 @@ CLAUDE.md checks (gofmt, go vet, go build, the full `go test -race` list) plus `
 2. Enable B's peer row: within ~1 min the backlog flows; B incoming accepted 10, A outgoing accepted 10; INN
    log has innd checkpoint/closed lines with accepted 10 and accepted size > 0; innfeed-style lines on A.
 3. Restart B: hourly buckets survive (store), the page still shows them.
+
+## Progress
+- Wave 0: 03e0472 contract `internal/peerstats/api.go`.
+- Wave 1 (worktrees under /tank0/claude/trees/go-pugleaf/):
+  - peerstats-core `worktree-agent-ad84c5c263d9d6fb6` b449da3 + review fixes ff850d4 (innreport double counting
+    of checkpoint/final lines, async log queue, duplicates folded into innd rejected) → merge 9a8dc3d.
+  - web-stats `worktree-agent-ae90ca956238f021a` b73c142 + fixes bd6f6d9 (UTC day bars, peers/queue tiles,
+    clamp) → merge 42fd34b.
+  - stats-in `worktree-agent-a95c100c226dbaa48` a289296..1e9724d + fixes 4ca98c5 (repeated CHECK offers, 400 =
+    deferred, transferred bytes only, no Denied for a login peer's 480) → merge c5c05f0.
+    Deviation: the collector is set with `nntpServer.SetPeerStats` (NNTPServer.Stats is *ServerStats);
+    disabled rows come through the optional `PeerAllStore` interface.
+- Integration: 2dacce0 fixes TestEnqueueStopDrains (queue clock not pinned, failed since 2026-11-08 13:00 UTC);
+  f61b79d cmd/web opener + feed/peerstats in the CLAUDE.md/CI test list; nntp-server wiring (-inn-log,
+  -peer-stats-days) next commit.
+- Leftover (known, not fixed): connections refused at the accept limit are not counted; outgoing Denied is not
+  counted for a 502 greeting (BackendConn hides the code); `<peer>:<n>` of a closed line is the newest
+  connection number when one peer has several connections.
