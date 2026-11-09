@@ -103,17 +103,38 @@ type Service struct {
 	since   map[pdKey]*window
 	total   map[pdKey]*window
 	// lastConn is the connection counter Connected handed out last for a peer and
-	// direction; Closed reuses it for the "<peer>:<n>" channel name. The contract gives
-	// Closed no connection identity, so with several connections of one peer open at
-	// once the number in a closed line is the newest, not the one that closed.
+	// direction; Closed and the checkpoint lines reuse it for the "<peer>:<n>" channel
+	// name, and it is kept after the connection closed so a later line of that peer does
+	// not fall back to ":0". The contract gives Closed no connection identity, so with
+	// several connections of one peer open at once the number in a closed line is the
+	// newest, not the one that closed.
 	lastConn map[pdKey]int64
 	nextConn int64 // connections of this process, innd's file descriptor stand-in
 	running  bool
 	stopped  bool
 
+	// logq holds the log lines the event methods built: api.go promises they never block
+	// on I/O, so they only append here and the background goroutine (and Stop) write the
+	// file. The lines carry the time of their event, not of the write.
+	logq         []logEntry
+	logDropped   int64 // lines dropped because logq was full
+	logAfterStop int64 // lines dropped because the log file is already closed
+	logClosed    bool
+
 	stopCh chan struct{}
 	done   chan struct{}
 }
+
+// logEntry is one queued log line.
+type logEntry struct {
+	t   time.Time
+	tag string // "innd" or "innfeed"
+	msg string
+}
+
+// maxLogQueue bounds logq: a log file on a wedged disk must not grow the heap without end.
+// At ~2 lines per connection and per checkpoint this is far more than a minute of traffic.
+const maxLogQueue = 4096
 
 // Service is the implementation the Collector contract in api.go describes.
 var _ Collector = (*Service)(nil)
@@ -183,6 +204,12 @@ func (s *Service) Stop() {
 	}
 	s.flush()
 	s.finalLines()
+	// The last drain: whatever the event methods queued and never got written, plus the
+	// final lines. This runs whether or not Start was ever called.
+	s.drainLog()
+	s.mu.Lock()
+	s.logClosed = true
+	s.mu.Unlock()
 	if err := s.innlog.Close(); err != nil {
 		log.Printf("[PEERSTATS] closing the inn log: %v", err)
 	}
@@ -206,9 +233,9 @@ func (s *Service) loop() {
 			return
 		case <-flushT.C:
 			s.flush()
+			s.drainLog()
 		case <-cpT.C:
-			s.innlog.reopenIfRotated()
-			s.checkpointLines()
+			s.checkpointTick()
 		case <-pruneT.C:
 			s.prune()
 		}
@@ -217,7 +244,7 @@ func (s *Service) loop() {
 
 // ---- events (no I/O) ----
 
-// Connected records the start of a connection and writes the INN connect line.
+// Connected records the start of a connection and queues the INN connect line.
 func (s *Service) Connected(p PeerRef, d Dir, remote string) {
 	now := s.now()
 	s.mu.Lock()
@@ -229,19 +256,18 @@ func (s *Service) Connected(p PeerRef, d Dir, remote string) {
 	}
 	s.addLocked(p, d, now, Counters{Conns: 1})
 	label := s.labelLocked(p)
-	s.mu.Unlock()
-	if s.innlog == nil {
-		return
-	}
+	var warn bool
 	switch d {
 	case In:
 		// innd/rc.c:662
-		s.innlog.innd(now, inndConnectedLine(label, n, true))
+		warn = s.enqueueLocked(now, "innd", inndConnectedLine(label, n, true))
 	case Out:
 		// innfeed logs "<peer>:<n> connected" per connection
 		// (innreport_inn.pm:1005 matches it).
-		s.innlog.innfeed(now, fmt.Sprintf("%s connected", inndChanName(label, n)))
+		warn = s.enqueueLocked(now, "innfeed", fmt.Sprintf("%s connected", inndChanName(label, n)))
 	}
+	s.mu.Unlock()
+	warnAfterStop(warn)
 }
 
 // Add adds delta to the current hour of p and d.
@@ -255,7 +281,9 @@ func (s *Service) Add(p PeerRef, d Dir, delta Counters) {
 	s.mu.Unlock()
 }
 
-// Closed records the end of a connection and writes the per-connection line.
+// Closed records the end of a connection and queues the per-connection line. Both lines are
+// per-connection shapes innreport does not add up (innreport_inn.pm:718, :1022); what it
+// sums are the periodic checkpoints, so a connection is never counted twice.
 func (s *Service) Closed(p PeerRef, d Dir, conn Counters, dur time.Duration) {
 	now := s.now()
 	secs := int64(dur / time.Second)
@@ -265,24 +293,22 @@ func (s *Service) Closed(p PeerRef, d Dir, conn Counters, dur time.Duration) {
 	s.mu.Lock()
 	// conn was already counted through Add; only the duration is new.
 	s.addLocked(p, d, now, Counters{ConnSeconds: secs})
-	k := pdKey{id: p.ID, dir: d}
-	n := s.lastConn[k]
-	delete(s.lastConn, k)
+	n := s.lastConn[pdKey{id: p.ID, dir: d}]
 	label := s.labelLocked(p)
-	queue := s.queue[p.ID]
-	s.mu.Unlock()
-	if s.innlog == nil {
-		return
-	}
+	var warn bool
 	switch d {
 	case In:
 		// innd/chan.c:332: the totals of the connection that closed.
-		s.innlog.innd(now, inndStatsLine(inndChanName(label, n), "closed", secs, conn))
+		warn = s.enqueueLocked(now, "innd", inndStatsLine(inndChanName(label, n), "closed", secs, conn))
 	case Out:
-		// innfeed/host.c:2890: innfeed has no per-connection closed line of this
-		// shape; the host checkpoint carries what the connection did.
-		s.innlog.innfeed(now, innfeedStatsLine(label, "checkpoint", secs, conn, queue))
+		// innfeed/connection.c:976: innfeed's per-connection total. The host-wide
+		// "<peer> checkpoint" line of innfeedStatsLine must not be used here: innreport
+		// adds every one of those up (innreport_inn.pm:1031), and the periodic
+		// checkpoint already carries this connection's articles.
+		warn = s.enqueueLocked(now, "innfeed", innfeedConnFinalLine(label, n, secs, conn))
 	}
+	s.mu.Unlock()
+	warnAfterStop(warn)
 }
 
 // SetQueue reports the outgoing queue depth of p.
@@ -346,6 +372,16 @@ func (s *Service) labelLocked(p PeerRef) string {
 // flush moves every buffered bucket into the store. On a write error the buckets go back
 // into the map, so the next tick tries them again (merged with whatever arrived meanwhile).
 func (s *Service) flush() {
+	if s.store == nil {
+		// Log-only mode: drop what was counted instead of building and sorting a slice
+		// nobody takes, but do empty the map so it cannot grow for ever.
+		s.mu.Lock()
+		if len(s.buckets) > 0 {
+			s.buckets = make(map[bkey]Counters)
+		}
+		s.mu.Unlock()
+		return
+	}
 	s.mu.Lock()
 	if len(s.buckets) == 0 {
 		s.mu.Unlock()
@@ -371,9 +407,6 @@ func (s *Service) flush() {
 		}
 		return bs[i].Dir < bs[j].Dir
 	})
-	if s.store == nil {
-		return
-	}
 	if err := s.store.AddBuckets(bs); err != nil {
 		log.Printf("[PEERSTATS] keeping %d buckets after a failed flush: %v", len(bs), err)
 		s.mu.Lock()
@@ -404,6 +437,62 @@ func (s *Service) prune() {
 	}
 }
 
+// ---- the log line queue ----
+
+// enqueueLocked appends one log line. The caller holds s.mu. It returns true when this is the
+// first line dropped because the log file is already closed, so the caller can log that once
+// after it unlocked.
+func (s *Service) enqueueLocked(t time.Time, tag, msg string) bool {
+	if s.innlog == nil || msg == "" {
+		return false
+	}
+	if s.logClosed {
+		s.logAfterStop++
+		return s.logAfterStop == 1
+	}
+	if len(s.logq) >= maxLogQueue {
+		s.logDropped++
+		return false
+	}
+	s.logq = append(s.logq, logEntry{t: t, tag: tag, msg: msg})
+	return false
+}
+
+// warnAfterStop logs the one line enqueueLocked asked for.
+func warnAfterStop(warn bool) {
+	if warn {
+		log.Printf("[PEERSTATS] the collector is stopped: dropping further inn log lines")
+	}
+}
+
+// drainLog writes every queued line. It is called from the background goroutine and from
+// Stop, never from an event method.
+func (s *Service) drainLog() {
+	if s.innlog == nil {
+		return
+	}
+	s.mu.Lock()
+	q := s.logq
+	s.logq = nil
+	dropped := s.logDropped
+	s.logDropped = 0
+	s.mu.Unlock()
+	if dropped > 0 {
+		log.Printf("[PEERSTATS] dropped %d inn log lines: the queue was full", dropped)
+	}
+	for _, e := range q {
+		s.innlog.write(e.t, e.tag, e.msg)
+	}
+}
+
+// checkpointTick is the checkpoint timer's work: notice a log file that was rotated away,
+// build the checkpoint lines and write out everything queued, in event order.
+func (s *Service) checkpointTick() {
+	s.innlog.reopenIfRotated()
+	s.checkpointLines()
+	s.drainLog()
+}
+
 // lineReq is one log line to write, built under the mutex and written without it.
 type lineReq struct {
 	dir   Dir
@@ -414,13 +503,21 @@ type lineReq struct {
 	n     int64
 }
 
+// hasLogLineContent reports whether c has anything the INN stats lines show. Conns and
+// ConnSeconds appear in no field of them, so a window that only saw a connection start or
+// end would otherwise produce a line of zeros.
+func hasLogLineContent(c Counters) bool {
+	c.Conns, c.ConnSeconds = 0, 0
+	return !c.IsZero()
+}
+
 // takeWindows returns one line request per peer and direction with activity in m, sorted so
 // the log is deterministic. reset moves the window's start to now and zeroes its counters.
 func (s *Service) takeWindows(m map[pdKey]*window, now time.Time, reset bool) []lineReq {
 	s.mu.Lock()
 	var reqs []lineReq
 	for k, w := range m {
-		if w.c.IsZero() {
+		if !hasLogLineContent(w.c) {
 			continue
 		}
 		secs := int64(now.Sub(w.start) / time.Second)
@@ -450,50 +547,71 @@ func (s *Service) takeWindows(m map[pdKey]*window, now time.Time, reset bool) []
 	return reqs
 }
 
-// checkpointLines writes one checkpoint line per peer and direction with activity since the
-// last checkpoint, and starts a new window.
+// checkpointLines queues one checkpoint line per peer and direction with activity since the
+// last checkpoint, and starts a new window. These are the lines innreport adds up
+// (innreport_inn.pm:689 for innd, :1031 for innfeed), so every article must appear in exactly
+// one of them: nothing else ever uses the "checkpoint" shape with cumulative numbers.
 func (s *Service) checkpointLines() {
 	if s.innlog == nil {
 		return
 	}
 	now := s.now()
-	for _, r := range s.takeWindows(s.since, now, true) {
+	reqs := s.takeWindows(s.since, now, true)
+	s.mu.Lock()
+	var warn bool
+	for _, r := range reqs {
 		switch r.dir {
 		case In:
 			// innd/nc.c:275
-			s.innlog.innd(now, inndStatsLine(inndChanName(r.label, r.n), "checkpoint", r.secs, r.c))
+			if s.enqueueLocked(now, "innd", inndStatsLine(inndChanName(r.label, r.n), "checkpoint", r.secs, r.c)) {
+				warn = true
+			}
 		case Out:
 			// innfeed/host.c:2890
-			s.innlog.innfeed(now, innfeedStatsLine(r.label, "checkpoint", r.secs, r.c, r.queue))
+			if s.enqueueLocked(now, "innfeed", innfeedStatsLine(r.label, "checkpoint", r.secs, r.c, r.queue)) {
+				warn = true
+			}
 		}
 	}
+	s.mu.Unlock()
+	warnAfterStop(warn)
 }
 
-// finalLines writes the totals of this process at Stop: an innd checkpoint per incoming peer
-// and innfeed's "<peer> global" per outgoing peer, plus innfeed's "ME global" process total.
+// finalLines are the lines Stop writes: first the tail since the last checkpoint, as a
+// checkpoint line like any other (writing the totals as a second checkpoint would make
+// innreport count every article twice), then innfeed's "<peer> global" per outgoing peer and
+// its "ME global" process total, which innreport only matches to skip (innreport_inn.pm:1024).
+// innd has no process-total line; the per-connection "closed" lines carry the incoming ones.
 func (s *Service) finalLines() {
 	if s.innlog == nil {
 		return
 	}
+	s.checkpointLines()
 	now := s.now()
+	reqs := s.takeWindows(s.total, now, true)
 	var me Counters
 	var meSecs int64
-	for _, r := range s.takeWindows(s.total, now, true) {
-		switch r.dir {
-		case In:
-			// innd/chan.c:321
-			s.innlog.innd(now, inndStatsLine(inndChanName(r.label, r.n), "checkpoint", r.secs, r.c))
-		case Out:
-			// innfeed/host.c:2005 / :2472
-			s.innlog.innfeed(now, innfeedGlobalLine(logLabel(r.label), r.secs, r.c))
-			me.Add(r.c)
-			if r.secs > meSecs {
-				meSecs = r.secs
-			}
+	s.mu.Lock()
+	var warn bool
+	for _, r := range reqs {
+		if r.dir != Out {
+			continue
+		}
+		// innfeed/host.c:2005 / :2472
+		if s.enqueueLocked(now, "innfeed", innfeedGlobalLine(logLabel(r.label), r.secs, r.c)) {
+			warn = true
+		}
+		me.Add(r.c)
+		if r.secs > meSecs {
+			meSecs = r.secs
 		}
 	}
 	if !me.IsZero() {
 		// innfeed/host.c:2021: the process total under the literal name "ME".
-		s.innlog.innfeed(now, innfeedGlobalLine("ME", meSecs, me))
+		if s.enqueueLocked(now, "innfeed", innfeedGlobalLine("ME", meSecs, me)) {
+			warn = true
+		}
 	}
+	s.mu.Unlock()
+	warnAfterStop(warn)
 }

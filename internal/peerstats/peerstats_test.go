@@ -77,15 +77,41 @@ func TestInndStatsLine(t *testing.T) {
 		Offered: 11, Accepted: 3, Refused: 2, Rejected: 1, Duplicate: 4,
 		AccBytes: 5000, DupBytes: 600, RejBytes: 70, Denied: 9,
 	}
-	want := "news-lax:7 closed seconds 42 accepted 3 refused 2 rejected 1 duplicate 4" +
-		" accepted size 5000 duplicate size 600 rejected size 70"
+	// innd's duplicate is a subset of its rejected (ARTreject, innd/art.c:1127,1137), so
+	// rejected is 1+4 and rejected size 70+600; innreport subtracts the duplicate volume
+	// from the rejected volume again (innreport_inn.pm:709-711), which gives back our 70.
+	want := "news-lax:7 closed seconds 42 accepted 3 refused 2 rejected 5 duplicate 4" +
+		" accepted size 5000 duplicate size 600 rejected size 670"
 	if got := inndStatsLine(inndChanName("news-lax", 7), "closed", 42, c); got != want {
 		t.Errorf("closed =\n%q\nwant\n%q", got, want)
 	}
-	want = "news-lax:7 checkpoint seconds 600 accepted 3 refused 2 rejected 1 duplicate 4" +
-		" accepted size 5000 duplicate size 600 rejected size 70"
+	want = "news-lax:7 checkpoint seconds 600 accepted 3 refused 2 rejected 5 duplicate 4" +
+		" accepted size 5000 duplicate size 600 rejected size 670"
 	if got := inndStatsLine(inndChanName("news-lax", 7), "checkpoint", 600, c); got != want {
 		t.Errorf("checkpoint =\n%q\nwant\n%q", got, want)
+	}
+	// Without duplicates the two rejected fields are our own counters.
+	want = "p:1 checkpoint seconds 60 accepted 0 refused 0 rejected 2 duplicate 0" +
+		" accepted size 0 duplicate size 0 rejected size 20"
+	if got := inndStatsLine(inndChanName("p", 1), "checkpoint", 60,
+		Counters{Rejected: 2, RejBytes: 20}); got != want {
+		t.Errorf("checkpoint =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// TestInnfeedConnFinalLine against innfeed/connection.c:976 (cxnLogStats, final)
+//
+//	"%s:%u final seconds %ld offered %u accepted %u refused %u rejected %u"
+//	" accsize %.0f rejsize %.0f"
+func TestInnfeedConnFinalLine(t *testing.T) {
+	c := Counters{
+		Offered: 10, Accepted: 7, Refused: 2, Rejected: 1, Missing: 3, Deferred: 4,
+		AccBytes: 1234, RejBytes: 56,
+	}
+	want := "news-lax:3 final seconds 120 offered 10 accepted 7 refused 2 rejected 1" +
+		" accsize 1234 rejsize 56"
+	if got := innfeedConnFinalLine("news-lax", 3, 120, c); got != want {
+		t.Errorf("conn final =\n%q\nwant\n%q", got, want)
 	}
 }
 
@@ -571,13 +597,16 @@ func TestCollectorINNLogLines(t *testing.T) {
 	svc.Add(in, In, Counters{Offered: 2, Accepted: 1, Refused: 1, AccBytes: 1000})
 	svc.Add(out, Out, Counters{Offered: 2, Accepted: 2, AccBytes: 2000})
 	clk.add(10 * time.Minute)
-	svc.checkpointLines()
+	svc.checkpointTick()
 	svc.Closed(in, In, Counters{Offered: 2, Accepted: 1, Refused: 1, AccBytes: 1000}, 600*time.Second)
+	svc.Closed(out, Out, Counters{Offered: 2, Accepted: 2, AccBytes: 2000}, 600*time.Second)
 	svc.Stop()
 
 	want := []string{
 		"lax1 connected 1 streaming allowed",
 		"news-lax:2 connected",
+		// The only two lines innreport sums; everything after them is a
+		// per-connection or a "global" shape it skips.
 		"lax1:1 checkpoint seconds 600 accepted 1 refused 1 rejected 0 duplicate 0" +
 			" accepted size 1000 duplicate size 0 rejected size 0",
 		"news-lax checkpoint seconds 600 offered 2 accepted 2 refused 0 rejected 0 missing 0" +
@@ -585,9 +614,10 @@ func TestCollectorINNLogLines(t *testing.T) {
 			" requeued 0 queue 3.0/10:0,0,100,0,0,0",
 		"lax1:1 closed seconds 600 accepted 1 refused 1 rejected 0 duplicate 0" +
 			" accepted size 1000 duplicate size 0 rejected size 0",
-		// Stop: the totals since the first event of each peer and direction.
-		"lax1:0 checkpoint seconds 600 accepted 1 refused 1 rejected 0 duplicate 0" +
-			" accepted size 1000 duplicate size 0 rejected size 0",
+		"news-lax:2 final seconds 600 offered 2 accepted 2 refused 0 rejected 0" +
+			" accsize 2000 rejsize 0",
+		// Stop: nothing happened since the checkpoint above but the two closes,
+		// whose only new counter is ConnSeconds, so no second checkpoint line.
 		"news-lax global seconds 600 offered 2 accepted 2 refused 0 rejected 0 missing 0" +
 			" accsize 2000 rejsize 0 spooled 0 unspooled 0",
 		"ME global seconds 600 offered 2 accepted 2 refused 0 rejected 0 missing 0" +
@@ -642,14 +672,175 @@ func TestCollectorCheckpointOnlyWithActivity(t *testing.T) {
 	peer := PeerRef{ID: 1, Name: "p1"}
 	svc.Add(peer, In, Counters{Accepted: 1})
 	clk.add(time.Minute)
-	svc.checkpointLines()
+	svc.checkpointTick()
 	first := len(readLog(t, logPath))
+	if first != 1 {
+		t.Fatalf("the first checkpoint wrote %d lines, want 1", first)
+	}
 	clk.add(time.Minute)
-	svc.checkpointLines() // nothing happened since: no line
+	svc.checkpointTick() // nothing happened since: no line
 	if n := len(readLog(t, logPath)); n != first {
 		t.Errorf("an idle checkpoint wrote %d extra lines", n-first)
 	}
 	svc.Stop()
+}
+
+// TestCollectorNoDoubleCountedCheckpoint: innreport sums every innd and innfeed checkpoint
+// line (innreport_inn.pm:689, :1031), so the articles of one peer must appear in exactly one
+// of them -- the periodic checkpoints plus Stop's tail, never a second time in a total.
+func TestCollectorNoDoubleCountedCheckpoint(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "news.notice")
+	clk := newClock(time.Date(2026, 11, 9, 14, 0, 0, 0, time.UTC))
+	svc, err := New(Config{INNLogPath: logPath, Host: "h", Now: clk.now})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	in := PeerRef{ID: 1, Name: "lax1"}
+	out := PeerRef{ID: 2, Name: "news-lax"}
+	svc.Connected(in, In, "10.0.0.9:51000")
+	svc.Connected(out, Out, "10.0.0.9:433")
+	// Two checkpoint periods with three incoming and three outgoing articles each, then
+	// one more article after the last checkpoint (Stop's tail).
+	for i := 0; i < 2; i++ {
+		svc.Add(in, In, Counters{Offered: 3, Accepted: 3, AccBytes: 30})
+		svc.Add(out, Out, Counters{Offered: 3, Accepted: 3, AccBytes: 30})
+		clk.add(10 * time.Minute)
+		svc.checkpointTick()
+	}
+	svc.Add(in, In, Counters{Offered: 1, Accepted: 1, AccBytes: 10})
+	svc.Add(out, Out, Counters{Offered: 1, Accepted: 1, AccBytes: 10})
+	svc.Closed(in, In, Counters{Offered: 7, Accepted: 7, AccBytes: 70}, 20*time.Minute)
+	svc.Closed(out, Out, Counters{Offered: 7, Accepted: 7, AccBytes: 70}, 20*time.Minute)
+	svc.Stop()
+
+	// Sum the "accepted" of the lines innreport sums, per daemon.
+	var inndAccepted, innfeedAccepted int
+	for _, msg := range readLog(t, logPath) {
+		var name, status string
+		var secs, accepted int
+		switch {
+		case strings.Contains(msg, " accepted size "):
+			if n, err := fmt.Sscanf(msg, "%s %s seconds %d accepted %d",
+				&name, &status, &secs, &accepted); err != nil || n != 4 {
+				t.Fatalf("innd line %q: %d fields, %v", msg, n, err)
+			}
+			if status == "checkpoint" {
+				inndAccepted += accepted
+			}
+		case strings.Contains(msg, " accsize "):
+			var offered int
+			if n, err := fmt.Sscanf(msg, "%s %s seconds %d offered %d accepted %d",
+				&name, &status, &secs, &offered, &accepted); err != nil || n != 5 {
+				t.Fatalf("innfeed line %q: %d fields, %v", msg, n, err)
+			}
+			// "global" and the per-connection "final" are skipped by innreport.
+			if status == "checkpoint" && !strings.Contains(name, ":") {
+				innfeedAccepted += accepted
+			}
+		}
+	}
+	if inndAccepted != 7 {
+		t.Errorf("innd checkpoints add up to %d accepted, want 7", inndAccepted)
+	}
+	if innfeedAccepted != 7 {
+		t.Errorf("innfeed host checkpoints add up to %d accepted, want 7", innfeedAccepted)
+	}
+}
+
+// TestCollectorLogQueueIsAsync: the event methods only queue; the file is written by the
+// background work and by Stop.
+func TestCollectorLogQueueIsAsync(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "news.notice")
+	clk := newClock(time.Date(2026, 11, 9, 15, 0, 0, 0, time.UTC))
+	svc, err := New(Config{INNLogPath: logPath, Host: "h", Now: clk.now})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	peer := PeerRef{ID: 1, Name: "p1"}
+	svc.Connected(peer, In, "10.0.0.1:119")
+	svc.Closed(peer, In, Counters{Accepted: 1}, time.Second)
+	if n := len(readLog(t, logPath)); n != 0 {
+		t.Errorf("the event methods wrote %d lines to the file", n)
+	}
+	svc.mu.Lock()
+	queued := len(svc.logq)
+	svc.mu.Unlock()
+	if queued != 2 {
+		t.Errorf("queued %d lines, want 2", queued)
+	}
+	svc.drainLog()
+	if n := len(readLog(t, logPath)); n != 2 {
+		t.Errorf("after the drain: %d lines, want 2", n)
+	}
+	svc.Stop()
+}
+
+// TestCollectorLogQueueBound: a full queue drops lines and counts them instead of growing.
+func TestCollectorLogQueueBound(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "news.notice")
+	clk := newClock(time.Date(2026, 11, 9, 16, 0, 0, 0, time.UTC))
+	svc, err := New(Config{INNLogPath: logPath, Host: "h", Now: clk.now})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	peer := PeerRef{ID: 1, Name: "p1"}
+	for i := 0; i < maxLogQueue+10; i++ {
+		svc.Connected(peer, In, "10.0.0.1:119")
+	}
+	svc.mu.Lock()
+	queued, dropped := len(svc.logq), svc.logDropped
+	svc.mu.Unlock()
+	if queued != maxLogQueue {
+		t.Errorf("queued %d lines, want the bound %d", queued, maxLogQueue)
+	}
+	if dropped != 10 {
+		t.Errorf("dropped %d lines, want 10", dropped)
+	}
+	svc.drainLog()
+	svc.mu.Lock()
+	dropped = svc.logDropped
+	svc.mu.Unlock()
+	if dropped != 0 {
+		t.Errorf("the drain left %d counted drops", dropped)
+	}
+	svc.Stop()
+}
+
+// TestCollectorEventsAfterStop: a late event neither writes nor reopens the closed log file.
+func TestCollectorEventsAfterStop(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "news.notice")
+	clk := newClock(time.Date(2026, 11, 9, 17, 0, 0, 0, time.UTC))
+	svc, err := New(Config{INNLogPath: logPath, Host: "h", Now: clk.now})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	peer := PeerRef{ID: 1, Name: "p1"}
+	svc.Connected(peer, In, "10.0.0.1:119")
+	svc.Stop()
+	before := len(readLog(t, logPath))
+	svc.Connected(peer, In, "10.0.0.1:119")
+	svc.Add(peer, In, Counters{Accepted: 1})
+	svc.Closed(peer, In, Counters{Accepted: 1}, time.Second)
+	svc.drainLog()
+	svc.innlog.reopenIfRotated()
+	if n := len(readLog(t, logPath)); n != before {
+		t.Errorf("events after Stop wrote %d extra lines", n-before)
+	}
+	svc.mu.Lock()
+	after, queued := svc.logAfterStop, len(svc.logq)
+	svc.mu.Unlock()
+	svc.innlog.mu.Lock()
+	closed, f := svc.innlog.closed, svc.innlog.f
+	svc.innlog.mu.Unlock()
+	if after != 2 {
+		t.Errorf("logAfterStop = %d, want 2 (the connected and the closed line)", after)
+	}
+	if queued != 0 {
+		t.Errorf("%d lines queued after Stop", queued)
+	}
+	if !closed || f != nil {
+		t.Errorf("the log file was reopened after Close: closed=%v f=%v", closed, f)
+	}
 }
 
 // TestINNLogReopenAfterRename: logrotate's rename is noticed on the checkpoint tick and the
@@ -663,12 +854,19 @@ func TestINNLogReopenAfterRename(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	svc.Connected(PeerRef{ID: 1, Name: "p1"}, In, "10.0.0.1:119")
+	svc.drainLog() // the line lands in the file that is about to be rotated away
 	rotated := logPath + ".1"
 	if err := os.Rename(logPath, rotated); err != nil {
 		t.Fatalf("rename: %v", err)
 	}
-	svc.innlog.reopenIfRotated()
 	svc.Connected(PeerRef{ID: 1, Name: "p1"}, In, "10.0.0.1:119")
+	svc.checkpointTick() // notices the rename and drains into the reopened file
+	// Reopening when nothing moved keeps the same file and loses nothing.
+	before := len(readLog(t, logPath))
+	svc.innlog.reopenIfRotated()
+	if n := len(readLog(t, logPath)); n != before {
+		t.Errorf("a no-op reopen changed the file: %d lines, want %d", n, before)
+	}
 	svc.Stop()
 
 	old := readLog(t, rotated)
@@ -678,12 +876,6 @@ func TestINNLogReopenAfterRename(t *testing.T) {
 	fresh := readLog(t, logPath)
 	if len(fresh) == 0 || !strings.HasPrefix(fresh[0], "p1 connected 2 ") {
 		t.Errorf("reopened file = %v", fresh)
-	}
-	// Reopening when nothing moved keeps the same file and loses nothing.
-	before := len(fresh)
-	svc.innlog.reopenIfRotated()
-	if n := len(readLog(t, logPath)); n != before {
-		t.Errorf("a no-op reopen changed the file: %d lines, want %d", n, before)
 	}
 }
 

@@ -181,14 +181,6 @@ func (s *sqliteStore) handle() *sql.DB {
 	return s.db.Load()
 }
 
-// Path is the store file this store was opened from (log lines, the admin page).
-func (s *sqliteStore) Path() string {
-	if s == nil {
-		return ""
-	}
-	return s.path
-}
-
 // Close closes the store file. It is safe to call twice.
 func (s *sqliteStore) Close() error {
 	if s == nil {

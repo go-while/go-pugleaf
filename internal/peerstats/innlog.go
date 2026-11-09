@@ -65,11 +65,17 @@ func inndConnectedLine(peer string, n int64, streaming bool) string {
 //
 //	"%s checkpoint seconds %lu accepted %lu refused %lu rejected %lu duplicate %lu"
 //	" accepted size %llu duplicate size %llu rejected size %llu"
+//
+// innd's duplicate is a subset of its rejected: ARTreject (innd/art.c:1127) raises Rejected
+// and RejectSize for every rejection and then raises Duplicate and DuplicateSize on top for
+// REJECT_DUPLICATE (innd/art.c:1137), and innreport subtracts the duplicate volume from the
+// rejected volume again (innreport_inn.pm:709-711). Our store columns are disjoint, so the
+// line adds the duplicates into the two rejected fields.
 func inndStatsLine(name, status string, seconds int64, c Counters) string {
 	return fmt.Sprintf("%s %s seconds %d accepted %d refused %d rejected %d duplicate %d"+
 		" accepted size %d duplicate size %d rejected size %d",
-		name, status, seconds, c.Accepted, c.Refused, c.Rejected, c.Duplicate,
-		c.AccBytes, c.DupBytes, c.RejBytes)
+		name, status, seconds, c.Accepted, c.Refused, c.Rejected+c.Duplicate, c.Duplicate,
+		c.AccBytes, c.DupBytes, c.RejBytes+c.DupBytes)
 }
 
 // inndChanName is the "<host>:<fd>" channel name of innd/chan.c:514 with our connection
@@ -122,6 +128,21 @@ func innfeedStatsLine(peer, status string, seconds int64, c Counters, queue int6
 		float64(queue), innfeedHighwater, innfeedQueueHist(queue))
 }
 
+// innfeedConnFinalLine is innfeed's per-connection total, what cxnLogStats writes when a
+// connection goes down. innreport matches it only to skip it (innreport_inn.pm:1022), which
+// is what we want: the host checkpoint of innfeedStatsLine already counted these articles.
+//
+// innfeed/connection.c:976 (and :965, the same fields with "checkpoint"):
+//
+//	"%s:%u final seconds %ld offered %u accepted %u refused %u"
+//	" rejected %u accsize %.0f rejsize %.0f"
+func innfeedConnFinalLine(peer string, n, seconds int64, c Counters) string {
+	return fmt.Sprintf("%s:%d final seconds %d offered %d accepted %d refused %d"+
+		" rejected %d accsize %d rejsize %d",
+		logLabel(peer), n, seconds, c.Offered, c.Accepted, c.Refused,
+		c.Rejected, c.AccBytes, c.RejBytes)
+}
+
 // innfeedGlobalLine is innfeed's per-host total, written when the host goes away, and the
 // process total of the same shape under the name "ME".
 //
@@ -152,6 +173,9 @@ type innLog struct {
 	// inode on the path and the file is reopened. copytruncate needs no reopen: the file
 	// is opened O_APPEND, so the next write lands at the new end of the file.
 	fi os.FileInfo
+	// closed is set by Close, so a late write neither reopens the file (leaking the
+	// descriptor behind a closed log) nor writes after shutdown.
+	closed bool
 }
 
 // openINNLog opens (and creates) the log file at path. host is the hostname of the syslog
@@ -197,6 +221,9 @@ func (l *innLog) write(t time.Time, tag, msg string) {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.closed {
+		return
+	}
 	if l.f == nil {
 		if err := l.openLocked(); err != nil {
 			log.Printf("[PEERSTATS] %v", err)
@@ -220,6 +247,9 @@ func (l *innLog) reopenIfRotated() {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.closed {
+		return
+	}
 	if l.f != nil {
 		fi, err := os.Stat(l.path)
 		if err == nil && os.SameFile(fi, l.fi) {
@@ -245,7 +275,7 @@ func (l *innLog) Close() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	f := l.f
-	l.f, l.fi = nil, nil
+	l.f, l.fi, l.closed = nil, nil, true
 	if f == nil {
 		return nil
 	}
