@@ -54,3 +54,4 @@ cmd/test-MsgIdItemCache/test-MsgIdItemCache
 CLAUDE.local.md
 /post-queue
 /mbox-importer
+.claude/settings.json
