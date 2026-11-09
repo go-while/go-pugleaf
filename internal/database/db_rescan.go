@@ -541,7 +541,7 @@ func (db *Database) RebuildThreadsFromScratch(newsgroup string, verbose bool, gr
 		}
 		totalBatches++
 
-		if verbose {
+		if verbose && totalBatches%10 == 0 {
 			log.Printf("RebuildThreadsFromScratch: Built message-ID mapping: %d articles (batch took %v)",
 				len(msgIDToArticleNum), time.Since(batchStart))
 		}
@@ -569,6 +569,10 @@ func (db *Database) RebuildThreadsFromScratch(newsgroup string, verbose bool, gr
 		report.Errors = append(report.Errors, fmt.Sprintf("Failed to build the parent map: %v", err))
 		return report, err
 	}
+	// The message-id map is only pass 1's input: drop it here, the rest of the rebuild works
+	// on article numbers. It is the largest of the three maps (a string key per article).
+	msgIDToArticleNum = nil
+	st.msgIDToArticleNum = nil
 	if verbose {
 		log.Printf("⏱️  TIMER: Build the parent map took %v (%d articles with a parent in this group)",
 			time.Since(stepStart), len(st.parentOf))
@@ -593,8 +597,8 @@ func (db *Database) RebuildThreadsFromScratch(newsgroup string, verbose bool, gr
 		log.Printf("⏱️  TIMER: Insert %d thread roots took %v", rootsBuilt, time.Since(stepStart))
 	}
 
-	// TIMER: Step 5: Insert the replies, append them to their root's thread_cache row and
-	// recompute articles.reply_count from the direct children.
+	// TIMER: Step 5: Insert the replies and append them to their root's thread_cache row
+	// (child_articles, message_count, last_child_number and last_activity).
 	stepStart = time.Now()
 	if verbose {
 		log.Printf("RebuildThreadsFromScratch: Inserting replies...")
@@ -607,6 +611,17 @@ func (db *Database) RebuildThreadsFromScratch(newsgroup string, verbose bool, gr
 	}
 	if verbose {
 		log.Printf("⏱️  TIMER: Insert %d replies took %v", repliesBuilt, time.Since(stepStart))
+	}
+
+	// TIMER: Step 6: Recompute articles.reply_count from the resolved parents.
+	stepStart = time.Now()
+	parentsCounted, err := db.rebuildReplyCounts(groupDB, st)
+	if err != nil {
+		report.Errors = append(report.Errors, fmt.Sprintf("Failed to recompute reply counts: %v", err))
+		return report, err
+	}
+	if verbose {
+		log.Printf("⏱️  TIMER: Recompute reply_count of %d articles took %v", parentsCounted, time.Since(stepStart))
 	}
 
 	// One line per group: a reference cycle (a self-reference included) is broken by making
@@ -629,7 +644,6 @@ func (db *Database) RebuildThreadsFromScratch(newsgroup string, verbose bool, gr
 		log.Printf("  - Threads rebuilt: %d", report.ThreadsRebuilt)
 		log.Printf("  - Duration: %d ms", report.Duration.Milliseconds())
 	}
-	msgIDToArticleNum = nil
 	return report, nil
 }
 
@@ -642,11 +656,49 @@ const query_threadRebuildArticles = `SELECT article_num, date_sent FROM articles
 const query_processThreadBatch2 = "INSERT INTO threads (root_article, parent_article, child_article, depth, thread_order) VALUES (?, ?, ?, 0, 0)"
 const query_processThreadBatch3 = "INSERT INTO threads (root_article, parent_article, child_article, depth, thread_order) VALUES (?, ?, ?, ?, 0)"
 
-// articles.reply_count is recomputed from scratch: zero for the whole group, then one
-// increment per direct child. The increment (instead of a plain set) is what lets a parent's
-// children arrive in more than one chunk.
-const query_threadRebuildResetReplyCounts = "UPDATE articles SET reply_count = 0"
-const query_threadRebuildBumpReplyCount = "UPDATE articles SET reply_count = reply_count + ? WHERE article_num = ?"
+// articles.reply_count is recomputed from scratch, both statements in one transaction: the
+// reset and the new values commit together, so no crash leaves the column zeroed and a
+// retried commit cannot count a reply twice.
+const query_threadRebuildResetReplyCounts = "UPDATE articles SET reply_count = 0 WHERE reply_count != 0"
+const query_threadRebuildSetReplyCount = "UPDATE articles SET reply_count = ? WHERE article_num = ?"
+
+// threadRebuildDateFormat is the format every writer of these databases uses for a date
+// column; older imports left RFC3339 behind, which threadRebuildDate also reads.
+const threadRebuildDateFormat = "2006-01-02 15:04:05"
+
+// threadRebuildDate turns the value of a date column (articles.date_sent,
+// thread_cache.last_activity) into a time. The driver hands a declared DATETIME column over
+// as a time.Time when it could parse the stored value and as text when it could not, and the
+// column is nullable. A NULL or unreadable value becomes the zero time instead of an error:
+// these rows are read after the thread tables have been cleared, so an article with a broken
+// date still has to end up threaded (it used to abort the group's rebuild and leave it
+// without any threads at all).
+func threadRebuildDate(value interface{}) (time.Time, bool) {
+	switch v := value.(type) {
+	case nil:
+		return time.Time{}, false
+	case time.Time:
+		return v, true
+	case []byte:
+		return threadRebuildParseDate(string(v))
+	case string:
+		return threadRebuildParseDate(v)
+	}
+	return time.Time{}, false
+}
+
+func threadRebuildParseDate(value string) (time.Time, bool) {
+	if value == "" {
+		return time.Time{}, false
+	}
+	if parsed, err := time.Parse(threadRebuildDateFormat, value); err == nil {
+		return parsed, true
+	}
+	if parsed, err := time.Parse(time.RFC3339, value); err == nil {
+		return parsed, true
+	}
+	return time.Time{}, false
+}
 
 // threadPlace is where one article sits in the threads of its group: the article number of
 // its thread root and its depth below that root (0 = the article is the root itself).
@@ -668,6 +720,25 @@ type threadReplyRow struct {
 	parentNum  int64
 	rootNum    int64
 	depth      int
+	dateSent   time.Time
+}
+
+// threadCacheChildren is what one chunk of children adds to their root's thread_cache row.
+type threadCacheChildren struct {
+	children     []int64   // their article numbers, ascending
+	lastChildNum int64     // the highest of them
+	lastActivity time.Time // the newest of their dates
+}
+
+// add records one child of this root.
+func (c *threadCacheChildren) add(reply threadReplyRow) {
+	c.children = append(c.children, reply.articleNum)
+	if reply.articleNum > c.lastChildNum {
+		c.lastChildNum = reply.articleNum
+	}
+	if reply.dateSent.After(c.lastActivity) {
+		c.lastActivity = reply.dateSent
+	}
 }
 
 // threadRebuildState holds the whole-group threading state of one RebuildThreadsFromScratch
@@ -804,35 +875,52 @@ func (db *Database) buildThreadParentMap(groupDB *GroupDB, st *threadRebuildStat
 	}
 }
 
-// readThreadArticleChunk reads the next chunk of articles after afterNum, ascending.
-func readThreadArticleChunk(groupDB *GroupDB, afterNum int64) ([]threadRootRow, error) {
+// readThreadArticleChunk reads the next chunk of articles after afterNum, ascending. The
+// second return value counts the articles whose date_sent could not be read (NULL or text no
+// format matches): they keep the zero date and stay in their thread.
+func readThreadArticleChunk(groupDB *GroupDB, afterNum int64) ([]threadRootRow, int64, error) {
 	rows, err := RetryableQuery(groupDB.DB, query_threadRebuildArticles, afterNum, RescanBatchSize)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query articles: %w", err)
+		return nil, 0, fmt.Errorf("failed to query articles: %w", err)
 	}
 	defer rows.Close()
 
+	var badDates int64
 	chunk := make([]threadRootRow, 0, RescanBatchSize)
 	for rows.Next() {
 		var row threadRootRow
-		if err := rows.Scan(&row.articleNum, &row.dateSent); err != nil {
-			return nil, fmt.Errorf("failed to scan article: %w", err)
+		var dateSent interface{}
+		if err := rows.Scan(&row.articleNum, &dateSent); err != nil {
+			return nil, badDates, fmt.Errorf("failed to scan article: %w", err)
+		}
+		var ok bool
+		if row.dateSent, ok = threadRebuildDate(dateSent); !ok {
+			badDates++
 		}
 		chunk = append(chunk, row)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating articles: %w", err)
+		return nil, badDates, fmt.Errorf("error iterating articles: %w", err)
 	}
-	return chunk, nil
+	return chunk, badDates, nil
 }
 
 // rebuildThreadRoots inserts the threads row of every thread root of the group and
 // initializes its thread_cache row. Row shape: (root, NULL, root, 0), the one intake writes
 // (db_batch.go, batchProcessThreadRoots).
 func (db *Database) rebuildThreadRoots(groupDB *GroupDB, st *threadRebuildState) (int64, error) {
-	var lastNum, rootsBuilt int64
+	var lastNum, rootsBuilt, badDates int64
+	defer func() {
+		// This pass sees every article of the group, so it is the one that reports the dates
+		// (the replies pass reads the same rows again).
+		if badDates > 0 {
+			log.Printf("[RESCAN] group '%s': %d article(s) have no readable date_sent, threaded with a zero date",
+				groupDB.Newsgroup, badDates)
+		}
+	}()
 	for {
-		chunk, err := readThreadArticleChunk(groupDB, lastNum)
+		chunk, chunkBadDates, err := readThreadArticleChunk(groupDB, lastNum)
+		badDates += chunkBadDates
 		if err != nil {
 			return rootsBuilt, err
 		}
@@ -889,18 +977,13 @@ func insertThreadRoots(groupDB *GroupDB, roots []threadRootRow) error {
 	})
 }
 
-// rebuildThreadReplies inserts the threads row of every reply of the group, appends the
-// replies to their root's thread_cache row and recomputes articles.reply_count as the number
-// of direct children. Row shape: (root, parent, child, parent depth + 1), the shape the web
-// tree and the intake rule share.
+// rebuildThreadReplies inserts the threads row of every reply of the group and appends the
+// replies to their root's thread_cache row. Row shape: (root, parent, child, parent depth +
+// 1), the shape the web tree and the intake rule share.
 func (db *Database) rebuildThreadReplies(groupDB *GroupDB, st *threadRebuildState, verbose bool) (int64, error) {
-	if _, err := RetryableExec(groupDB.DB, query_threadRebuildResetReplyCounts); err != nil {
-		return 0, fmt.Errorf("failed to reset reply counts: %w", err)
-	}
-
 	var lastNum, repliesBuilt int64
 	for {
-		chunk, err := readThreadArticleChunk(groupDB, lastNum)
+		chunk, _, err := readThreadArticleChunk(groupDB, lastNum)
 		if err != nil {
 			return repliesBuilt, err
 		}
@@ -920,6 +1003,7 @@ func (db *Database) rebuildThreadReplies(groupDB *GroupDB, st *threadRebuildStat
 				parentNum:  st.parentOf[row.articleNum],
 				rootNum:    place.root,
 				depth:      place.depth,
+				dateSent:   row.dateSent,
 			})
 		}
 
@@ -929,22 +1013,22 @@ func (db *Database) rebuildThreadReplies(groupDB *GroupDB, st *threadRebuildStat
 			}
 			repliesBuilt += int64(len(replies))
 
-			// thread_cache: append this chunk's children to their root, and count the direct
-			// children of each parent for articles.reply_count.
-			cacheUpdates := make(map[int64][]int64, len(replies))
-			replyCounts := make(map[int64]int64, len(replies))
+			// thread_cache: append this chunk's children to their root, with the highest
+			// child number and the newest child date of the chunk.
+			cacheUpdates := make(map[int64]*threadCacheChildren, len(replies))
 			for _, reply := range replies {
-				cacheUpdates[reply.rootNum] = append(cacheUpdates[reply.rootNum], reply.articleNum)
-				replyCounts[reply.parentNum]++
+				update := cacheUpdates[reply.rootNum]
+				if update == nil {
+					update = &threadCacheChildren{}
+					cacheUpdates[reply.rootNum] = update
+				}
+				update.add(reply)
 			}
 
 			if err := db.updateThreadCacheWithChildren(groupDB, cacheUpdates, verbose); err != nil {
 				// As before: a cache error does not fail the rebuild.
 				log.Printf("[RESCAN] group '%s': failed to update thread_cache for %d roots: %v",
 					groupDB.Newsgroup, len(cacheUpdates), err)
-			}
-			if err := bumpThreadReplyCounts(groupDB, replyCounts); err != nil {
-				return repliesBuilt, err
 			}
 		}
 
@@ -972,13 +1056,29 @@ func insertThreadReplies(groupDB *GroupDB, replies []threadReplyRow) error {
 	})
 }
 
-// bumpThreadReplyCounts adds one chunk's direct children to articles.reply_count.
-func bumpThreadReplyCounts(groupDB *GroupDB, counts map[int64]int64) error {
-	if len(counts) == 0 {
-		return nil
+// rebuildReplyCounts recomputes articles.reply_count as the number of direct children an
+// article has in this group. The counts come from the resolved parents in memory, and the
+// reset of the whole group plus the new values are written in one transaction: nothing else
+// recomputes this column, so a crash between the two would leave it zeroed, and an absolute
+// value (instead of an increment) is what makes a retried commit harmless. It returns the
+// number of articles that have replies.
+func (db *Database) rebuildReplyCounts(groupDB *GroupDB, st *threadRebuildState) (int64, error) {
+	counts := make(map[int64]int64, len(st.parentOf))
+	for articleNum, parentNum := range st.parentOf {
+		if st.placeOf(articleNum).depth == 0 {
+			continue // the cycle guard made this article a root: its parent edge is gone
+		}
+		counts[parentNum]++
 	}
-	return RetryableTransactionExec(groupDB.DB, func(tx *sql.Tx) error {
-		stmt, err := tx.Prepare(query_threadRebuildBumpReplyCount)
+
+	err := RetryableTransactionExec(groupDB.DB, func(tx *sql.Tx) error {
+		if _, err := tx.Exec(query_threadRebuildResetReplyCounts); err != nil {
+			return fmt.Errorf("failed to reset reply counts: %w", err)
+		}
+		if len(counts) == 0 {
+			return nil
+		}
+		stmt, err := tx.Prepare(query_threadRebuildSetReplyCount)
 		if err != nil {
 			return fmt.Errorf("failed to prepare reply count update statement: %w", err)
 		}
@@ -986,11 +1086,12 @@ func bumpThreadReplyCounts(groupDB *GroupDB, counts map[int64]int64) error {
 
 		for articleNum, count := range counts {
 			if _, err := stmt.Exec(count, articleNum); err != nil {
-				return fmt.Errorf("failed to update reply_count of article %d: %w", articleNum, err)
+				return fmt.Errorf("failed to set reply_count of article %d: %w", articleNum, err)
 			}
 		}
 		return nil
 	})
+	return int64(len(counts)), err
 }
 
 // query_initializeThreadCacheSimple1 is used by batchInitializeThreadCache (thread
@@ -1054,16 +1155,24 @@ func (db *Database) batchInitializeThreadCache(groupDB *GroupDB, threadRoots []t
 	return nil
 }
 
-const query_updateThreadCacheWithChildren1 = "SELECT message_count, child_articles FROM thread_cache WHERE thread_root = ?"
+const query_updateThreadCacheWithChildren1 = "SELECT message_count, child_articles, last_child_number, last_activity FROM thread_cache WHERE thread_root = ?"
 const query_updateThreadCacheWithChildren2 = `
 			UPDATE thread_cache
 			SET child_articles = ?,
-				message_count = ?
+				message_count = ?,
+				last_child_number = ?,
+				last_activity = ?
 			WHERE thread_root = ?
 		`
 
-// updateThreadCacheWithChildren updates the thread_cache table with child article lists
-func (db *Database) updateThreadCacheWithChildren(groupDB *GroupDB, rootUpdates map[int64][]int64, verbose bool) error {
+// updateThreadCacheWithChildren updates the thread_cache table with child article lists,
+// and with the thread's last_child_number and last_activity: the highest article number and
+// the newest date over the root and its children, the same value cmd/fix-thread-activity and
+// the admin repair compute. Both are maxed against what the row already holds, because a
+// root's children can arrive in more than one chunk. Leaving them at the root's own values
+// made every group listing (ORDER BY last_activity DESC) sort by thread start after a
+// rebuild.
+func (db *Database) updateThreadCacheWithChildren(groupDB *GroupDB, rootUpdates map[int64]*threadCacheChildren, verbose bool) error {
 	if len(rootUpdates) == 0 {
 		return nil
 	}
@@ -1084,11 +1193,14 @@ func (db *Database) updateThreadCacheWithChildren(groupDB *GroupDB, rootUpdates 
 	updatedCount := 0
 	skippedCount := 0
 
-	for rootArticle, childArticleNums := range rootUpdates {
+	for rootArticle, update := range rootUpdates {
 		// Get current thread cache data
 		var currentCount int
 		var currentChildren string
-		err := tx.QueryRow(query_updateThreadCacheWithChildren1, rootArticle).Scan(&currentCount, &currentChildren)
+		var currentLastChild sql.NullInt64
+		var currentActivityValue interface{}
+		err := tx.QueryRow(query_updateThreadCacheWithChildren1, rootArticle).
+			Scan(&currentCount, &currentChildren, &currentLastChild, &currentActivityValue)
 		if err != nil {
 			//if verbose {
 			//	log.Printf("updateThreadCacheWithChildren: No thread cache entry for root %d, skipping", rootArticle)
@@ -1103,7 +1215,7 @@ func (db *Database) updateThreadCacheWithChildren(groupDB *GroupDB, rootUpdates 
 		// intake (db_batch.go, batchUpdateThreadCache) appends children in arrival order,
 		// which for a group filed in order is ascending: sorting is what makes the rebuilt
 		// column equal to the one intake writes.
-		childSet := make(map[int64]bool, len(childArticleNums)+1)
+		childSet := make(map[int64]bool, len(update.children)+1)
 		for _, field := range strings.Split(currentChildren, ",") {
 			if field == "" {
 				continue
@@ -1116,7 +1228,7 @@ func (db *Database) updateThreadCacheWithChildren(groupDB *GroupDB, rootUpdates 
 			}
 			childSet[num] = true
 		}
-		for _, num := range childArticleNums {
+		for _, num := range update.children {
 			childSet[num] = true
 		}
 
@@ -1133,8 +1245,20 @@ func (db *Database) updateThreadCacheWithChildren(groupDB *GroupDB, rootUpdates 
 		finalChildrenStr := strings.Join(childStrs, ",")
 		newMessageCount := 1 + len(finalChildren) // 1 for root + replies
 
-		// Update thread_cache with child articles list and correct message count
-		_, err = tx.Exec(query_updateThreadCacheWithChildren2, finalChildrenStr, newMessageCount, rootArticle)
+		// The thread's last child and last activity: this chunk's highest and newest against
+		// what the row holds (the root's own values, or an earlier chunk's children).
+		newLastChild := update.lastChildNum
+		if currentLastChild.Valid && currentLastChild.Int64 > newLastChild {
+			newLastChild = currentLastChild.Int64
+		}
+		newActivity := update.lastActivity
+		if currentActivity, ok := threadRebuildDate(currentActivityValue); ok && currentActivity.After(newActivity) {
+			newActivity = currentActivity
+		}
+
+		// Update thread_cache with child articles list, message count and last activity
+		_, err = tx.Exec(query_updateThreadCacheWithChildren2, finalChildrenStr, newMessageCount,
+			newLastChild, newActivity.UTC().Format(threadRebuildDateFormat), rootArticle)
 
 		if err != nil {
 			log.Printf("updateThreadCacheWithChildren: Failed to update cache for root %d: %v", rootArticle, err)

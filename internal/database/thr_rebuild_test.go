@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -159,12 +160,15 @@ func thrRebuildWantThreads(t *testing.T, gdb *GroupDB, want []thrRebuildRow) {
 type thrRebuildCacheRow struct {
 	messageCount int
 	children     string
+	lastChild    int64
+	lastActivity time.Time
 }
 
 // thrRebuildCache reads the thread_cache rows of gdb by thread root.
 func thrRebuildCache(t *testing.T, gdb *GroupDB) map[int64]thrRebuildCacheRow {
 	t.Helper()
-	rows, err := RetryableQuery(gdb.DB, "SELECT thread_root, message_count, child_articles FROM thread_cache")
+	rows, err := RetryableQuery(gdb.DB,
+		"SELECT thread_root, message_count, child_articles, last_child_number, last_activity FROM thread_cache")
 	if err != nil {
 		t.Fatalf("select thread_cache: %v", err)
 	}
@@ -173,9 +177,11 @@ func thrRebuildCache(t *testing.T, gdb *GroupDB) map[int64]thrRebuildCacheRow {
 	for rows.Next() {
 		var root int64
 		var row thrRebuildCacheRow
-		if err := rows.Scan(&root, &row.messageCount, &row.children); err != nil {
+		var activity interface{}
+		if err := rows.Scan(&root, &row.messageCount, &row.children, &row.lastChild, &activity); err != nil {
 			t.Fatalf("scan thread_cache row: %v", err)
 		}
+		row.lastActivity, _ = threadRebuildDate(activity)
 		out[root] = row
 	}
 	if err := rows.Err(); err != nil {
@@ -185,7 +191,10 @@ func thrRebuildCache(t *testing.T, gdb *GroupDB) map[int64]thrRebuildCacheRow {
 }
 
 // thrRebuildWantCache compares the thread_cache rows of gdb with want (root -> children,
-// ascending and comma separated; message_count must be 1 + the number of children).
+// ascending and comma separated). message_count must be 1 + the number of children, and
+// last_child_number / last_activity must describe the highest article of the thread (root or
+// child): the fixture dates article n at thrRebuildBase + n minutes, so the newest date in a
+// thread is the one of its highest article number.
 func thrRebuildWantCache(t *testing.T, gdb *GroupDB, want map[int64]string) {
 	t.Helper()
 	got := thrRebuildCache(t, gdb)
@@ -201,12 +210,32 @@ func thrRebuildWantCache(t *testing.T, gdb *GroupDB, want map[int64]string) {
 			t.Errorf("thread_cache root %d: child_articles = %q, want %q", root, row.children, children)
 		}
 		wantCount := 1
+		wantLast := root
 		if children != "" {
-			wantCount = 1 + len(strings.Split(children, ","))
+			fields := strings.Split(children, ",")
+			wantCount = 1 + len(fields)
+			for _, field := range fields {
+				num, err := strconv.ParseInt(field, 10, 64)
+				if err != nil {
+					t.Fatalf("thread_cache root %d: child_articles = %q: %v", root, children, err)
+				}
+				if num > wantLast {
+					wantLast = num
+				}
+			}
 		}
 		if row.messageCount != wantCount {
 			t.Errorf("thread_cache root %d: message_count = %d, want %d (1 root + %q)",
 				root, row.messageCount, wantCount, children)
+		}
+		if row.lastChild != wantLast {
+			t.Errorf("thread_cache root %d: last_child_number = %d, want %d (the highest article of %d,%s)",
+				root, row.lastChild, wantLast, root, children)
+		}
+		wantActivity := thrRebuildBase.Add(time.Duration(wantLast) * time.Minute)
+		if !row.lastActivity.Equal(wantActivity) {
+			t.Errorf("thread_cache root %d: last_activity = %s, want %s (the date of article %d)",
+				root, row.lastActivity.UTC(), wantActivity.UTC(), wantLast)
 		}
 	}
 }
@@ -498,6 +527,55 @@ func TestThrRebuildIsRepeatable(t *testing.T) {
 	}
 	if got := thrRebuildReplyCounts(t, gdb); fmt.Sprint(got) != fmt.Sprint(wantCounts) {
 		t.Errorf("reply counts after the second rebuild = %v, want %v", got, wantCounts)
+	}
+}
+
+// TestThrRebuildUnreadableDateSent: an article whose date_sent is NULL, or text no date
+// format matches, still ends up threaded. Reading such a row used to abort the group's
+// rebuild - after the thread tables had been cleared, so the group was left with no threads
+// at all. The unreadable date becomes the zero time: the thread sorts last in a listing
+// ordered by last_activity instead of hiding its articles.
+func TestThrRebuildUnreadableDateSent(t *testing.T) {
+	db, group, gdb := thrRebuildGroup(t, []thrRebuildArt{
+		{num: 1, mid: "<nd1@thr>", refs: ""},
+		{num: 2, mid: "<nd2@thr>", refs: "<nd1@thr>"},
+		{num: 3, mid: "<nd3@thr>", refs: ""},
+	})
+	if _, err := RetryableExec(gdb.DB, "UPDATE articles SET date_sent = NULL WHERE article_num = 2"); err != nil {
+		t.Fatalf("null the date of article 2: %v", err)
+	}
+	if _, err := RetryableExec(gdb.DB, "UPDATE articles SET date_sent = 'not-a-date' WHERE article_num = 3"); err != nil {
+		t.Fatalf("break the date of article 3: %v", err)
+	}
+	thrRebuildRun(t, db, group, gdb)
+
+	thrRebuildWantThreads(t, gdb, []thrRebuildRow{
+		{root: 1, parent: 0, child: 1, depth: 0},
+		{root: 1, parent: 1, child: 2, depth: 1},
+		{root: 3, parent: 0, child: 3, depth: 0},
+	})
+	thrRebuildWantReplyCounts(t, gdb, map[int64]int64{1: 1})
+
+	cache := thrRebuildCache(t, gdb)
+	if len(cache) != 2 {
+		t.Fatalf("thread_cache = %v, want one row per root (1 and 3)", cache)
+	}
+	// Root 1 keeps its own date: its only child has no readable one.
+	row := cache[1]
+	if row.children != "2" || row.lastChild != 2 {
+		t.Errorf("thread_cache root 1 = %+v, want child_articles \"2\" and last_child_number 2", row)
+	}
+	if want := thrRebuildBase.Add(time.Minute); !row.lastActivity.Equal(want) {
+		t.Errorf("thread_cache root 1: last_activity = %s, want the root's own date %s",
+			row.lastActivity.UTC(), want.UTC())
+	}
+	// Root 3's own date is unreadable: the row exists, with the zero date.
+	row = cache[3]
+	if row.children != "" || row.messageCount != 1 {
+		t.Errorf("thread_cache root 3 = %+v, want no children and message_count 1", row)
+	}
+	if !row.lastActivity.IsZero() {
+		t.Errorf("thread_cache root 3: last_activity = %s, want the zero date", row.lastActivity.UTC())
 	}
 }
 

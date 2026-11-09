@@ -67,10 +67,15 @@ An article's thread is decided **per group**, not from its headers alone:
   detected: that article becomes a thread root. One log line per group counts them.
 
 Intake (`internal/database/db_batch.go`) applies the same rule when an article is filed, so a
-group whose articles arrive in order gets the same rows from both sides. The one deliberate
-difference: the rebuild **merges** an orphan under a parent that only arrived later (the
-out-of-order import case), while intake leaves the orphan a root - re-parenting every arrival
-would need a "who references me" scan that has no index.
+group whose articles arrive in order gets the same rows from both sides. Two deliberate
+differences:
+
+- the rebuild **merges** an orphan under a parent that only arrived later (the out-of-order
+  import case), while intake leaves the orphan a root - re-parenting every arrival would need
+  a "who references me" scan that has no index;
+- what makes a reference eligible as a parent: intake needs it to be threaded already (it has
+  a `threads` row), the rebuild only needs it to exist in `articles`. After a full rebuild the
+  two coincide, because then every article of the group has a `threads` row.
 
 Row shapes written by both:
 
@@ -96,11 +101,15 @@ Row shapes written by both:
    cycle guard above) and insert every **root**: its `threads` row and its `thread_cache` row.
    Roots go in first because a group filed out of order has roots with a higher article number
    than their children, and a child can only be appended to a `thread_cache` row that exists
-6. **Pass 2 / replies**: Insert the **replies** chunk by chunk: the `threads` row, the append
-   to their root's `thread_cache.child_articles` (sorted by article number, as intake writes
-   it) and `articles.reply_count` = the number of direct children (zeroed for the group first,
-   then incremented per chunk)
-7. **Reporting**: Generate comprehensive rebuild report, plus one `[RESCAN]` log line per
+6. **Pass 2 / replies**: Insert the **replies** chunk by chunk: the `threads` row and the
+   append to their root's `thread_cache` row - `child_articles` sorted by article number (as
+   intake writes it), `message_count`, and `last_child_number` / `last_activity` as the
+   highest article number and the newest date over the root and its children (the value
+   `cmd/fix-thread-activity` computes)
+7. **Reply counts**: `articles.reply_count` = the number of direct children of each article,
+   from the resolved parents; the reset of the group and the new values are written in one
+   transaction, so the column is never left zeroed
+8. **Reporting**: Generate comprehensive rebuild report, plus one `[RESCAN]` log line per
    group with its article count, roots, replies and duration
 
 
@@ -117,9 +126,12 @@ Row shapes written by both:
   rebuild report (the group keeps the cleared tables: run the rebuild again)
 - A failed `thread_cache` write is logged and does not abort: the `threads` rows are the
   source a later rebuild re-derives the cache from
-- Every write goes through the `sqlite_retry.go` helpers, so a locked database is retried and
-  every error path rolls its transaction back
+- The inserts and the `reply_count` update go through the `sqlite_retry.go` helpers, so a
+  locked database is retried; the table clearing and the `thread_cache` children update still
+  use a plain transaction of their own, and every error path rolls its transaction back
 - Graceful handling of missing references (they simply make the article a thread root here)
+- An article whose `date_sent` is NULL, or text that neither date format matches, is threaded
+  with the zero date (and counted in one log line per group) instead of aborting the rebuild
 
 ### Performance Optimizations
 - Efficient SQL queries with proper indexing
