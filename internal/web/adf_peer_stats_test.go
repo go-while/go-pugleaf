@@ -103,7 +103,7 @@ func adfPeerStatsRow(t *testing.T, half, peer string) string {
 
 // adfPeerStatsTile is the tile the page prints for one total.
 func adfPeerStatsTile(n int64, label string) string {
-	return fmt.Sprintf(`<div class="h5 mb-0">%d</div><small class="text-muted">%s</small>`, n, label)
+	return fmt.Sprintf(`<span class="fw-bold">%d</span> <small class="text-muted">%s</small>`, n, label)
 }
 
 // adfPeerStatsPeersTile is the peers tile of the configured peer rows: enabled of total.
@@ -119,7 +119,7 @@ func adfPeerStatsPeersTile(t *testing.T) string {
 			enabled++
 		}
 	}
-	return fmt.Sprintf(`<div class="h5 mb-0">%d / %d</div><small class="text-muted">peers enabled</small>`, enabled, len(peers))
+	return fmt.Sprintf(`<span class="fw-bold">%d / %d</span> <small class="text-muted">peers enabled</small>`, enabled, len(peers))
 }
 
 // adfPeerStatsHour is the start of an hour n hours before the current one.
@@ -163,7 +163,7 @@ func TestAdfPeerStatsNoStore(t *testing.T) {
 	if want := adfPeerStatsPeersTile(t); !strings.Contains(body, want) {
 		t.Errorf("the empty state lacks the peers tile %q", want)
 	}
-	if want := `<div class="h5 mb-0">n/a</div><small class="text-muted">outgoing queue</small>`; !strings.Contains(body, want) {
+	if want := `<span class="fw-bold">n/a</span> <small class="text-muted">outgoing queue</small>`; !strings.Contains(body, want) {
 		t.Error("the empty state does not show the outgoing queue as n/a without a feed queue file")
 	}
 
@@ -241,8 +241,8 @@ func TestAdfPeerStatsPage(t *testing.T) {
 		adfPeerStatsTile(11, "rejected"),
 		adfPeerStatsTile(9, "duplicate"),
 		// The denied tile is the one the page highlights.
-		`<div class="h5 mb-0 text-danger">46</div><small class="text-muted">denied</small>`,
-		`<div class="h5 mb-0">1.2 MB</div><small class="text-muted">accepted bytes</small>`,
+		`<span class="fw-bold text-danger">46</span> <small class="text-muted">denied</small>`,
+		`<span class="fw-bold">1.2 MB</span> <small class="text-muted">accepted bytes</small>`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("page lacks the incoming tile %q", want)

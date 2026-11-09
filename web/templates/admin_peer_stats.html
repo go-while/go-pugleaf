@@ -23,7 +23,8 @@
   .ps-wrap { overflow-wrap: anywhere; word-break: break-word; }
   .ps-table td, .ps-table th { white-space: nowrap; }
   .ps-table td.ps-name { white-space: normal; max-width: 14rem; overflow-wrap: anywhere; }
-  .ps-tile { min-width: 7rem; }
+  .ps-tiles { display: flex; flex-wrap: nowrap; gap: .5rem; overflow-x: auto; }
+  .ps-tile { flex: 1 0 auto; white-space: nowrap; }
 </style>
 
 <div class="row mt-3">
@@ -52,11 +53,11 @@
 
         <!-- The peer rows and the outgoing queue depth do not come from the statistics store,
              so they are shown even before the first flush. -->
-        <div class="d-flex flex-wrap gap-2 mb-3">
-          <div class="card ps-tile flex-fill text-center"><div class="card-body p-2">
-            <div class="h5 mb-0">{{.PeersEnabled}} / {{.PeersTotal}}</div><small class="text-muted">peers enabled</small></div></div>
-          <div class="card ps-tile flex-fill text-center"><div class="card-body p-2">
-            <div class="h5 mb-0">{{if .QueueKnown}}{{.QueueTotal}}{{else}}n/a{{end}}</div><small class="text-muted">outgoing queue</small></div></div>
+        <div class="ps-tiles mb-3">
+          <div class="card ps-tile text-center"><div class="card-body py-1 px-2">
+            <span class="fw-bold">{{.PeersEnabled}} / {{.PeersTotal}}</span> <small class="text-muted">peers enabled</small></div></div>
+          <div class="card ps-tile text-center"><div class="card-body py-1 px-2">
+            <span class="fw-bold">{{if .QueueKnown}}{{.QueueTotal}}{{else}}n/a{{end}}</span> <small class="text-muted">outgoing queue</small></div></div>
         </div>
 
         {{if not .Available}}
@@ -100,33 +101,33 @@
   </div>
   <div class="card-body">
 
-    <div class="d-flex flex-wrap gap-2 mb-3">
+    <div class="ps-tiles mb-3">
       {{if .Incoming}}
-        <div class="card ps-tile flex-fill text-center"><div class="card-body p-2">
-          <div class="h5 mb-0">{{.Totals.Accepted}}</div><small class="text-muted">accepted</small></div></div>
-        <div class="card ps-tile flex-fill text-center"><div class="card-body p-2">
-          <div class="h5 mb-0">{{.Totals.Refused}}</div><small class="text-muted">refused</small></div></div>
-        <div class="card ps-tile flex-fill text-center"><div class="card-body p-2">
-          <div class="h5 mb-0">{{.Totals.Rejected}}</div><small class="text-muted">rejected</small></div></div>
-        <div class="card ps-tile flex-fill text-center"><div class="card-body p-2">
-          <div class="h5 mb-0">{{.Totals.Duplicate}}</div><small class="text-muted">duplicate</small></div></div>
-        <div class="card ps-tile flex-fill text-center border-danger"><div class="card-body p-2">
-          <div class="h5 mb-0 text-danger">{{.Totals.Denied}}</div><small class="text-muted">denied</small></div></div>
-        <div class="card ps-tile flex-fill text-center"><div class="card-body p-2">
-          <div class="h5 mb-0">{{.AccHuman}}</div><small class="text-muted">accepted bytes</small></div></div>
+        <div class="card ps-tile text-center"><div class="card-body py-1 px-2">
+          <span class="fw-bold">{{.Totals.Accepted}}</span> <small class="text-muted">accepted</small></div></div>
+        <div class="card ps-tile text-center"><div class="card-body py-1 px-2">
+          <span class="fw-bold">{{.Totals.Refused}}</span> <small class="text-muted">refused</small></div></div>
+        <div class="card ps-tile text-center"><div class="card-body py-1 px-2">
+          <span class="fw-bold">{{.Totals.Rejected}}</span> <small class="text-muted">rejected</small></div></div>
+        <div class="card ps-tile text-center"><div class="card-body py-1 px-2">
+          <span class="fw-bold">{{.Totals.Duplicate}}</span> <small class="text-muted">duplicate</small></div></div>
+        <div class="card ps-tile text-center border-danger"><div class="card-body py-1 px-2">
+          <span class="fw-bold text-danger">{{.Totals.Denied}}</span> <small class="text-muted">denied</small></div></div>
+        <div class="card ps-tile text-center"><div class="card-body py-1 px-2">
+          <span class="fw-bold">{{.AccHuman}}</span> <small class="text-muted">accepted bytes</small></div></div>
       {{else}}
-        <div class="card ps-tile flex-fill text-center"><div class="card-body p-2">
-          <div class="h5 mb-0">{{.Totals.Offered}}</div><small class="text-muted">offered</small></div></div>
-        <div class="card ps-tile flex-fill text-center"><div class="card-body p-2">
-          <div class="h5 mb-0">{{.Totals.Accepted}}</div><small class="text-muted">accepted</small></div></div>
-        <div class="card ps-tile flex-fill text-center"><div class="card-body p-2">
-          <div class="h5 mb-0">{{.Totals.Refused}}</div><small class="text-muted">refused</small></div></div>
-        <div class="card ps-tile flex-fill text-center"><div class="card-body p-2">
-          <div class="h5 mb-0">{{.Totals.Rejected}}</div><small class="text-muted">rejected</small></div></div>
-        <div class="card ps-tile flex-fill text-center"><div class="card-body p-2">
-          <div class="h5 mb-0">{{.Totals.Deferred}}</div><small class="text-muted">deferred</small></div></div>
-        <div class="card ps-tile flex-fill text-center"><div class="card-body p-2">
-          <div class="h5 mb-0">{{.Totals.Missing}}</div><small class="text-muted">missing</small></div></div>
+        <div class="card ps-tile text-center"><div class="card-body py-1 px-2">
+          <span class="fw-bold">{{.Totals.Offered}}</span> <small class="text-muted">offered</small></div></div>
+        <div class="card ps-tile text-center"><div class="card-body py-1 px-2">
+          <span class="fw-bold">{{.Totals.Accepted}}</span> <small class="text-muted">accepted</small></div></div>
+        <div class="card ps-tile text-center"><div class="card-body py-1 px-2">
+          <span class="fw-bold">{{.Totals.Refused}}</span> <small class="text-muted">refused</small></div></div>
+        <div class="card ps-tile text-center"><div class="card-body py-1 px-2">
+          <span class="fw-bold">{{.Totals.Rejected}}</span> <small class="text-muted">rejected</small></div></div>
+        <div class="card ps-tile text-center"><div class="card-body py-1 px-2">
+          <span class="fw-bold">{{.Totals.Deferred}}</span> <small class="text-muted">deferred</small></div></div>
+        <div class="card ps-tile text-center"><div class="card-body py-1 px-2">
+          <span class="fw-bold">{{.Totals.Missing}}</span> <small class="text-muted">missing</small></div></div>
       {{end}}
     </div>
 
