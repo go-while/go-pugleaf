@@ -20,7 +20,7 @@ go vet ./...                          # clean baseline, ~2s
 go build ./...
 go test -race ./internal/database/... ./internal/web/... ./internal/history/... ./internal/nntp/... \
               ./internal/processor/... ./internal/models/... ./internal/cache/... ./internal/common/... \
-              ./internal/postmgr/... ./cmd/expire-news/... ./cmd/history-rebuild/... ./cmd/nntp-server/... \
+              ./internal/postmgr/... ./internal/feed/... ./internal/peerstats/... ./cmd/expire-news/... ./cmd/history-rebuild/... ./cmd/nntp-server/... \
               ./cmd/nntp-fetcher/... ./cmd/nntp-analyze/... ./cmd/recover-db/... ./cmd/tcp2tor/... ./cmd/web/... \
               ./cmd/post-queue/... ./cmd/import-flat-files/... ./cmd/rslight-importer/... ./cmd/fix-references/... \
               ./cmd/fix-thread-activity/... ./cmd/audit-web-posts/... ./cmd/extract_hierarchies/... \

@@ -19,6 +19,7 @@ import (
 	"github.com/go-while/go-pugleaf/internal/feed"
 	"github.com/go-while/go-pugleaf/internal/history"
 	"github.com/go-while/go-pugleaf/internal/models"
+	"github.com/go-while/go-pugleaf/internal/peerstats"
 	"github.com/go-while/go-pugleaf/internal/preloader"
 	"github.com/go-while/go-pugleaf/internal/processor"
 	"github.com/go-while/go-pugleaf/internal/web"
@@ -345,6 +346,14 @@ func main() {
 	// The peers page reads the outgoing feed counters from the nntp-server's queue file,
 	// read-only (a missing file shows n/a).
 	web.SetFeedQueueOpener(func(path string) (web.FeedQueueReader, error) { return feed.OpenReadOnly(path) })
+	// /admin/peers/stats reads the hourly peer counters the nntp-server writes, read-only.
+	web.SetPeerStatsOpener(func(path string) (web.PeerStatsReader, error) {
+		st, err := peerstats.OpenReadOnly(path)
+		if err != nil {
+			return nil, err
+		}
+		return st, nil
+	})
 	server, err := web.NewWebServer(db, webConfig, nil, editCronjobs, noCronjobs) // no embedded NNTP server (D10)
 	if err != nil {
 		log.Printf("[WEB]: %v", err)
