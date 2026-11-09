@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -376,7 +378,12 @@ const query_RebuildThreadsFromScratch1 = "SELECT COUNT(*) FROM articles"
 const query_RebuildThreadsFromScratch2 = "SELECT COUNT(*) FROM threads"
 const query_RebuildThreadsFromScratch3 = "DELETE FROM %s"
 const query_RebuildThreadsFromScratch4 = "DELETE FROM sqlite_sequence WHERE name = 'threads'"
-const query_RebuildThreadsFromScratch5 = "SELECT article_num, message_id FROM articles ORDER BY date_sent ASC LIMIT ? OFFSET ?"
+
+// query_RebuildThreadsFromScratch5 pages the message-id mapping by article_num (the rowid),
+// not by date_sent with LIMIT/OFFSET: the mapping does not care about the order, OFFSET
+// rescans the sorted set for every batch, and rows with equal date_sent can land in two
+// batches or in none.
+const query_RebuildThreadsFromScratch5 = `SELECT article_num, message_id FROM articles WHERE article_num > ? ORDER BY article_num LIMIT ?`
 
 // RebuildThreadsFromScratch completely rebuilds all thread relationships for a newsgroup
 // This function deletes all existing threads and rebuilds them from article 1 based on message references
@@ -496,24 +503,20 @@ func (db *Database) RebuildThreadsFromScratch(newsgroup string, verbose bool, gr
 	}
 
 	msgIDToArticleNum := make(map[string]int64)
-	var offset int64 = 0
+	var lastNum int64
 	var totalBatches int64 = 0
 
-	for offset < report.TotalArticles {
+	for {
 		batchStart := time.Now()
-		currentBatchSize := RescanBatchSize
-		if offset+RescanBatchSize > report.TotalArticles {
-			currentBatchSize = report.TotalArticles - offset
-		}
 
 		// Load batch of article mappings
-		rows, err := RetryableQuery(groupDB.DB, query_RebuildThreadsFromScratch5, currentBatchSize, offset)
-
+		rows, err := RetryableQuery(groupDB.DB, query_RebuildThreadsFromScratch5, lastNum, RescanBatchSize)
 		if err != nil {
 			report.Errors = append(report.Errors, fmt.Sprintf("Failed to query articles batch: %v", err))
 			return report, err
 		}
 
+		var batchCount int64
 		for rows.Next() {
 			var articleNum int64
 			var messageID string
@@ -523,62 +526,101 @@ func (db *Database) RebuildThreadsFromScratch(newsgroup string, verbose bool, gr
 				return report, err
 			}
 			msgIDToArticleNum[messageID] = articleNum
+			lastNum = articleNum
+			batchCount++
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			report.Errors = append(report.Errors, fmt.Sprintf("Failed to iterate articles batch: %v", err))
+			return report, err
 		}
 		rows.Close()
 
-		offset += int64(currentBatchSize)
+		if batchCount == 0 {
+			break
+		}
 		totalBatches++
 
-		if verbose && offset%10000 == 0 {
-			log.Printf("RebuildThreadsFromScratch: Built message-ID mapping: %d/%d articles (batch took %v)",
-				offset, report.TotalArticles, time.Since(batchStart))
+		if verbose {
+			log.Printf("RebuildThreadsFromScratch: Built message-ID mapping: %d articles (batch took %v)",
+				len(msgIDToArticleNum), time.Since(batchStart))
+		}
+		if batchCount < RescanBatchSize {
+			break
 		}
 	}
 
 	if verbose {
-		avgBatchTime := time.Since(stepStart) / time.Duration(totalBatches)
 		log.Printf("RebuildThreadsFromScratch: Message-ID mapping complete: %d entries", len(msgIDToArticleNum))
-		log.Printf("⏱️  TIMER: Build message-ID mapping (total) took %v (avg batch: %v)", time.Since(stepStart), avgBatchTime)
+		log.Printf("⏱️  TIMER: Build message-ID mapping (total) took %v (%d batches)", time.Since(stepStart), totalBatches)
 	}
 
-	// TIMER: Step 3: Process articles in batches to build thread relationships
+	// TIMER: Step 3: Pass 1 - the parent of every article, per group: the nearest reference
+	// (last to first) that exists in this group. No hit means the article is a thread root
+	// here, with or without References - the same per-group rule intake applies
+	// (db_batch.go, batchProcessThreading).
 	stepStart = time.Now()
 	if verbose {
-		log.Printf("RebuildThreadsFromScratch: Building thread relationships...")
+		log.Printf("RebuildThreadsFromScratch: Building the parent map...")
 	}
 
-	offset = 0
-	totalBatches = 0
-	for offset < report.TotalArticles {
-		batchStart := time.Now()
-		currentBatchSize := RescanBatchSize
-		if offset+RescanBatchSize > report.TotalArticles {
-			currentBatchSize = report.TotalArticles - offset
-		}
-
-		threadsBuilt, err := db.processThreadBatch(groupDB, msgIDToArticleNum, offset, currentBatchSize, verbose)
-		if err != nil {
-			report.Errors = append(report.Errors, fmt.Sprintf("Failed to process thread batch at offset %d: %v", offset, err))
-			return report, err
-		}
-
-		report.ThreadsRebuilt += int64(threadsBuilt)
-		offset += int64(currentBatchSize)
-		totalBatches++
-
-		if verbose && offset%10000 == 0 {
-			log.Printf("RebuildThreadsFromScratch: Threading progress: %d/%d articles processed, %d threads built (batch took %v)",
-				offset, report.TotalArticles, report.ThreadsRebuilt, time.Since(batchStart))
-		}
+	st := newThreadRebuildState(msgIDToArticleNum)
+	if err := db.buildThreadParentMap(groupDB, st); err != nil {
+		report.Errors = append(report.Errors, fmt.Sprintf("Failed to build the parent map: %v", err))
+		return report, err
 	}
-
 	if verbose {
-		avgBatchTime := time.Since(stepStart) / time.Duration(totalBatches)
-		log.Printf("⏱️  TIMER: Build thread relationships (total) took %v (avg batch: %v)", time.Since(stepStart), avgBatchTime)
+		log.Printf("⏱️  TIMER: Build the parent map took %v (%d articles with a parent in this group)",
+			time.Since(stepStart), len(st.parentOf))
+	}
+
+	// TIMER: Step 4: Insert the thread roots. They go in before the replies: pass 2 resolves
+	// a root of its own for every article, and a group whose articles were filed out of order
+	// has roots with a higher article number than their children, so a child's thread_cache
+	// append has to wait until every root's row exists.
+	stepStart = time.Now()
+	if verbose {
+		log.Printf("RebuildThreadsFromScratch: Inserting thread roots...")
+	}
+
+	rootsBuilt, err := db.rebuildThreadRoots(groupDB, st)
+	if err != nil {
+		report.Errors = append(report.Errors, fmt.Sprintf("Failed to insert thread roots: %v", err))
+		return report, err
+	}
+	report.ThreadsRebuilt = rootsBuilt
+	if verbose {
+		log.Printf("⏱️  TIMER: Insert %d thread roots took %v", rootsBuilt, time.Since(stepStart))
+	}
+
+	// TIMER: Step 5: Insert the replies, append them to their root's thread_cache row and
+	// recompute articles.reply_count from the direct children.
+	stepStart = time.Now()
+	if verbose {
+		log.Printf("RebuildThreadsFromScratch: Inserting replies...")
+	}
+
+	repliesBuilt, err := db.rebuildThreadReplies(groupDB, st, verbose)
+	if err != nil {
+		report.Errors = append(report.Errors, fmt.Sprintf("Failed to insert replies: %v", err))
+		return report, err
+	}
+	if verbose {
+		log.Printf("⏱️  TIMER: Insert %d replies took %v", repliesBuilt, time.Since(stepStart))
+	}
+
+	// One line per group: a reference cycle (a self-reference included) is broken by making
+	// the article where it is detected a thread root.
+	if st.cycleRoots > 0 {
+		log.Printf("[RESCAN] group '%s': %d article(s) made thread roots to break a reference cycle (%d of them reference themselves)",
+			newsgroup, st.cycleRoots, st.selfRefs)
 	}
 
 	report.EndTime = time.Now()
 	report.Duration = report.EndTime.Sub(report.StartTime)
+
+	log.Printf("[RESCAN] group '%s': thread rebuild done: %d articles, %d thread roots, %d replies, %d rows deleted, took %v",
+		newsgroup, report.TotalArticles, rootsBuilt, repliesBuilt, report.ThreadsDeleted, report.Duration)
 
 	if verbose {
 		log.Printf("RebuildThreadsFromScratch: Completed successfully for newsgroup '%s'", newsgroup)
@@ -591,226 +633,364 @@ func (db *Database) RebuildThreadsFromScratch(newsgroup string, verbose bool, gr
 	return report, nil
 }
 
-const query_processThreadBatch1 = `
-		SELECT article_num, message_id, "references", date_sent
-		FROM articles
-		ORDER BY date_sent ASC
-		LIMIT ? OFFSET ?
-	`
+// query_threadRebuildRefs reads pass 1's input: only the articles that have a References
+// header can have a parent. query_threadRebuildArticles reads pass 2's input, every article
+// with the date its thread_cache row needs. Both page by article_num (the rowid).
+const query_threadRebuildRefs = `SELECT article_num, "references" FROM articles WHERE article_num > ? AND "references" IS NOT NULL AND "references" != '' ORDER BY article_num LIMIT ?`
+const query_threadRebuildArticles = `SELECT article_num, date_sent FROM articles WHERE article_num > ? ORDER BY article_num LIMIT ?`
+
 const query_processThreadBatch2 = "INSERT INTO threads (root_article, parent_article, child_article, depth, thread_order) VALUES (?, ?, ?, 0, 0)"
 const query_processThreadBatch3 = "INSERT INTO threads (root_article, parent_article, child_article, depth, thread_order) VALUES (?, ?, ?, ?, 0)"
 
-// processThreadBatch processes a batch of articles to build thread relationships
-// Based on the actual threading system: only ROOT articles go in threads table, replies only update thread_cache
-func (db *Database) processThreadBatch(groupDB *GroupDB, msgIDToArticleNum map[string]int64, offset, batchSize int64, verbose bool) (int, error) {
-	batchStartTime := time.Now()
+// articles.reply_count is recomputed from scratch: zero for the whole group, then one
+// increment per direct child. The increment (instead of a plain set) is what lets a parent's
+// children arrive in more than one chunk.
+const query_threadRebuildResetReplyCounts = "UPDATE articles SET reply_count = 0"
+const query_threadRebuildBumpReplyCount = "UPDATE articles SET reply_count = reply_count + ? WHERE article_num = ?"
 
-	// TIMER: Get batch of articles with their references and dates
-	stepStart := time.Now()
-	rows, err := RetryableQuery(groupDB.DB, query_processThreadBatch1, batchSize, offset)
-	if err != nil {
-		return 0, fmt.Errorf("failed to query articles: %w", err)
-	}
-	defer rows.Close()
-	if verbose {
-		log.Printf("⏱️    processThreadBatch: Query articles took %v", time.Since(stepStart))
-	}
+// threadPlace is where one article sits in the threads of its group: the article number of
+// its thread root and its depth below that root (0 = the article is the root itself).
+type threadPlace struct {
+	root  int64
+	depth int
+}
 
-	// TIMER: Separate roots and replies for processing
-	stepStart = time.Now()
-	var threadRoots []struct {
-		articleNum int64
-		dateSent   time.Time
-	}
-	var threadReplies []struct {
-		articleNum int64
-		parentNum  int64
-		rootNum    int64
-		dateSent   time.Time
-		depth      int
-	}
+// threadRootRow is one article of the group: its number and its date (the date a thread_cache
+// row of a root starts from).
+type threadRootRow struct {
+	articleNum int64
+	dateSent   time.Time
+}
 
-	// Process each article to determine if it's a root or reply
-	rowCount := 0
-	for rows.Next() {
-		var articleNum int64
-		var messageID, references string
-		var dateSent time.Time
+// threadReplyRow is one reply with its resolved place in the thread of its group.
+type threadReplyRow struct {
+	articleNum int64
+	parentNum  int64
+	rootNum    int64
+	depth      int
+}
 
-		err := rows.Scan(&articleNum, &messageID, &references, &dateSent)
-		if err != nil {
-			if verbose {
-				log.Printf("processThreadBatch: Error scanning article: %v", err)
-			}
+// threadRebuildState holds the whole-group threading state of one RebuildThreadsFromScratch
+// run and applies the per-group rule intake applies as well (db_batch.go,
+// batchProcessThreading): an article whose References name no article of this group is a
+// thread root here, with or without References; an article that has such a reference joins
+// the thread of the nearest one (last reference first). depth is the parent's depth + 1, not
+// the position in References: trimmed References (RFC 5537 3.4.4) make the position wrong.
+type threadRebuildState struct {
+	msgIDToArticleNum map[string]int64      // message-id -> article_num, every article of the group
+	parentOf          map[int64]int64       // article_num -> parent article_num (pass 1, replies only)
+	places            map[int64]threadPlace // pass 2 memo
+	cycleRoots        int64                 // articles made roots to break a reference cycle
+	selfRefs          int64                 // of those: articles whose nearest reference is themselves
+	walk              []int64               // scratch: the chain placeOf is currently walking up
+	onWalk            map[int64]int         // scratch: article_num -> its index in walk
+}
+
+func newThreadRebuildState(msgIDToArticleNum map[string]int64) *threadRebuildState {
+	return &threadRebuildState{
+		msgIDToArticleNum: msgIDToArticleNum,
+		parentOf:          make(map[int64]int64),
+		places:            make(map[int64]threadPlace),
+		onWalk:            make(map[int64]int),
+	}
+}
+
+// placeOf is pass 2 for one article: it follows parentOf up to an article without a parent,
+// which is the thread root, and counts the hops as the depth. Results are memoized, so the
+// whole group costs one walk per chain. A reference cycle is broken where it is detected: that
+// article becomes a thread root (counted in cycleRoots) and the resolution starts over, which
+// terminates because every round memoizes one more root.
+func (st *threadRebuildState) placeOf(articleNum int64) threadPlace {
+	if place, ok := st.places[articleNum]; ok {
+		return place
+	}
+	if _, hasParent := st.parentOf[articleNum]; !hasParent {
+		// A root without children: no need to keep it in the memo.
+		return threadPlace{root: articleNum, depth: 0}
+	}
+	for {
+		st.walk = st.walk[:0]
+		for num := range st.onWalk {
+			delete(st.onWalk, num)
+		}
+		base, restart := st.climbToRoot(articleNum)
+		if restart {
 			continue
 		}
-		rowCount++
+		// Hand the depths back down the chain: walk holds the unresolved articles, the one
+		// closest to the root last.
+		for i := len(st.walk) - 1; i >= 0; i-- {
+			base = threadPlace{root: base.root, depth: base.depth + 1}
+			st.places[st.walk[i]] = base
+		}
+		return st.places[articleNum]
+	}
+}
 
-		refs := db.parseReferences(references)
+// climbToRoot walks the parents of articleNum until it reaches a memoized place or an article
+// without a parent, collecting the unresolved articles in st.walk. It reports restart = true
+// when it had to break a cycle: the caller then resolves articleNum again, now that the
+// article the cycle was detected at is a memoized root.
+func (st *threadRebuildState) climbToRoot(articleNum int64) (threadPlace, bool) {
+	cur := articleNum
+	for {
+		if place, ok := st.places[cur]; ok {
+			return place, false
+		}
+		if _, onWalk := st.onWalk[cur]; onWalk {
+			// Back where we have already been: break the cycle here.
+			st.places[cur] = threadPlace{root: cur, depth: 0}
+			st.cycleRoots++
+			return threadPlace{}, true
+		}
+		st.onWalk[cur] = len(st.walk)
+		st.walk = append(st.walk, cur)
 
-		if len(refs) == 0 {
-			// This is a thread root - will be inserted into threads table
-			threadRoots = append(threadRoots, struct {
-				articleNum int64
-				dateSent   time.Time
-			}{articleNum, dateSent})
-		} else {
-			// This is a reply - find its immediate parent and thread root
-			var parentArticleNum, rootArticleNum int64
-			depth := 0
+		parent, hasParent := st.parentOf[cur]
+		if !hasParent || parent == cur {
+			// No parent in this group, or an article referencing itself: cur is the root.
+			if hasParent {
+				st.cycleRoots++
+				st.selfRefs++
+			}
+			place := threadPlace{root: cur, depth: 0}
+			st.places[cur] = place
+			st.walk = st.walk[:len(st.walk)-1]
+			delete(st.onWalk, cur)
+			return place, false
+		}
+		cur = parent
+	}
+}
 
-			// Find immediate parent (last reference that exists)
+// buildThreadParentMap is pass 1: the parent of every article of the group is the nearest
+// reference (last to first) that exists in this group.
+func (db *Database) buildThreadParentMap(groupDB *GroupDB, st *threadRebuildState) error {
+	var lastNum int64
+	for {
+		rows, err := RetryableQuery(groupDB.DB, query_threadRebuildRefs, lastNum, RescanBatchSize)
+		if err != nil {
+			return fmt.Errorf("failed to query references: %w", err)
+		}
+
+		var batchCount int64
+		for rows.Next() {
+			var articleNum int64
+			var references string
+			if err := rows.Scan(&articleNum, &references); err != nil {
+				rows.Close()
+				return fmt.Errorf("failed to scan references: %w", err)
+			}
+			batchCount++
+			lastNum = articleNum
+
+			refs := db.parseReferences(references)
 			for i := len(refs) - 1; i >= 0; i-- {
-				if parentNum, exists := msgIDToArticleNum[refs[i]]; exists {
-					parentArticleNum = parentNum
-					depth = i + 1 // Depth based on position in references
+				if parentNum, exists := st.msgIDToArticleNum[refs[i]]; exists {
+					st.parentOf[articleNum] = parentNum
 					break
 				}
 			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return fmt.Errorf("error iterating references: %w", err)
+		}
+		rows.Close()
 
-			// Find thread root (first reference that exists)
-			for i := 0; i < len(refs); i++ {
-				if rootNum, exists := msgIDToArticleNum[refs[i]]; exists {
-					rootArticleNum = rootNum
-					break
-				}
-			}
-
-			// If no root found in references, the immediate parent becomes the root
-			if rootArticleNum == 0 {
-				rootArticleNum = parentArticleNum
-			}
-
-			if parentArticleNum > 0 {
-				threadReplies = append(threadReplies, struct {
-					articleNum int64
-					parentNum  int64
-					rootNum    int64
-					dateSent   time.Time
-					depth      int
-				}{articleNum, parentArticleNum, rootArticleNum, dateSent, depth})
-			}
+		if batchCount < RescanBatchSize {
+			return nil
 		}
 	}
+}
 
-	if err = rows.Err(); err != nil {
-		return 0, fmt.Errorf("error iterating articles: %w", err)
+// readThreadArticleChunk reads the next chunk of articles after afterNum, ascending.
+func readThreadArticleChunk(groupDB *GroupDB, afterNum int64) ([]threadRootRow, error) {
+	rows, err := RetryableQuery(groupDB.DB, query_threadRebuildArticles, afterNum, RescanBatchSize)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query articles: %w", err)
 	}
-	if verbose {
-		log.Printf("⏱️    processThreadBatch: Process %d rows (roots=%d, replies=%d) took %v",
-			rowCount, len(threadRoots), len(threadReplies), time.Since(stepStart))
+	defer rows.Close()
+
+	chunk := make([]threadRootRow, 0, RescanBatchSize)
+	for rows.Next() {
+		var row threadRootRow
+		if err := rows.Scan(&row.articleNum, &row.dateSent); err != nil {
+			return nil, fmt.Errorf("failed to scan article: %w", err)
+		}
+		chunk = append(chunk, row)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating articles: %w", err)
+	}
+	return chunk, nil
+}
 
-	threadsBuilt := 0
-
-	// TIMER: Step 1: Insert thread ROOTS into threads table
-	if len(threadRoots) > 0 {
-		stepStart = time.Now()
-		tx, err := groupDB.DB.Begin()
+// rebuildThreadRoots inserts the threads row of every thread root of the group and
+// initializes its thread_cache row. Row shape: (root, NULL, root, 0), the one intake writes
+// (db_batch.go, batchProcessThreadRoots).
+func (db *Database) rebuildThreadRoots(groupDB *GroupDB, st *threadRebuildState) (int64, error) {
+	var lastNum, rootsBuilt int64
+	for {
+		chunk, err := readThreadArticleChunk(groupDB, lastNum)
 		if err != nil {
-			return 0, fmt.Errorf("failed to begin threads transaction: %w", err)
+			return rootsBuilt, err
 		}
-		defer tx.Rollback()
-
-		threadStmt, err := tx.Prepare(query_processThreadBatch2)
-		if err != nil {
-			return 0, fmt.Errorf("failed to prepare thread insert statement: %w", err)
+		if len(chunk) == 0 {
+			return rootsBuilt, nil
 		}
-		defer threadStmt.Close()
+		lastNum = chunk[len(chunk)-1].articleNum
 
-		for _, root := range threadRoots {
-			// For thread roots: root_article = child_article, parent_article = NULL
-			_, err = threadStmt.Exec(root.articleNum, nil, root.articleNum)
-			if err != nil {
-				if verbose {
-					log.Printf("processThreadBatch: Failed to insert thread root for article %d: %v", root.articleNum, err)
-				}
-				continue
+		roots := make([]threadRootRow, 0, len(chunk))
+		for _, row := range chunk {
+			if st.placeOf(row.articleNum).depth == 0 {
+				roots = append(roots, row)
 			}
-			threadsBuilt++
 		}
 
-		if err := tx.Commit(); err != nil {
-			return threadsBuilt, fmt.Errorf("failed to commit threads transaction: %w", err)
-		}
-		if verbose {
-			log.Printf("⏱️    processThreadBatch: Insert %d thread roots took %v", len(threadRoots), time.Since(stepStart))
-		}
-
-		// TIMER: Step 2: Initialize thread_cache for roots (BATCHED)
-		stepStart = time.Now()
-		if err := db.batchInitializeThreadCache(groupDB, threadRoots); err != nil {
-			if verbose {
-				log.Printf("processThreadBatch: Failed to batch initialize thread cache: %v", err)
+		if len(roots) > 0 {
+			if err := insertThreadRoots(groupDB, roots); err != nil {
+				return rootsBuilt, err
 			}
-			// Don't fail the whole operation for cache errors
+			rootsBuilt += int64(len(roots))
+
+			if err := db.batchInitializeThreadCache(groupDB, roots); err != nil {
+				// Cache errors do not fail the rebuild: the threads rows are written, which
+				// is what a later rebuild re-derives the cache from. The children of a root
+				// whose row is missing are skipped by updateThreadCacheWithChildren (its
+				// skipped count is logged with -v).
+				log.Printf("[RESCAN] group '%s': failed to initialize thread_cache for %d roots: %v",
+					groupDB.Newsgroup, len(roots), err)
+			}
 		}
-		if verbose {
-			log.Printf("⏱️    processThreadBatch: Batch initialize %d thread caches took %v", len(threadRoots), time.Since(stepStart))
+
+		if int64(len(chunk)) < RescanBatchSize {
+			return rootsBuilt, nil
 		}
 	}
+}
 
-	// TIMER: Step 3: Insert REPLIES into threads table
-	if len(threadReplies) > 0 {
-		stepStart = time.Now()
-		tx, err := groupDB.DB.Begin()
+// insertThreadRoots writes one chunk of thread roots in a single transaction.
+func insertThreadRoots(groupDB *GroupDB, roots []threadRootRow) error {
+	return RetryableTransactionExec(groupDB.DB, func(tx *sql.Tx) error {
+		stmt, err := tx.Prepare(query_processThreadBatch2)
 		if err != nil {
-			return threadsBuilt, fmt.Errorf("failed to begin replies transaction: %w", err)
+			return fmt.Errorf("failed to prepare thread root insert statement: %w", err)
 		}
-		defer tx.Rollback()
+		defer stmt.Close()
 
-		replyStmt, err := tx.Prepare(query_processThreadBatch3)
-		if err != nil {
-			return threadsBuilt, fmt.Errorf("failed to prepare reply insert statement: %w", err)
-		}
-		defer replyStmt.Close()
-
-		repliesBuilt := 0
-		for _, reply := range threadReplies {
-			// For replies: root_article = thread root, parent_article = immediate parent, child_article = this article
-			_, err = replyStmt.Exec(reply.rootNum, reply.parentNum, reply.articleNum, reply.depth)
-			if err != nil {
-				if verbose {
-					log.Printf("processThreadBatch: Failed to insert reply for article %d: %v", reply.articleNum, err)
-				}
-				continue
-			}
-			repliesBuilt++
-		}
-
-		if err := tx.Commit(); err != nil {
-			return threadsBuilt, fmt.Errorf("failed to commit replies transaction: %w", err)
-		}
-
-		if verbose {
-			log.Printf("⏱️    processThreadBatch: Insert %d replies took %v", repliesBuilt, time.Since(stepStart))
-		}
-
-		// TIMER: Step 4: Update thread_cache for replies (build cache updates from replies)
-		stepStart = time.Now()
-		threadCacheUpdates := make(map[int64][]int64) // Changed to map[rootID][]childArticleNums
-		for _, reply := range threadReplies {
-			threadCacheUpdates[reply.rootNum] = append(threadCacheUpdates[reply.rootNum], reply.articleNum)
-		}
-
-		if len(threadCacheUpdates) > 0 {
-			if err := db.updateThreadCacheWithChildren(groupDB, threadCacheUpdates, verbose); err != nil {
-				if verbose {
-					log.Printf("processThreadBatch: Failed to update thread cache: %v", err)
-				}
-				// Don't fail the whole operation for cache errors
+		for _, root := range roots {
+			// root_article = child_article = this article, parent_article = NULL, depth 0.
+			if _, err := stmt.Exec(root.articleNum, nil, root.articleNum); err != nil {
+				return fmt.Errorf("failed to insert thread root for article %d: %w", root.articleNum, err)
 			}
 		}
-		if verbose {
-			log.Printf("⏱️    processThreadBatch: Update thread cache for %d roots took %v", len(threadCacheUpdates), time.Since(stepStart))
+		return nil
+	})
+}
+
+// rebuildThreadReplies inserts the threads row of every reply of the group, appends the
+// replies to their root's thread_cache row and recomputes articles.reply_count as the number
+// of direct children. Row shape: (root, parent, child, parent depth + 1), the shape the web
+// tree and the intake rule share.
+func (db *Database) rebuildThreadReplies(groupDB *GroupDB, st *threadRebuildState, verbose bool) (int64, error) {
+	if _, err := RetryableExec(groupDB.DB, query_threadRebuildResetReplyCounts); err != nil {
+		return 0, fmt.Errorf("failed to reset reply counts: %w", err)
+	}
+
+	var lastNum, repliesBuilt int64
+	for {
+		chunk, err := readThreadArticleChunk(groupDB, lastNum)
+		if err != nil {
+			return repliesBuilt, err
+		}
+		if len(chunk) == 0 {
+			return repliesBuilt, nil
+		}
+		lastNum = chunk[len(chunk)-1].articleNum
+
+		replies := make([]threadReplyRow, 0, len(chunk))
+		for _, row := range chunk {
+			place := st.placeOf(row.articleNum)
+			if place.depth == 0 {
+				continue // a thread root, inserted by rebuildThreadRoots
+			}
+			replies = append(replies, threadReplyRow{
+				articleNum: row.articleNum,
+				parentNum:  st.parentOf[row.articleNum],
+				rootNum:    place.root,
+				depth:      place.depth,
+			})
+		}
+
+		if len(replies) > 0 {
+			if err := insertThreadReplies(groupDB, replies); err != nil {
+				return repliesBuilt, err
+			}
+			repliesBuilt += int64(len(replies))
+
+			// thread_cache: append this chunk's children to their root, and count the direct
+			// children of each parent for articles.reply_count.
+			cacheUpdates := make(map[int64][]int64, len(replies))
+			replyCounts := make(map[int64]int64, len(replies))
+			for _, reply := range replies {
+				cacheUpdates[reply.rootNum] = append(cacheUpdates[reply.rootNum], reply.articleNum)
+				replyCounts[reply.parentNum]++
+			}
+
+			if err := db.updateThreadCacheWithChildren(groupDB, cacheUpdates, verbose); err != nil {
+				// As before: a cache error does not fail the rebuild.
+				log.Printf("[RESCAN] group '%s': failed to update thread_cache for %d roots: %v",
+					groupDB.Newsgroup, len(cacheUpdates), err)
+			}
+			if err := bumpThreadReplyCounts(groupDB, replyCounts); err != nil {
+				return repliesBuilt, err
+			}
+		}
+
+		if int64(len(chunk)) < RescanBatchSize {
+			return repliesBuilt, nil
 		}
 	}
+}
 
-	if verbose {
-		log.Printf("⏱️  processThreadBatch: TOTAL batch processing took %v", time.Since(batchStartTime))
+// insertThreadReplies writes one chunk of replies in a single transaction.
+func insertThreadReplies(groupDB *GroupDB, replies []threadReplyRow) error {
+	return RetryableTransactionExec(groupDB.DB, func(tx *sql.Tx) error {
+		stmt, err := tx.Prepare(query_processThreadBatch3)
+		if err != nil {
+			return fmt.Errorf("failed to prepare reply insert statement: %w", err)
+		}
+		defer stmt.Close()
+
+		for _, reply := range replies {
+			if _, err := stmt.Exec(reply.rootNum, reply.parentNum, reply.articleNum, reply.depth); err != nil {
+				return fmt.Errorf("failed to insert reply for article %d: %w", reply.articleNum, err)
+			}
+		}
+		return nil
+	})
+}
+
+// bumpThreadReplyCounts adds one chunk's direct children to articles.reply_count.
+func bumpThreadReplyCounts(groupDB *GroupDB, counts map[int64]int64) error {
+	if len(counts) == 0 {
+		return nil
 	}
+	return RetryableTransactionExec(groupDB.DB, func(tx *sql.Tx) error {
+		stmt, err := tx.Prepare(query_threadRebuildBumpReplyCount)
+		if err != nil {
+			return fmt.Errorf("failed to prepare reply count update statement: %w", err)
+		}
+		defer stmt.Close()
 
-	return threadsBuilt, nil
+		for articleNum, count := range counts {
+			if _, err := stmt.Exec(count, articleNum); err != nil {
+				return fmt.Errorf("failed to update reply_count of article %d: %w", articleNum, err)
+			}
+		}
+		return nil
+	})
 }
 
 // query_initializeThreadCacheSimple1 is used by batchInitializeThreadCache (thread
@@ -825,10 +1005,7 @@ const query_initializeThreadCacheSimple1 = `
 	`
 
 // batchInitializeThreadCache initializes thread cache for multiple root articles in a single transaction
-func (db *Database) batchInitializeThreadCache(groupDB *GroupDB, threadRoots []struct {
-	articleNum int64
-	dateSent   time.Time
-}) error {
+func (db *Database) batchInitializeThreadCache(groupDB *GroupDB, threadRoots []threadRootRow) error {
 	if len(threadRoots) == 0 {
 		return nil
 	}
@@ -908,16 +1085,6 @@ func (db *Database) updateThreadCacheWithChildren(groupDB *GroupDB, rootUpdates 
 	skippedCount := 0
 
 	for rootArticle, childArticleNums := range rootUpdates {
-		// Build comma-separated child articles list
-		childArticlesStr := ""
-		if len(childArticleNums) > 0 {
-			childStrs := make([]string, len(childArticleNums))
-			for i, num := range childArticleNums {
-				childStrs[i] = fmt.Sprintf("%d", num)
-			}
-			childArticlesStr = strings.Join(childStrs, ",")
-		}
-
 		// Get current thread cache data
 		var currentCount int
 		var currentChildren string
@@ -930,29 +1097,40 @@ func (db *Database) updateThreadCacheWithChildren(groupDB *GroupDB, rootUpdates 
 			continue
 		}
 
-		// Merge with existing children (in case we're processing in batches)
-		var allChildren []string
-		if currentChildren != "" {
-			allChildren = append(allChildren, strings.Split(currentChildren, ",")...)
-		}
-		if childArticlesStr != "" {
-			allChildren = append(allChildren, strings.Split(childArticlesStr, ",")...)
-		}
-
-		// Remove duplicates and build final child list
-		childMap := make(map[string]bool)
-		for _, child := range allChildren {
-			if child != "" {
-				childMap[child] = true
+		// Merge with the children already listed (a root's children can arrive in more than
+		// one chunk) and write the result sorted by article number. Collecting them in a map
+		// and joining the map's keys made the column's order random from run to run, while
+		// intake (db_batch.go, batchUpdateThreadCache) appends children in arrival order,
+		// which for a group filed in order is ascending: sorting is what makes the rebuilt
+		// column equal to the one intake writes.
+		childSet := make(map[int64]bool, len(childArticleNums)+1)
+		for _, field := range strings.Split(currentChildren, ",") {
+			if field == "" {
+				continue
 			}
+			num, convErr := strconv.ParseInt(field, 10, 64)
+			if convErr != nil {
+				log.Printf("updateThreadCacheWithChildren: group '%s' root %d: dropping unparsable child_articles entry %q: %v",
+					groupDB.Newsgroup, rootArticle, field, convErr)
+				continue
+			}
+			childSet[num] = true
+		}
+		for _, num := range childArticleNums {
+			childSet[num] = true
 		}
 
-		var finalChildren []string
-		for child := range childMap {
-			finalChildren = append(finalChildren, child)
+		finalChildren := make([]int64, 0, len(childSet))
+		for num := range childSet {
+			finalChildren = append(finalChildren, num)
 		}
+		sort.Slice(finalChildren, func(i, j int) bool { return finalChildren[i] < finalChildren[j] })
 
-		finalChildrenStr := strings.Join(finalChildren, ",")
+		childStrs := make([]string, len(finalChildren))
+		for i, num := range finalChildren {
+			childStrs[i] = strconv.FormatInt(num, 10)
+		}
+		finalChildrenStr := strings.Join(childStrs, ",")
 		newMessageCount := 1 + len(finalChildren) // 1 for root + replies
 
 		// Update thread_cache with child articles list and correct message count
