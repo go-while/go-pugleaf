@@ -422,6 +422,9 @@ func TestEnqueueStopDrains(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	// Pin the queue clock to the enqueuer's: rows are due at the queue's now, and the test
+	// claims relative to qEpoch.
+	q.now = func() time.Time { return qEpoch }
 	defer func() {
 		if err := q.Close(); err != nil {
 			t.Errorf("Close: %v", err)
@@ -476,6 +479,9 @@ func TestEnqueueBatchMaxFlushes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	// Pin the queue clock to the enqueuer's: rows are due at the queue's now, and the test
+	// claims relative to qEpoch.
+	q.now = func() time.Time { return qEpoch }
 	defer func() {
 		if err := q.Close(); err != nil {
 			t.Errorf("Close: %v", err)

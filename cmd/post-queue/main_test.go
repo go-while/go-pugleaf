@@ -311,10 +311,11 @@ func TestPostQueueNoProvider(t *testing.T) {
 	dir := t.TempDir()
 	var ids []int64
 	pqWith(t, dir, func(db *database.Database) {
-		// precondition: the default providers OpenDatabase adds have posting off
+		// precondition: no default provider OpenDatabase adds is both enabled and posting (the
+		// tcpreset defaults allow posting but are disabled; post-queue uses enabled ones only)
 		for _, p := range mustProviders(t, db) {
-			if p.Posting {
-				t.Fatalf("precondition: default provider %s has posting enabled", p.Name)
+			if p.Enabled && p.Posting {
+				t.Fatalf("precondition: default provider %s is enabled and has posting on", p.Name)
 			}
 		}
 		ids = pqQueuedArticles(t, db, "pq.noprovider", 2)

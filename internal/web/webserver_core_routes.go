@@ -484,6 +484,7 @@ func (s *WebServer) setupRoutes() {
 	s.Router.POST("/admin/nntpusers/toggle", s.adminToggleNNTPUser)
 	s.Router.POST("/admin/nntpusers/enable", s.adminEnableNNTPUser)
 	s.Router.GET("/admin/peers", s.adminPeersPage)
+	s.Router.GET("/admin/peers/stats", s.adminPeerStatsPage)
 	s.Router.POST("/admin/peers", s.adminCreatePeer)
 	s.Router.POST("/admin/peers/update", s.adminUpdatePeer)
 	s.Router.POST("/admin/peers/delete", s.adminDeletePeer)
