@@ -108,8 +108,8 @@ func (c *ClientConnection) Handle() error {
 
 		// A handler error (usually a failed write) ends the connection without a 500.
 		err = c.handleCommand(line)
-		// A peer login (or a STARTTLS that dropped one) happened inside the handler:
-		// open or close the statistics of the connection for it (plan peering-stats).
+		// A peer login happened inside the handler (AUTHINFO): from here on the
+		// connection counts for that peer (plan peering-stats).
 		c.peerStatsPeer()
 		if err != nil {
 			if errors.Is(err, errQuit) || errors.Is(err, net.ErrClosed) {

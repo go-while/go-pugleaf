@@ -507,8 +507,8 @@ func (c *ClientConnection) peerName() string {
 // collector is called without holding any lock of this package.
 
 // peerStatsCheckedMax bounds the set of message-ids a connection CHECKed, so a long
-// streaming session cannot grow it without end. When an id falls out of the set, the
-// TAKETHIS that follows its CHECK counts as an offer of its own.
+// streaming session cannot grow it without end. When the set is dropped, the TAKETHIS that
+// follows its CHECK counts as an offer of its own.
 const peerStatsCheckedMax = 4096
 
 // connPeerStats are the peer statistics of one client connection.
@@ -517,7 +517,6 @@ type connPeerStats struct {
 	total   peerstats.Counters  // everything counted on this connection, for Closed
 	started time.Time           // when the connection began to count for ref
 	checked map[string]struct{} // ids CHECKed here and not transferred yet
-	order   []string            // insertion order of checked, to bound it
 }
 
 // peerStatsCollector is the server's collector, peerstats.Nop when there is none.
@@ -605,9 +604,9 @@ func (c *ClientConnection) peerStatsDenied() {
 }
 
 // peerStatsOffer reports whether this feed command is a new offer and remembers it: a CHECK
-// and the TAKETHIS (or IHAVE) of the same id on the same connection are one offer, as in
-// innd. check says whether the command was a CHECK; messageID is already valid, "" when the
-// command carried none.
+// and the TAKETHIS (or IHAVE) of the same id on the same connection are one offer (plan
+// peering-stats). check says whether the command was a CHECK; messageID is already valid,
+// "" when the command carried none.
 func (c *ClientConnection) peerStatsOffer(check bool, messageID string) bool {
 	c.peerStatsPeer()
 	ps := c.pstats
@@ -629,12 +628,12 @@ func (c *ClientConnection) peerStatsOffer(check bool, messageID string) bool {
 		if ps.checked == nil {
 			ps.checked = make(map[string]struct{})
 		}
-		if len(ps.order) >= peerStatsCheckedMax {
-			delete(ps.checked, ps.order[0])
-			ps.order = append(ps.order[:0], ps.order[1:]...)
+		if len(ps.checked) >= peerStatsCheckedMax {
+			// A peer that CHECKs this many ids without transferring them: start over
+			// instead of growing. Only an offer that straddles the reset counts twice.
+			clear(ps.checked)
 		}
 		ps.checked[messageID] = struct{}{}
-		ps.order = append(ps.order, messageID)
 	}
 	return true
 }
@@ -643,7 +642,7 @@ func (c *ClientConnection) peerStatsOffer(check bool, messageID string) bool {
 // it (plan peering-stats, "Counting rules"): offer says whether the command was a new
 // offer, code is the reply code, size the wire size of the article when it was read and dup
 // whether the store found the transferred article to be a duplicate (counted as Duplicate
-// instead of Rejected, as innd counts it).
+// instead of Rejected: innd's line has both counters and keeps them apart).
 func peerFeedCounters(offer bool, code int, size int64, dup bool) peerstats.Counters {
 	var d peerstats.Counters
 	if offer {
