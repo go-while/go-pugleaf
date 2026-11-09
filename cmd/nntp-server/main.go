@@ -73,7 +73,7 @@ func main() {
 	flag.StringVar(&plaintextAuth, "plaintextauth", "accept", "AUTHINFO on connections without TLS: accept (not advertised), advertise or refuse (483)")
 	flag.BoolVar(&readAuth, "readauth", false, "require AUTHINFO before reader commands (GROUP, ARTICLE, XOVER, ...)")
 	flag.BoolVar(&enforceUserMaxConns, "enforce-user-maxconns", false, "limit authenticated connections per NNTP user to its maxconns value")
-	flag.IntVar(&maxArtSize, "maxartsize", 0, "maximum article size in bytes (0 = config default 32768)")
+	flag.IntVar(&maxArtSize, "maxartsize", 0, "maximum article size in bytes; 0 = the admin setting \"Article Size Limit\" (web CFG, read live), else 32768; a peer's own limit (in_max_size) wins for its feed")
 	flag.DurationVar(&local430TTL, "local430ttl", nntp.DefaultLocal430TTL, "how long a message-id that answered 430 is answered from the negative cache without a new lookup")
 	flag.StringVar(&xrefMode, "xref", "partial", "Xref: header: off (none), partial (serving group only, no lookups) or full (all groups from the history index, one lookup per served article or per range chunk, see -xref-batched-lookup)")
 	flag.BoolVar(&xrefBatchedLookup, "xref-batched-lookup", true, "in -xref full, look up the Xref locations of each OVER/XOVER/HDR/XHDR range chunk (up to 1000 lines) with one history statement per shard database instead of one lookup per line")
@@ -225,6 +225,10 @@ func main() {
 	nntpServer.SetXrefMode(xref)
 	nntpServer.SetXrefBatchedLookup(xrefBatchedLookup)
 	nntpServer.SetPostCommitWait(postCommitWait)
+	if maxArtSize <= 0 {
+		// No -maxartsize: follow the admin setting "Article Size Limit" (config cache).
+		nntpServer.SetArticleSizeSource(db.ArticleSizeLimit)
+	}
 	log.Printf("[NNTP]: idletimeout=%s articledelay=%s groupdelay=%s errordelay=%s plaintextauth=%s readauth=%v enforce-user-maxconns=%v maxartsize=%d local430ttl=%s xref=%s xref-batched-lookup=%v bind=%q post-commit-wait=%s",
 		idleTimeout, articleDelay, groupDelay, errorDelay, plaintextAuth, readAuth, enforceUserMaxConns, nntpServer.MaxArticleBytes(), nntpServer.Local430TTL(), nntpServer.XrefMode(), nntpServer.XrefBatchedLookup(), mainConfig.Server.NNTP.Addr, nntpServer.PostCommitWait())
 	// Only a peer may feed this server (plan nntp-peering): read the peers table once here,

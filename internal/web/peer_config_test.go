@@ -13,7 +13,7 @@ func TestPeerConfigBothWays(t *testing.T) {
 	p := &models.Peer{Name: "b", PathToken: "news.b.example", Hosts: "198.51.100.7",
 		InPatterns: "comp.*, !comp.lang.*,@alt.binaries.*", OutEnabled: true, OutHost: "news.b.example",
 		OutPort: 119, OutPatterns: "*,!control*,!junk", MaxConns: 3}
-	got := peerConfigSnippets(p, "news.a.example")
+	got := peerConfigSnippets(p, "news.a.example", 0)
 
 	for _, want := range []string{
 		"peer news.a.example {\n    # the address(es) our feed comes from\n    hostname:        \"news.a.example\"",
@@ -54,7 +54,7 @@ func TestPeerConfigBothWays(t *testing.T) {
 func TestPeerConfigLoginOnly(t *testing.T) {
 	p := &models.Peer{Name: "c", PathToken: "news.c.example", InUsername: "c-feed", InPatterns: "*",
 		InPasswordHash: "$2a$10$secret", OutPassword: "out-secret"}
-	got := peerConfigSnippets(p, "news.a.example")
+	got := peerConfigSnippets(p, "news.a.example", 0)
 	if !strings.Contains(got.INN, "nothing to add, we do not feed you") {
 		t.Errorf("INN snippet: want no incoming.conf block:\n%s", got.INN)
 	}
@@ -76,8 +76,41 @@ func TestPeerConfigLoginOnly(t *testing.T) {
 
 // TestPeerConfigNoHost: without a configured host name the snippets use a visible placeholder.
 func TestPeerConfigNoHost(t *testing.T) {
-	got := peerConfigSnippets(&models.Peer{Name: "d", PathToken: "d", Hosts: "192.0.2.1", InPatterns: "*"}, " ")
+	got := peerConfigSnippets(&models.Peer{Name: "d", PathToken: "d", Hosts: "192.0.2.1", InPatterns: "*"}, " ", 0)
 	if !strings.Contains(got.INN, "news.your-site.example") || !strings.Contains(got.Diablo, "news.your-site.example") {
 		t.Errorf("want the placeholder host name:\n%s\n%s", got.INN, got.Diablo)
+	}
+}
+
+// TestPeerConfigMaxSize: the snippets announce the peer's own in_max_size, else the server
+// limit (admin setting "Article Size Limit"), as INN "<size" and Diablo "maxsize"; with
+// neither there is no size flag.
+func TestPeerConfigMaxSize(t *testing.T) {
+	base := models.Peer{Name: "m", PathToken: "m.example", Hosts: "192.0.2.1", InPatterns: "*"}
+
+	own := base
+	own.InMaxSize = 262144
+	got := peerConfigSnippets(&own, "news.a.example", 32768)
+	if !strings.Contains(got.INN, "    :Tm,<262144:innfeed!\n") {
+		t.Errorf("INN: want the peer's own limit <262144:\n%s", got.INN)
+	}
+	if !strings.Contains(got.Diablo, "    maxsize     256k\n") {
+		t.Errorf("Diablo: want maxsize 256k:\n%s", got.Diablo)
+	}
+
+	got = peerConfigSnippets(&base, "news.a.example", 32768)
+	if !strings.Contains(got.INN, "    :Tm,<32768:innfeed!\n") || !strings.Contains(got.Diablo, "    maxsize     32k\n") {
+		t.Errorf("want the server limit 32768 / 32k:\n%s\n%s", got.INN, got.Diablo)
+	}
+
+	got = peerConfigSnippets(&base, "news.a.example", 0)
+	if !strings.Contains(got.INN, "    :Tm:innfeed!\n") || strings.Contains(got.Diablo, "maxsize") {
+		t.Errorf("no limit known: want no size flag:\n%s\n%s", got.INN, got.Diablo)
+	}
+
+	odd := base
+	odd.InMaxSize = 100000
+	if got := peerConfigSnippets(&odd, "news.a.example", 0); !strings.Contains(got.Diablo, "    maxsize     100000\n") {
+		t.Errorf("Diablo: a size that is no multiple of 1024 is written in bytes:\n%s", got.Diablo)
 	}
 }

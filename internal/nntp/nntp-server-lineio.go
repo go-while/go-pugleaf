@@ -48,13 +48,43 @@ func maxArticleDrainBytes(limit int64) int64 {
 	return d
 }
 
-// MaxArticleBytes is the article size limit of this server: Config.NNTP.MaxArtSize,
-// or DefaultMaxArticleBytes when that is <= 0 or there is no config.
+// MaxArticleBytes is the article size limit of this server: the value of the size source
+// (SetArticleSizeSource) when it has one, else Config.NNTP.MaxArtSize, or
+// DefaultMaxArticleBytes when that is <= 0 or there is no config.
 func (s *NNTPServer) MaxArticleBytes() int64 {
-	if s != nil && s.Config != nil && s.Config.NNTP.MaxArtSize > 0 {
+	if s == nil {
+		return DefaultMaxArticleBytes
+	}
+	if fn := s.artSize.Load(); fn != nil {
+		if n, ok := (*fn)(); ok && n > 0 {
+			return n
+		}
+	}
+	if s.Config != nil && s.Config.NNTP.MaxArtSize > 0 {
 		return int64(s.Config.NNTP.MaxArtSize)
 	}
 	return DefaultMaxArticleBytes
+}
+
+// SetArticleSizeSource makes MaxArticleBytes follow fn (nntp-server: the admin setting
+// "Article Size Limit" when -maxartsize is not given). fn is called for every article, so it
+// must be cheap (the config cache); when it reports false, Config.NNTP.MaxArtSize applies.
+// nil removes the source.
+func (s *NNTPServer) SetArticleSizeSource(fn func() (int64, bool)) {
+	if fn == nil {
+		s.artSize.Store(nil)
+		return
+	}
+	s.artSize.Store(&fn)
+}
+
+// feedArticleBytes is the size limit of an article a peer feeds on this connection (IHAVE,
+// TAKETHIS): the peer's in_max_size when it has one, else the server limit.
+func (c *ClientConnection) feedArticleBytes() int64 {
+	if c.peer != nil && c.peer.InMaxSize > 0 {
+		return c.peer.InMaxSize
+	}
+	return c.server.MaxArticleBytes()
 }
 
 // readCommandLine reads one command line without its CR/LF. It returns

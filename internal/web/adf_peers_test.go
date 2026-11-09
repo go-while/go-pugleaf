@@ -140,7 +140,7 @@ func TestAdfPeersCreate(t *testing.T) {
 	}
 	// The configuration for the peer's side (INN and Diablo) is on the page, with the
 	// passwords as placeholders (checked by the secret loop above).
-	for _, want := range []string{"config-peer-", "Tm:innfeed!", "Diablo (dnewsfeeds)", "set for you on our side",
+	for _, want := range []string{"config-peer-", "Tm,&lt;32768:innfeed!", "Diablo (dnewsfeeds)", "set for you on our side",
 		`data-preset-for="in_patterns"`, `data-preset-for="out_patterns"`, "newsdeef text only", "$NEWSDEEFNOBINARY=\\"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("peers page lacks the peer configuration part %q", want)

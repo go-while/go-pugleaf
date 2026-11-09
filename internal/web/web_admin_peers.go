@@ -141,11 +141,14 @@ type AdminPeersPageData struct {
 	DefaultOutPatterns string
 	DefaultOutPort     int
 	DefaultMaxConns    int
-	PatternPresets     []PatternPreset // the preset menu of the patterns fields
-	NewsdeefINN        string          // the newsdeef.eu newsfeeds variables, for copying
-	NewsdeefMaxSize    int
-	Success            string
-	Error              string
+	// ServerMaxArtSize is the admin setting "Article Size Limit" (0 when unset): the limit of a
+	// peer without its own in_max_size, shown next to that field.
+	ServerMaxArtSize int64
+	PatternPresets   []PatternPreset // the preset menu of the patterns fields
+	NewsdeefINN      string          // the newsdeef.eu newsfeeds variables, for copying
+	NewsdeefMaxSize  int
+	Success          string
+	Error            string
 }
 
 // newPeerView copies a peer without its password hash and its outgoing password, so no template
@@ -179,10 +182,13 @@ func (s *WebServer) adminPeersPage(c *Context) {
 	if err != nil {
 		log.Printf("[WEB]: Failed to read %s for the peer config snippets: %v", config.CFG_KEY_HOSTNAME, err)
 	}
+	// The size limit the snippets announce for a peer without its own in_max_size: the admin
+	// setting "Article Size Limit", which nntp-server follows unless it runs with -maxartsize.
+	serverMax, _ := s.DB.ArticleSizeLimit()
 	views := make([]*PeerView, 0, len(peers))
 	for _, p := range peers {
 		v := newPeerView(p)
-		v.Config = peerConfigSnippets(v.Peer, ourHost)
+		v.Config = peerConfigSnippets(v.Peer, ourHost, serverMax)
 		v.InPatternsShort = patternsShort(v.InPatterns)
 		v.OutPatternsShort = patternsShort(v.OutPatterns)
 		if st, ok := stats[p.ID]; ok {
@@ -198,6 +204,7 @@ func (s *WebServer) adminPeersPage(c *Context) {
 		DefaultOutPatterns: "*,!control*,!junk",
 		DefaultOutPort:     119,
 		DefaultMaxConns:    4,
+		ServerMaxArtSize:   serverMax,
 		PatternPresets:     peerPatternPresets(),
 		NewsdeefINN:        newsdeefINNDefinitions(true),
 		NewsdeefMaxSize:    newsdeefMaxSize,
@@ -535,6 +542,15 @@ func peerFromForm(c *Context, peer *models.Peer) error {
 	peer.Hosts = strings.TrimSpace(c.PostForm("hosts"))
 	peer.InUsername = strings.TrimSpace(c.PostForm("in_username"))
 	peer.InPatterns = strings.TrimSpace(c.PostForm("in_patterns"))
+	// Empty means 0: the peer gets the server limit (unlike port and connections, clearing
+	// the field is how the admin removes the peer's own limit).
+	if inMax, given, err := peerFormInt(c, "in_max_size", "Max article size"); err != nil {
+		return err
+	} else if given {
+		peer.InMaxSize = int64(inMax)
+	} else {
+		peer.InMaxSize = 0
+	}
 	peer.OutEnabled = peerFormBool(c, "out_enabled")
 	peer.OutHost = strings.TrimSpace(c.PostForm("out_host"))
 	if outPortGiven {
