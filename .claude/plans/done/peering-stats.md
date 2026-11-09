@@ -124,3 +124,21 @@ CLAUDE.md checks (gofmt, go vet, go build, the full `go test -race` list) plus `
 - Leftover (known, not fixed): connections refused at the accept limit are not counted; outgoing Denied is not
   counted for a 502 greeting (BackendConn hides the code); `<peer>:<n>` of a closed line is the newest
   connection number when one peer has several connections.
+
+## Outcome (2026-11-09)
+- Integration branch `plan-peering-stats`, merged into testing-001 as a8cde3f; deployed as 0.6.7 on mbox-mo1.
+- Worktree branches (left for the user): `worktree-agent-ad84c5c263d9d6fb6` (peerstats-core),
+  `worktree-agent-ae90ca956238f021a` (web-stats), `worktree-agent-a95c100c226dbaa48` (stats-in), all under
+  /tank0/claude/trees/go-pugleaf/.
+- Extra fixes found on the way: 2dacce0 (TestEnqueueStopDrains clock), 71b6c63 (post-queue test precondition
+  after the tcpreset posting default), cd3e3e3 (empty-state wording).
+- Verification: full CLAUDE.md test list green (feed and peerstats now part of it); two-server end-to-end on
+  ./data-test-peerstats-{a,b}: disabled row → denied 4 / conns 2 on B, out offered/deferred/denied on A; enabled →
+  10 accepted, 8240 bytes both sides; innd/innfeed lines in syslog shape; /admin/peers/stats 200 with the numbers,
+  survives a restart.
+- Leftovers: `TestSenderStopUnblocksSend` (internal/feed/sender_test.go:612) flaked once under heavy load
+  (connection live before the item is claimed); a reader connecting from a peer's address counts as a peer
+  connection (conns + innd connected/closed lines, no article counters); accept-limit refusals and 502 greetings
+  are not counted; `<peer>:<n>` of a closed line is the newest connection number; e2e needs resolvable
+  -nntphostname (validateHostname does a DNS lookup); a stale `.update` in the cwd makes cmd/web shut down after
+  60 s (update monitor), relevant when running it from the checkout.
