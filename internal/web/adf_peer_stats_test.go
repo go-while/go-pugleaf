@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -105,6 +106,22 @@ func adfPeerStatsTile(n int64, label string) string {
 	return fmt.Sprintf(`<div class="h5 mb-0">%d</div><small class="text-muted">%s</small>`, n, label)
 }
 
+// adfPeerStatsPeersTile is the peers tile of the configured peer rows: enabled of total.
+func adfPeerStatsPeersTile(t *testing.T) string {
+	t.Helper()
+	peers, err := w0DB(t).GetPeers()
+	if err != nil {
+		t.Fatalf("GetPeers: %v", err)
+	}
+	enabled := 0
+	for _, p := range peers {
+		if p.Enabled {
+			enabled++
+		}
+	}
+	return fmt.Sprintf(`<div class="h5 mb-0">%d / %d</div><small class="text-muted">peers enabled</small>`, enabled, len(peers))
+}
+
 // adfPeerStatsHour is the start of an hour n hours before the current one.
 func adfPeerStatsHour(n int64) int64 { return peerstats.HourOf(time.Now()) - n*3600 }
 
@@ -130,6 +147,9 @@ func adfPeerStatsPeer(t *testing.T, enabled bool) *models.Peer {
 func TestAdfPeerStatsNoStore(t *testing.T) {
 	_, cookie := w0NewUser(t, true)
 
+	// A disabled peer row and nothing else: the page must still say that this host has a peer.
+	adfPeerStatsPeer(t, false)
+
 	SetPeerStatsOpener(nil)
 	body := adfPeerStatsBody(t, cookie, "")
 	if !strings.Contains(body, "No statistics yet:") {
@@ -137,6 +157,14 @@ func TestAdfPeerStatsNoStore(t *testing.T) {
 	}
 	if strings.Contains(body, `<h6 class="mb-0">Incoming</h6>`) {
 		t.Error("page without an opener shows the direction tables")
+	}
+	// The peers tile and the queue tile do not come from the statistics store, so the empty
+	// state shows them: "0 enabled / 1" for a host whose only peer row is disabled.
+	if want := adfPeerStatsPeersTile(t); !strings.Contains(body, want) {
+		t.Errorf("the empty state lacks the peers tile %q", want)
+	}
+	if want := `<div class="h5 mb-0">n/a</div><small class="text-muted">outgoing queue</small>`; !strings.Contains(body, want) {
+		t.Error("the empty state does not show the outgoing queue as n/a without a feed queue file")
 	}
 
 	// An opener is wired but the store file does not exist: still nothing, and the opener is
@@ -286,7 +314,7 @@ func TestAdfPeerStatsPage(t *testing.T) {
 	}
 	// The charts are server-generated SVG: the statistics themselves bring no script and no
 	// external asset along (in ends where out begins, so this is page content only).
-	if strings.Contains(in, "<script") || strings.Contains(in, "//") {
+	if strings.Contains(in, "<script") || strings.Contains(in, `src="//`) || strings.Contains(in, "http") {
 		t.Error("the incoming section loads a script or an external asset")
 	}
 }
@@ -308,31 +336,47 @@ func TestAdfPeerStatsRanges(t *testing.T) {
 
 	cases := []struct {
 		query    string
-		hours    int64
+		hours    int64 // the hours the handler must ask the store for (0: the day-aligned range)
+		days     bool  // the bars are days: the range starts at a UTC midnight
 		accepted int64
 		slot     string
 		label    string
 	}{
-		{"", 24, 5, "hour", "24 hours"},
-		{"?range=24h", 24, 5, "hour", "24 hours"},
-		{"?range=7d", 7 * 24, 705, "hour", "7 days"},
-		{"?range=30d", 30 * 24, 9705, "day", "30 days"},
-		{"?range=../../etc/passwd", 24, 5, "hour", "24 hours"},
-		{"?range=99y", 24, 5, "hour", "24 hours"},
+		{query: "", hours: 24, accepted: 5, slot: "hour", label: "24 hours"},
+		{query: "?range=24h", hours: 24, accepted: 5, slot: "hour", label: "24 hours"},
+		{query: "?range=7d", hours: 7 * 24, accepted: 705, slot: "hour", label: "7 days"},
+		{query: "?range=30d", days: true, accepted: 9705, slot: "day", label: "30 days"},
+		{query: "?range=../../etc/passwd", hours: 24, accepted: 5, slot: "hour", label: "24 hours"},
+		{query: "?range=99y", hours: 24, accepted: 5, slot: "hour", label: "24 hours"},
 	}
 	for _, tc := range cases {
 		r.ranges = nil
+		// The end of the range is the end of the hour the request falls into, which may be the
+		// next one when the hour turns between here and the handler.
+		endBefore := peerstats.HourOf(time.Now()) + 3600
 		body := adfPeerStatsBody(t, cookie, tc.query)
 		if len(r.ranges) != 1 {
 			t.Fatalf("%q: ReadRange called %d time(s), want 1", tc.query, len(r.ranges))
 		}
 		got := r.ranges[0]
-		if h := (got[1] - got[0]) / 3600; h != tc.hours {
-			t.Errorf("%q: read %d hours, want %d", tc.query, h, tc.hours)
+		switch {
+		case tc.days:
+			// A day range starts at a UTC midnight, so one bar is one calendar day; its last
+			// bar is the partial day up to now, which makes it 29 to 30 days long.
+			if got[0]%86400 != 0 {
+				t.Errorf("%q: range starts at %d, which is no UTC midnight", tc.query, got[0])
+			}
+			if h := (got[1] - got[0]) / 3600; h < 29*24 || h > 30*24 {
+				t.Errorf("%q: read %d hours, want 29 to 30 days", tc.query, h)
+			}
+		default:
+			if h := (got[1] - got[0]) / 3600; h != tc.hours {
+				t.Errorf("%q: read %d hours, want %d", tc.query, h, tc.hours)
+			}
 		}
 		// The range ends at the end of the current hour, so the hour still being counted shows.
-		if want := peerstats.HourOf(time.Now()) + 3600; got[1] != want {
-			t.Errorf("%q: range ends at %d, want %d (the current hour + 1)", tc.query, got[1], want)
+		if got[1] != endBefore && got[1] != endBefore+3600 {
+			t.Errorf("%q: range ends at %d, want %d (the current hour + 1)", tc.query, got[1], endBefore)
 		}
 		if want := adfPeerStatsTile(tc.accepted, "accepted"); !strings.Contains(body, want) {
 			t.Errorf("%q: page lacks the tile %q", tc.query, want)
@@ -499,5 +543,77 @@ func TestAdfPeerStatsAggregate(t *testing.T) {
 	empty := buildPeerStatsDirection("Incoming", peerstats.In, nil, from, to, rng, peers, nil)
 	if !empty.Chart.Empty || len(empty.Rows) != 0 {
 		t.Errorf("empty direction: chart empty=%v, rows=%d", empty.Chart.Empty, len(empty.Rows))
+	}
+}
+
+// TestAdfPeerStatsWindow: the window the page reads. An hourly range ends at the end of the
+// current hour; a range whose bars are days starts at a UTC midnight, so a day bar is one
+// calendar day and the traffic of today is not counted into yesterday's bar.
+func TestAdfPeerStatsWindow(t *testing.T) {
+	// A fixed instant, and the same instant in another zone: the window must not depend on the
+	// zone of the web process, only on the UTC hours of the store.
+	now := time.Date(2026, 11, 9, 14, 37, 12, 0, time.UTC)
+	elsewhere := now.In(time.FixedZone("UTC-9", -9*3600))
+
+	cases := []struct {
+		key        string
+		from, to   time.Time
+		wantAnchor bool // the start must be a UTC midnight
+	}{
+		{key: "24h", from: time.Date(2026, 11, 8, 15, 0, 0, 0, time.UTC), to: time.Date(2026, 11, 9, 15, 0, 0, 0, time.UTC)},
+		{key: "7d", from: time.Date(2026, 11, 2, 15, 0, 0, 0, time.UTC), to: time.Date(2026, 11, 9, 15, 0, 0, 0, time.UTC)},
+		{key: "30d", from: time.Date(2026, 10, 11, 0, 0, 0, 0, time.UTC), to: time.Date(2026, 11, 9, 15, 0, 0, 0, time.UTC), wantAnchor: true},
+	}
+	for _, tc := range cases {
+		for _, in := range []time.Time{now, elsewhere} {
+			from, to := peerStatsWindow(peerStatsRangeByKey(tc.key), in)
+			if from != tc.from.Unix() || to != tc.to.Unix() {
+				t.Errorf("%s window (now %s) = %s .. %s, want %s .. %s", tc.key, in,
+					time.Unix(from, 0).UTC(), time.Unix(to, 0).UTC(), tc.from, tc.to)
+			}
+			if tc.wantAnchor && from%86400 != 0 {
+				t.Errorf("%s window starts at %s, which is no UTC midnight", tc.key, time.Unix(from, 0).UTC())
+			}
+		}
+	}
+
+	// A day range that ends exactly at a UTC midnight is 30 whole days, not 31 bars.
+	rng := peerStatsRangeByKey("30d")
+	from, to := peerStatsWindow(rng, time.Date(2026, 11, 9, 23, 30, 0, 0, time.UTC))
+	if to != time.Date(2026, 11, 10, 0, 0, 0, 0, time.UTC).Unix() || (to-from)/86400 != 29 {
+		t.Errorf("30d window at a midnight = %s .. %s", time.Unix(from, 0).UTC(), time.Unix(to, 0).UTC())
+	}
+}
+
+// TestAdfPeerStatsChartGeometry: every segment stays inside the viewBox, also when the minimum
+// height of a tiny segment is added on the tallest bar, and a day bar says which day it counts.
+func TestAdfPeerStatsChartGeometry(t *testing.T) {
+	// 1000 accepted and 1 refused: the refused segment is bumped to its minimum height, which
+	// would push it above the chart without the clamp.
+	chart := peerStatsBuildChart([]peerstats.Counters{{Accepted: 1000, Refused: 1}}, peerstats.HourOf(time.Now()), 3600)
+	if chart.Empty || len(chart.Bars) != 1 {
+		t.Fatalf("chart empty=%v with %d bars", chart.Empty, len(chart.Bars))
+	}
+	for i, seg := range chart.Bars[0].Segs {
+		y, err := strconv.ParseFloat(seg.Y, 64)
+		if err != nil {
+			t.Fatalf("segment %d has the unparsable y %q: %v", i, seg.Y, err)
+		}
+		h, err := strconv.ParseFloat(seg.H, 64)
+		if err != nil {
+			t.Fatalf("segment %d has the unparsable height %q: %v", i, seg.H, err)
+		}
+		if y < 0 || h <= 0 || y+h > peerStatsChartHeight+0.001 {
+			t.Errorf("segment %d is outside the viewBox: y=%v h=%v (height %d)", i, y, h, peerStatsChartHeight)
+		}
+	}
+
+	// A day bar is titled with its UTC day, an hour bar with its UTC hour.
+	day := time.Date(2026, 10, 11, 0, 0, 0, 0, time.UTC).Unix()
+	if got := peerStatsSlotTitle(day, 86400, peerstats.Counters{Accepted: 1}); !strings.HasPrefix(got, "2026-10-11 UTC: ") {
+		t.Errorf("day bar title = %q", got)
+	}
+	if got := peerStatsSlotTitle(day+16*3600, 3600, peerstats.Counters{Accepted: 1}); !strings.HasPrefix(got, "2026-10-11 16:00 UTC: ") {
+		t.Errorf("hour bar title = %q", got)
 	}
 }

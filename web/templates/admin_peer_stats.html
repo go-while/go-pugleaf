@@ -47,7 +47,16 @@
                  class="btn btn-sm {{if eq .Key $active}}btn-primary{{else}}btn-outline-primary{{end}}">{{.Label}}</a>
             {{end}}
           </div>
-          <small class="text-muted ps-wrap">{{.FromLabel}} &ndash; {{.ToLabel}} &middot; one bar = one {{.SlotLabel}}</small>
+          <small class="text-muted ps-wrap">{{.FromLabel}} &ndash; {{.ToLabel}} UTC &middot; one bar = one {{.SlotLabel}}</small>
+        </div>
+
+        <!-- The peer rows and the outgoing queue depth do not come from the statistics store,
+             so they are shown even before the first flush. -->
+        <div class="d-flex flex-wrap gap-2 mb-3">
+          <div class="card ps-tile flex-fill text-center"><div class="card-body p-2">
+            <div class="h5 mb-0">{{.PeersEnabled}} / {{.PeersTotal}}</div><small class="text-muted">peers enabled</small></div></div>
+          <div class="card ps-tile flex-fill text-center"><div class="card-body p-2">
+            <div class="h5 mb-0">{{if .QueueKnown}}{{.QueueTotal}}{{else}}n/a{{end}}</div><small class="text-muted">outgoing queue</small></div></div>
         </div>
 
         {{if not .Available}}

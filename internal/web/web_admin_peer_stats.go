@@ -147,11 +147,17 @@ type AdminPeerStatsPageData struct {
 	Ranges    []PeerStatsRange
 	Range     string // the active range key
 	Available bool   // false: no store file, no opener, or it could not be read
-	FromLabel string // start of the range, local time
-	ToLabel   string // end of the range, local time
+	FromLabel string // start of the range, UTC (the hours of the store are UTC)
+	ToLabel   string // end of the range, UTC
 	SlotLabel string // "hour" / "day": what one bar stands for
-	In        PeerStatsDirection
-	Out       PeerStatsDirection
+	// The peer rows themselves, so a host whose peers are all disabled still sees that it has
+	// peers at all (shown in the empty state too).
+	PeersEnabled int
+	PeersTotal   int
+	QueueTotal   int64 // articles waiting in the outgoing feed queue, over all peers
+	QueueKnown   bool  // false: no feed queue file to read the depths from
+	In           PeerStatsDirection
+	Out          PeerStatsDirection
 }
 
 // adminPeerStatsPage renders GET /admin/peers/stats.
@@ -162,34 +168,58 @@ func (s *WebServer) adminPeerStatsPage(c *Context) {
 	// The page has no form and shows no flash of its own: the peer forms redirect to
 	// /admin/peers, which is where their messages belong.
 	rng := peerStatsRangeByKey(strings.TrimSpace(c.Query("range")))
-	// The range ends at the end of the current hour, so the hour that is still being counted
-	// shows up (the writer flushes once a minute).
-	now := time.Now()
-	toHour := peerstats.HourOf(now) + 3600
-	fromHour := toHour - rng.Hours*3600
-
+	fromHour, toHour := peerStatsWindow(rng, time.Now())
 	buckets, available := s.peerStatsBuckets(fromHour, toHour)
+
+	// The peers and the queue depths do not come from the statistics store, so they are shown
+	// whether or not there are statistics yet.
+	peers := s.peerStatsPeers()
+	queues := s.peerStatsQueues()
 
 	data := AdminPeerStatsPageData{
 		TemplateData: s.getBaseTemplateData(c, "Admin: Peering Statistics"),
 		Ranges:       peerStatsRanges,
 		Range:        rng.Key,
 		Available:    available,
-		FromLabel:    time.Unix(fromHour, 0).Format("2006-01-02 15:04"),
-		ToLabel:      time.Unix(toHour, 0).Format("2006-01-02 15:04"),
-		SlotLabel:    "hour",
+		// The store counts hours in UTC, so the whole page is UTC and says so.
+		FromLabel:  time.Unix(fromHour, 0).UTC().Format("2006-01-02 15:04"),
+		ToLabel:    time.Unix(toHour, 0).UTC().Format("2006-01-02 15:04"),
+		SlotLabel:  "hour",
+		PeersTotal: len(peers),
+		QueueKnown: queues != nil,
 	}
 	if rng.SlotHours > 1 {
 		data.SlotLabel = "day"
 	}
+	for _, p := range peers {
+		if p.Enabled {
+			data.PeersEnabled++
+		}
+	}
+	for _, depth := range queues {
+		data.QueueTotal += depth
+	}
 
 	if available {
-		peers := s.peerStatsPeers()
-		queues := s.peerStatsQueues()
 		data.In = buildPeerStatsDirection("Incoming", peerstats.In, buckets, fromHour, toHour, rng, peers, nil)
 		data.Out = buildPeerStatsDirection("Outgoing", peerstats.Out, buckets, fromHour, toHour, rng, peers, queues)
 	}
 	s.renderPage(c, http.StatusOK, data, "admin_peer_stats.html")
+}
+
+// peerStatsWindow is the [from, to) the page shows, in the Unix hours of the store. It ends at
+// the end of the current hour, so the hour that is still being counted shows up (the writer
+// flushes once a minute). A range whose bars are days starts at a UTC midnight instead, so one
+// bar is one calendar day and today's traffic is not counted into yesterday's bar; its last bar
+// is then the partial day up to now.
+func peerStatsWindow(rng PeerStatsRange, now time.Time) (fromHour, toHour int64) {
+	toHour = peerstats.HourOf(now) + 3600
+	if rng.SlotHours <= 1 {
+		return toHour - rng.Hours*3600, toHour
+	}
+	slot := rng.SlotHours * 3600
+	// The slot the end falls into, minus the whole slots before it.
+	return toHour - toHour%slot - (rng.Hours/rng.SlotHours-1)*slot, toHour
 }
 
 // peerStatsBuckets reads the hourly buckets of [fromHour, toHour). The second result is false
@@ -401,6 +431,15 @@ func peerStatsBuildChart(perSlot []peerstats.Counters, fromHour, slot int64) Pee
 				h = 0.7 // a single article stays visible
 			}
 			y -= h
+			if y < 0 {
+				// The tallest bar fills the chart: the minimum height above must not push a
+				// segment out of the viewBox, so it is cut off at the top instead.
+				h += y
+				y = 0
+			}
+			if h <= 0 {
+				continue
+			}
 			bar.Segs = append(bar.Segs, PeerStatsSeg{Y: peerStatsNum(y), H: peerStatsNum(h), Class: seg.class})
 		}
 		chart.Bars = append(chart.Bars, bar)
@@ -413,12 +452,13 @@ func peerStatsBarTotal(c peerstats.Counters) int64 {
 	return c.Accepted + c.Refused + c.Rejected + c.Duplicate + c.Denied
 }
 
-// peerStatsSlotTitle is the tooltip of one bar.
+// peerStatsSlotTitle is the tooltip of one bar: the hour (or the day) it counts, in UTC like
+// every other time on the page and like the hours of the store itself.
 func peerStatsSlotTitle(start, slot int64, c peerstats.Counters) string {
-	t := time.Unix(start, 0)
-	when := t.Format("2006-01-02 15:04")
+	t := time.Unix(start, 0).UTC()
+	when := t.Format("2006-01-02 15:04") + " UTC"
 	if slot >= 86400 {
-		when = t.Format("2006-01-02")
+		when = t.Format("2006-01-02") + " UTC"
 	}
 	return fmt.Sprintf("%s: accepted %d, refused %d, rejected %d, duplicate %d, denied %d",
 		when, c.Accepted, c.Refused, c.Rejected, c.Duplicate, c.Denied)
