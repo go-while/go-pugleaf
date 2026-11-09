@@ -32,6 +32,10 @@ type ClientConnection struct {
 	currentFirst   int64
 	currentLast    int64
 	currentArticle int64
+
+	// pstats are the peer statistics of this connection (plan peering-stats), nil until it
+	// counts for a peer.
+	pstats *connPeerStats
 }
 
 // NewClientConnection creates a new client connection
@@ -61,9 +65,14 @@ func (c *ClientConnection) Handle() error {
 	// current one sends the TLS close_notify (T-rfc-commands-2).
 	defer func() { _ = c.textConn.Close() }()
 
+	// The peer statistics of this connection end with it (plan peering-stats): Closed
+	// reports the totals of this one connection, or nothing when it never counted.
+	defer c.peerStatsClose()
+
 	// A peer without a login is recognised by its address before the greeting (plan
 	// nntp-peering); peers with a login follow in handleAuthInfo.
 	c.resolvePeer()
+	c.peerStatsPeer()
 
 	// Send welcome message
 	if err := c.sendWelcome(); err != nil {
@@ -98,7 +107,11 @@ func (c *ClientConnection) Handle() error {
 		c.UpdateDeadlines()
 
 		// A handler error (usually a failed write) ends the connection without a 500.
-		if err := c.handleCommand(line); err != nil {
+		err = c.handleCommand(line)
+		// A peer login happened inside the handler (AUTHINFO): from here on the
+		// connection counts for that peer (plan peering-stats).
+		c.peerStatsPeer()
+		if err != nil {
 			if errors.Is(err, errQuit) || errors.Is(err, net.ErrClosed) {
 				return nil // QUIT, or the socket was closed by Stop mid-reply
 			}

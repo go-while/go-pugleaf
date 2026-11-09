@@ -17,6 +17,7 @@ import (
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
+	"github.com/go-while/go-pugleaf/internal/peerstats"
 )
 
 // Forward declaration to avoid circular imports
@@ -107,7 +108,12 @@ type NNTPServer struct {
 	// Peers decides which connections may feed (IHAVE/CHECK/TAKETHIS/MODE STREAM, plan
 	// nntp-peering). nil: no peers, so nothing may feed. It caches the peers table and
 	// starts no goroutine.
-	Peers    *PeerRegistry
+	Peers *PeerRegistry
+	// peerStats counts what peers feed us (plan peering-stats); SetPeerStats installs the
+	// collector, PeerStats reads it. An atomic pointer, so it may be set while the server
+	// runs; nil means peerstats.Nop, which counts nothing.
+	peerStats atomic.Pointer[peerstats.Collector]
+
 	shutdown chan struct{}
 	wg       *sync.WaitGroup // Use external waitgroup for coordination
 	mu       sync.RWMutex
@@ -566,6 +572,29 @@ func (s *NNTPServer) Stop() error {
 	}
 	log.Printf("[NNTP] stats: %s", s.Stats.Summary())
 	return nil
+}
+
+// SetPeerStats installs the collector of the incoming peer statistics (plan peering-stats);
+// nil switches the counting off again (peerstats.Nop).
+func (s *NNTPServer) SetPeerStats(c peerstats.Collector) {
+	if s == nil {
+		return
+	}
+	if c == nil {
+		c = peerstats.Nop
+	}
+	s.peerStats.Store(&c)
+}
+
+// PeerStats is the installed collector, peerstats.Nop when there is none.
+func (s *NNTPServer) PeerStats() peerstats.Collector {
+	if s == nil {
+		return peerstats.Nop
+	}
+	if p := s.peerStats.Load(); p != nil && *p != nil {
+		return *p
+	}
+	return peerstats.Nop
 }
 
 // IsRunning returns whether the server is currently running
