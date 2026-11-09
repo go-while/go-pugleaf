@@ -153,3 +153,21 @@ gofmt on touched dirs, `go vet ./...`, `go build ./...`, the full race test list
   its threading mode; expire-news still drops the rows of all replies when a thread root expires (they are
   orphans until a rebuild); intake writes child_articles in DateSent order, the rebuild sorted by number
   (membership identical); intake stores a future root_date verbatim, the rebuild clamps it.
+
+## Outcome (2026-11-09)
+- Integration branch `plan-thread-orphan-followups`, merged into testing-001 as 4f9be95 (local only, not pushed or
+  deployed, by the user's choice).
+- Worktree branches (left for the user): `worktree-agent-a733fd9dc15264f53` (intake),
+  `worktree-agent-a44f5932a9ee2203a` (rebuild), under /tank0/claude/trees/go-pugleaf/.
+- Verification: full CLAUDE.md test list green (33 packages); 27 TestThr* tests incl. the parity test; mbox
+  end-to-end on ./data-test-thread-orphans: test.a R+F2, test.b F1(+F3) and F2 as roots, web thread list shows
+  both; a reply with an earlier Date than its parent in one batch attaches (order-independent placement); a reply
+  and its parent in two imports stay two roots (pinned) and the rebuild merges them; rebuild leaves the in-order
+  groups row-identical, writes last_activity = newest date per thread, is idempotent.
+- E2E notes: mbox-importer files an article into one group only (crossposts are not processed), so the
+  crosspost leg needs a second import with -group; GetTotalThreadsCount (the only GetThreadsCount caller) has no
+  caller, so no page shows a thread total.
+- After deploying: run `recover-db -data <dir> -group '$all' -rebuild-threads -force` once with web and
+  nntp-server stopped, so articles filed before this change get threaded.
+- Leftovers: see Progress → Follow-ups (fix-references old rule, expire-news on root expiry, child_articles
+  order, root_date clamp); GetTotalThreadsCount dead code.
