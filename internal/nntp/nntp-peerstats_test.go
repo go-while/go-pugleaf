@@ -328,6 +328,26 @@ func TestPeerStatsCheckThenTakeThisOneOffer(t *testing.T) {
 	}
 }
 
+// TestPeerStatsRepeatedCheck: a peer that CHECKs the same id twice and never transfers it
+// gets one offer per CHECK, so the offers match the answers it was given.
+func TestPeerStatsRepeatedCheck(t *testing.T) {
+	proc := &hFakeProcessor{checkResult: history.CaseRetry} // every CHECK answers 431
+	peer := psRow("127.0.0.1", true)
+	hs, col := psServer(t, proc, psRegistry(peer))
+
+	c := hs.dial(t)
+	id := hMessageID(hGroupName("ps.rep"), 1)
+	for i := 0; i < 2; i++ {
+		if code, line := c.Cmd("CHECK %s", id); code != 431 {
+			t.Fatalf("CHECK %d: got %d %q, want 431", i+1, code, line)
+		}
+	}
+	got := col.total(psRef(peer), peerstats.In)
+	if got.Offered != 2 || got.Deferred != 2 {
+		t.Errorf("counters = %+v, want offered 2 and deferred 2 (one answer per CHECK)", got)
+	}
+}
+
 // TestPeerStatsDeniedDisabledRow: the feed commands of a peer row that is disabled count as
 // Denied for that row, so the admin sees what it tried before it is enabled.
 func TestPeerStatsDeniedDisabledRow(t *testing.T) {
@@ -362,6 +382,47 @@ func TestPeerStatsDeniedDisabledRow(t *testing.T) {
 	if cl := col.closed()[0]; cl.Peer != ref || cl.Conn.Denied != 3 {
 		t.Errorf("Closed = %+v, want the denied totals of %+v", cl, ref)
 	}
+}
+
+// TestPeerStatsDeniedLoginPeerNotCounted: the 480 of an enabled peer that may feed once it
+// logs in is no refusal: it asks for AUTHINFO, so nothing is counted. The same row disabled
+// gets 502 and is counted.
+func TestPeerStatsDeniedLoginPeerNotCounted(t *testing.T) {
+	t.Run("enabled, waiting for the login", func(t *testing.T) {
+		proc := &hFakeProcessor{checkResult: history.CasePass}
+		peer := psRow("127.0.0.1", true)
+		peer.InUsername = peer.Name + "in" // may feed only after AUTHINFO
+		hs, col := psServer(t, proc, psRegistry(peer))
+
+		c := hs.dial(t)
+		if code, line := c.Cmd("MODE STREAM"); code != 480 {
+			t.Fatalf("MODE STREAM: got %d %q, want 480", code, line)
+		}
+		if code, line := c.Cmd("CHECK %s", hMessageID("ps.login", 1)); code != 480 {
+			t.Fatalf("CHECK: got %d %q, want 480", code, line)
+		}
+		if conns := col.connected(); len(conns) != 0 {
+			t.Errorf("Connected = %+v, want none: the peer was only asked to log in", conns)
+		}
+		if got := col.sum(); !got.IsZero() {
+			t.Errorf("counters = %+v, want nothing counted for a 480", got)
+		}
+	})
+
+	t.Run("disabled, turned away", func(t *testing.T) {
+		proc := &hFakeProcessor{checkResult: history.CasePass}
+		peer := psRow("127.0.0.1", false)
+		peer.InUsername = peer.Name + "in"
+		hs, col := psServer(t, proc, psRegistry(peer))
+
+		c := hs.dial(t)
+		if code, line := c.Cmd("MODE STREAM"); code != 502 {
+			t.Fatalf("MODE STREAM: got %d %q, want 502", code, line)
+		}
+		if got := col.total(psRef(peer), peerstats.In).Denied; got != 1 {
+			t.Errorf("denied = %d, want 1 for the disabled row", got)
+		}
+	})
 }
 
 // TestPeerStatsDeniedUnknownHost: a feed command from an address no peer row holds counts
@@ -485,6 +546,7 @@ func TestPeerStatsFeedCounters(t *testing.T) {
 		{"rejected 439", true, 439, 70, false, peerstats.Counters{Offered: 1, Rejected: 1, RejBytes: 70}},
 		{"deferred 436", true, 436, 0, false, peerstats.Counters{Offered: 1, Deferred: 1}},
 		{"deferred 431", false, 431, 0, false, peerstats.Counters{Deferred: 1}},
+		{"deferred 400", true, 400, 0, false, peerstats.Counters{Offered: 1, Deferred: 1}},
 		{"duplicate", true, 439, 70, true, peerstats.Counters{Offered: 1, Duplicate: 1, DupBytes: 70}},
 		{"check 238", true, 238, 0, false, peerstats.Counters{Offered: 1}},
 		{"nothing", false, 203, 0, false, peerstats.Counters{}},

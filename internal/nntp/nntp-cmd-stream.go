@@ -30,8 +30,9 @@ func (c *ClientConnection) handleModeStream(args []string) error {
 		return c.sendResponse(501, "MODE STREAM not supported")
 	}
 	if !c.streamingAllowed() {
-		c.peerStatsDenied() // a feed command from no (enabled) peer, plan peering-stats
-		if c.feedDeniedCode() == 480 {
+		code := c.feedDeniedCode()
+		c.peerStatsDenied(code) // a feed command from no (enabled) peer, plan peering-stats
+		if code == 480 {
 			return c.sendResponse(480, "Streaming not permitted (authentication required)")
 		}
 		return c.sendResponse(502, "Streaming not permitted (peers only)")
@@ -59,8 +60,9 @@ func (c *ClientConnection) handleCheck(args []string) error {
 		return c.sendResponse(501, "CHECK requires exactly one message-id")
 	}
 	if !c.feedAllowed() {
-		c.peerStatsDenied() // plan peering-stats
-		if c.feedDeniedCode() == 480 {
+		code := c.feedDeniedCode()
+		c.peerStatsDenied(code) // plan peering-stats
+		if code == 480 {
 			return c.sendResponse(480, id+"Transfer permission denied")
 		}
 		return c.sendResponse(502, id+"Transfer not permitted (peers only)")

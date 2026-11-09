@@ -585,17 +585,24 @@ func (c *ClientConnection) peerStatsAdd(delta peerstats.Counters) {
 }
 
 // peerStatsDenied counts one feed command (IHAVE, CHECK, TAKETHIS, MODE STREAM) that was
-// refused because this connection is no enabled peer (502/480). It is attributed to the
-// peer row this address is configured as, enabled or not, and to peerstats.UnknownPeer
-// when no row holds it; the first denial opens the counters of the connection, so a plain
-// reader that never sends a feed command produces no event at all.
-func (c *ClientConnection) peerStatsDenied() {
+// refused because this connection is no enabled peer; code is the reply (502 or 480). It is
+// attributed to the peer row this address is configured as, enabled or not, and to
+// peerstats.UnknownPeer when no row holds it; the first denial opens the counters of the
+// connection, so a plain reader that never sends a feed command produces no event at all.
+//
+// The 480 of an enabled row is not counted: that is a peer which may feed once it logs in
+// being asked for its AUTHINFO, not a peer being turned away. A disabled row gets 502 and
+// is counted, which is what the admin wants to see before enabling it.
+func (c *ClientConnection) peerStatsDenied(code int) {
 	if c.server == nil {
 		return
 	}
 	if c.pstats == nil {
 		ref := peerstats.UnknownPeer
 		if p := c.server.Peers.MatchAnyIP(c.remoteIP()); p != nil {
+			if p.Enabled && code == 480 {
+				return // waiting for the peer's login, see above
+			}
 			ref = peerstats.PeerRef{ID: p.ID, Name: p.Name}
 		}
 		c.peerStatsOpen(ref)
@@ -607,6 +614,10 @@ func (c *ClientConnection) peerStatsDenied() {
 // and the TAKETHIS (or IHAVE) of the same id on the same connection are one offer (plan
 // peering-stats). check says whether the command was a CHECK; messageID is already valid,
 // "" when the command carried none.
+//
+// A CHECK is therefore always an offer, however often the peer repeats it: every CHECK gets
+// its own answer, and an offer without an outcome would not add up. Only the transfer that
+// follows a CHECK of the same id counts none.
 func (c *ClientConnection) peerStatsOffer(check bool, messageID string) bool {
 	c.peerStatsPeer()
 	ps := c.pstats
@@ -615,14 +626,6 @@ func (c *ClientConnection) peerStatsOffer(check bool, messageID string) bool {
 	}
 	if messageID == "" {
 		return true
-	}
-	if _, ok := ps.checked[messageID]; ok {
-		if !check {
-			// The transfer of a CHECKed id: it was counted as an offer by the CHECK, and
-			// the next CHECK of the same id starts a new offer.
-			delete(ps.checked, messageID)
-		}
-		return false
 	}
 	if check {
 		if ps.checked == nil {
@@ -634,6 +637,13 @@ func (c *ClientConnection) peerStatsOffer(check bool, messageID string) bool {
 			clear(ps.checked)
 		}
 		ps.checked[messageID] = struct{}{}
+		return true
+	}
+	if _, ok := ps.checked[messageID]; ok {
+		// The transfer of a CHECKed id: the CHECK counted the offer, and the next CHECK
+		// of the same id starts a new one.
+		delete(ps.checked, messageID)
+		return false
 	}
 	return true
 }
@@ -657,7 +667,9 @@ func peerFeedCounters(offer bool, code int, size int64, dup bool) peerstats.Coun
 		d.Refused = 1
 	case code == 437 || code == 439:
 		d.Rejected, d.RejBytes = 1, size
-	case code == 436 || code == 431:
+	case code == 436 || code == 431 || code == 400:
+		// 400 is the temporary failure of TAKETHIS (RFC 4644 §2.5.2, with a close): the
+		// peer has to offer the article again, so it counts like 436/431.
 		d.Deferred = 1
 	}
 	return d

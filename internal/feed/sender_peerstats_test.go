@@ -145,8 +145,15 @@ func TestFeedPeerStatsOffered(t *testing.T) {
 	if got.Offered != 3 || got.Accepted != 1 || got.Refused != 1 || got.Rejected != 1 {
 		t.Errorf("counters = %+v, want offered 3, accepted 1, refused 1, rejected 1", got)
 	}
-	if got.AccBytes <= 0 || got.RejBytes <= 0 {
-		t.Errorf("counters = %+v, want octets for the accepted and the rejected article", got)
+	// The accepted and the rejected article went over the wire; the one the peer already had
+	// was refused at CHECK time, so it costs no octets.
+	wantAcc := statsArticleBytes(Outgoing{Article: sndArticle("<sps-ok@test.invalid>", sndGroup)})
+	wantRej := statsArticleBytes(Outgoing{Article: sndArticle(reject, sndGroup)})
+	if got.AccBytes != wantAcc {
+		t.Errorf("acc bytes = %d, want %d", got.AccBytes, wantAcc)
+	}
+	if got.RejBytes != wantRej {
+		t.Errorf("rej bytes = %d, want %d (only the transferred rejection)", got.RejBytes, wantRej)
 	}
 	conns := col.connected()
 	if len(conns) == 0 {
@@ -221,6 +228,67 @@ func TestFeedPeerStatsDenied(t *testing.T) {
 	}
 	if len(f.q.doneIDs()) != 0 {
 		t.Errorf("done = %v, want the article kept in the queue", f.q.doneIDs())
+	}
+}
+
+// TestFeedPeerStatsTransferredBytes: only an answer that came after the body charges octets,
+// and a peer that took the article and then said it has it already charges them as rejected.
+func TestFeedPeerStatsTransferredBytes(t *testing.T) {
+	col := newSpsCollector()
+	f := newSndFixture(t, func(c *Config) { c.Stats = col })
+	taken, atCheck, late := "<sps-t1@test.invalid>", "<sps-t2@test.invalid>", "<sps-t3@test.invalid>"
+	for _, id := range []string{taken, atCheck, late} {
+		f.arts.add(sndGroup, sndArticle(id, sndGroup))
+	}
+	if err := f.q.Enqueue([]Item{
+		{PeerID: 1, MessageID: taken, Newsgroup: sndGroup},
+		{PeerID: 1, MessageID: atCheck, Newsgroup: sndGroup},
+		{PeerID: 1, MessageID: late, Newsgroup: sndGroup},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f.dial.newT = func() *sndTransport {
+		return &sndTransport{reply: func(_ int, arts []Outgoing) ([]Result, int, error) {
+			res := make([]Result, 0, len(arts))
+			for _, a := range arts {
+				switch id := a.Article.MessageID; id {
+				case taken: // TAKETHIS 239: the body was sent
+					res = append(res, Result{MessageID: id, Code: 239, Outcome: OutcomeDone, Transferred: true})
+				case atCheck: // CHECK 438: nothing was sent
+					res = append(res, Result{MessageID: id, Code: 438, Outcome: OutcomeDone})
+				default: // TAKETHIS 438: the peer got it meanwhile, after the body
+					res = append(res, Result{MessageID: id, Code: 438, Outcome: OutcomeDone, Transferred: true})
+				}
+			}
+			return res, len(arts), nil
+		}}
+	}
+	f.peers.set(sndPeer(1, "spsbytes"))
+	if err := f.s.Start(); err != nil {
+		t.Fatal(err)
+	}
+	sndWaitFor(t, "the batch to be acknowledged", func() bool { return len(f.q.doneIDs()) == 3 })
+	f.s.Stop()
+
+	got, _ := col.total(peerstats.Out)
+	wantAcc := statsArticleBytes(Outgoing{Article: sndArticle(taken, sndGroup)})
+	wantRej := statsArticleBytes(Outgoing{Article: sndArticle(late, sndGroup)})
+	if got.Accepted != 1 || got.AccBytes != wantAcc {
+		t.Errorf("counters = %+v, want accepted 1 with %d octets", got, wantAcc)
+	}
+	if got.Refused != 2 {
+		t.Errorf("counters = %+v, want refused 2", got)
+	}
+	if got.RejBytes != wantRej {
+		t.Errorf("rej bytes = %d, want %d: only the article that was already on the wire", got.RejBytes, wantRej)
+	}
+	// feed_stats keeps counting as before: both 438s are refusals, nothing is rejected.
+	st, ok := f.q.storedStats(1)
+	if !ok {
+		t.Fatal("no counters stored")
+	}
+	if st.Accepted != 1 || st.Refused != 2 || st.Rejected != 0 {
+		t.Errorf("feed_stats = %+v, want accepted 1 refused 2 rejected 0", st)
 	}
 }
 

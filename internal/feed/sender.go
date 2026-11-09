@@ -748,11 +748,9 @@ func (pf *peerFeed) connWorker(idx int) {
 				return // the batch stays claimed, see above
 			}
 			if err != nil {
-				if isPeerDenied(err) {
-					// The peer refuses our feed (502/480): visible as Denied, so the
-					// backlog below has a reason (plan peering-stats).
-					pf.addStats(nil, peerstats.Counters{Denied: 1})
-				}
+				// A connect that fails is never a counted refusal: DialPeer reports the
+				// peer's status without it (plan peering-stats, Denied comes from the
+				// answers to CHECK, IHAVE and TAKETHIS in sendBatch).
 				pf.deferAll(out, attempts, err.Error())
 				pf.setLastError(err.Error())
 				connFails++
@@ -1030,6 +1028,9 @@ func (pf *peerFeed) record(out []Outgoing, res []Result, offered int, connOK boo
 		if i < len(out) {
 			size = statsArticleBytes(out[i])
 		}
+		if !r.Transferred {
+			size = 0 // nothing was on the wire: a refusal at CHECK time costs no octets
+		}
 		switch r.Code {
 		case 235, 239:
 			pf.stats.Accepted++
@@ -1038,6 +1039,9 @@ func (pf *peerFeed) record(out []Outgoing, res []Result, offered int, connOK boo
 		case 435, 438:
 			pf.stats.Refused++
 			delta.Refused++
+			// A peer that took the article and then said it has it already: those octets
+			// were wasted like a rejection's.
+			delta.RejBytes += size
 		case 437, 439:
 			pf.stats.Rejected++
 			delta.Rejected++

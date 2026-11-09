@@ -42,6 +42,11 @@ type Result struct {
 	Code      int // the peer's status; 0 when nothing was answered
 	Outcome   Outcome
 	Err       string // the reason of a Defer or a Drop, stored as the item's last_error
+	// Transferred says that the article's body went over the wire before this answer (the
+	// TAKETHIS of a wanted article, or IHAVE after its 335). Only then do the octets of the
+	// article count in the peering statistics (plan peering-stats); a refusal at CHECK time
+	// costs nothing. It does not change the queue's or feed_stats' behaviour.
+	Transferred bool
 }
 
 // Outgoing is one article on its way to a peer: the stored article and the newsgroup it was
@@ -308,17 +313,18 @@ func (t *streamTransport) Send(arts []Outgoing) ([]Result, int, error) {
 			t.fail(res, taken[n:], err)
 			return res, offered, err
 		}
+		// The article was on the wire before every one of these answers (Transferred).
 		switch code {
 		case 239, 235: // transferred
-			res[i] = Result{MessageID: id, Code: code, Outcome: OutcomeDone}
+			res[i] = Result{MessageID: id, Code: code, Outcome: OutcomeDone, Transferred: true}
 		case 439, 437: // rejected: do not offer it again
-			res[i] = Result{MessageID: id, Code: code, Outcome: OutcomeDone}
+			res[i] = Result{MessageID: id, Code: code, Outcome: OutcomeDone, Transferred: true}
 		case 438, 435: // the peer got it meanwhile
-			res[i] = Result{MessageID: id, Code: code, Outcome: OutcomeDone}
+			res[i] = Result{MessageID: id, Code: code, Outcome: OutcomeDone, Transferred: true}
 		case 431, 436, 400:
-			res[i] = Result{MessageID: id, Code: code, Outcome: OutcomeDefer, Err: fmt.Sprintf("TAKETHIS %d", code)}
+			res[i] = Result{MessageID: id, Code: code, Outcome: OutcomeDefer, Transferred: true, Err: fmt.Sprintf("TAKETHIS %d", code)}
 		default:
-			err := fmt.Errorf("feed: peer %s: TAKETHIS %s answered %d", t.peerName, id, code)
+			err := denied(code, fmt.Errorf("feed: peer %s: TAKETHIS %s answered %d", t.peerName, id, code))
 			t.fail(res, taken[n:], err)
 			return res, offered, err
 		}
@@ -412,19 +418,22 @@ func (t *ihaveTransport) Send(arts []Outgoing) ([]Result, int, error) {
 			res[i] = Result{MessageID: id, Outcome: OutcomeDrop, Err: "invalid message-id"}
 			continue
 		}
-		code, _, err := t.conn.IHave(arts[i].Article, &t.identity, arts[i].Newsgroup)
+		// txBytes > 0 means the article itself was written (the peer answered 335 first),
+		// so its octets count in the peering statistics.
+		code, txBytes, err := t.conn.IHave(arts[i].Article, &t.identity, arts[i].Newsgroup)
+		sent := txBytes > 0
 		switch {
 		case err == nil:
 			offered++
 			switch code {
 			case 235:
-				res[i] = Result{MessageID: id, Code: code, Outcome: OutcomeDone}
+				res[i] = Result{MessageID: id, Code: code, Outcome: OutcomeDone, Transferred: sent}
 			case 435, 437:
-				res[i] = Result{MessageID: id, Code: code, Outcome: OutcomeDone}
+				res[i] = Result{MessageID: id, Code: code, Outcome: OutcomeDone, Transferred: sent}
 			case 436:
-				res[i] = Result{MessageID: id, Code: code, Outcome: OutcomeDefer, Err: "IHAVE 436"}
+				res[i] = Result{MessageID: id, Code: code, Outcome: OutcomeDefer, Transferred: sent, Err: "IHAVE 436"}
 			default:
-				res[i] = Result{MessageID: id, Code: code, Outcome: OutcomeDefer, Err: fmt.Sprintf("IHAVE %d", code)}
+				res[i] = Result{MessageID: id, Code: code, Outcome: OutcomeDefer, Transferred: sent, Err: fmt.Sprintf("IHAVE %d", code)}
 			}
 		case errors.Is(err, common.ErrRelayHeadersInvalid), errors.Is(err, nntp.ErrInvalidCommandArg):
 			// Refused before anything was written: the connection stays usable.

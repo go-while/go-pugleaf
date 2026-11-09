@@ -115,8 +115,9 @@ func (c *ClientConnection) handleIHave(args []string) error {
 	// Only a peer may feed (plan nntp-peering); checked before the article is requested
 	if !c.feedAllowed() {
 		c.rateLimitOnError()
-		c.peerStatsDenied() // plan peering-stats
-		if c.feedDeniedCode() == 480 {
+		code := c.feedDeniedCode()
+		c.peerStatsDenied(code) // plan peering-stats
+		if code == 480 {
 			return c.sendResponse(480, "Transfer permission denied (authentication required)")
 		}
 		return c.sendResponse(502, "Transfer not permitted (peers only)")
@@ -277,8 +278,9 @@ func (c *ClientConnection) handleTakeThis(args []string) error {
 	// Only a peer may feed (plan nntp-peering; exactly one response per TAKETHIS)
 	if !c.feedAllowed() {
 		c.rateLimitOnError()
-		c.peerStatsDenied() // plan peering-stats
-		if c.feedDeniedCode() == 480 {
+		code := c.feedDeniedCode()
+		c.peerStatsDenied(code) // plan peering-stats
+		if code == 480 {
 			return reply(480, "Transfer permission denied")
 		}
 		return reply(502, "Transfer not permitted (peers only)")
