@@ -30,6 +30,7 @@ func (c *ClientConnection) handleModeStream(args []string) error {
 		return c.sendResponse(501, "MODE STREAM not supported")
 	}
 	if !c.streamingAllowed() {
+		c.peerStatsDenied() // a feed command from no (enabled) peer, plan peering-stats
 		if c.feedDeniedCode() == 480 {
 			return c.sendResponse(480, "Streaming not permitted (authentication required)")
 		}
@@ -58,6 +59,7 @@ func (c *ClientConnection) handleCheck(args []string) error {
 		return c.sendResponse(501, "CHECK requires exactly one message-id")
 	}
 	if !c.feedAllowed() {
+		c.peerStatsDenied() // plan peering-stats
 		if c.feedDeniedCode() == 480 {
 			return c.sendResponse(480, id+"Transfer permission denied")
 		}
@@ -65,18 +67,26 @@ func (c *ClientConnection) handleCheck(args []string) error {
 	}
 	messageID := args[0]
 	if !common.ValidMessageID(messageID) {
+		// An offer the peer cannot repeat with TAKETHIS: the id is not remembered.
+		c.peerStatsAdd(peerFeedCounters(c.peerStatsOffer(true, ""), 438, 0, false))
 		return c.sendResponse(438, id+"Rejected (invalid message-id)")
 	}
+	// A CHECK is one offer; the TAKETHIS of the same id does not count a second one.
+	offer := c.peerStatsOffer(true, messageID)
 
 	switch c.server.Processor.CheckMessageID(messageID) {
 	case history.CasePass:
+		c.peerStatsAdd(peerFeedCounters(offer, 238, 0, false))
 		return c.sendResponse(238, id+"Send article")
 	case history.CaseDupes:
+		c.peerStatsAdd(peerFeedCounters(offer, 438, 0, false))
 		return c.sendResponse(438, id+"Not wanted")
 	case history.CaseRetry:
+		c.peerStatsAdd(peerFeedCounters(offer, 431, 0, false))
 		return c.sendResponse(431, id+"Retry later")
 	default: // history.CaseError: temporary history trouble
 		log.Printf("[NNTP] CHECK history error for %s", messageID)
+		c.peerStatsAdd(peerFeedCounters(offer, 431, 0, false))
 		return c.sendResponse(431, id+"Retry later")
 	}
 }

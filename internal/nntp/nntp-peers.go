@@ -24,6 +24,7 @@ import (
 	"github.com/go-while/go-pugleaf/internal/common"
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
+	"github.com/go-while/go-pugleaf/internal/peerstats"
 )
 
 // Cache windows and the DNS timeout of a PeerRegistry.
@@ -60,6 +61,16 @@ type PeerStore interface {
 	AuthenticatePeer(username, password string) (*models.Peer, error)
 }
 
+// PeerAllStore is the optional part of a PeerStore: the peer rows whether they are enabled
+// or not, read in the same cached reload as the enabled ones. *database.Database implements
+// it with GetPeers. A store without it leaves MatchAnyIP empty, so the denied feed commands
+// of a disabled peer row are counted under peerstats.UnknownPeer instead of that row
+// (plan peering-stats).
+type PeerAllStore interface {
+	// GetPeers returns every peer row ordered by name.
+	GetPeers() ([]*models.Peer, error)
+}
+
 // peerDNSEntry is one cached hosts host name.
 type peerDNSEntry struct {
 	ips         []net.IP  // the addresses of the last successful resolution
@@ -76,10 +87,12 @@ type PeerRegistry struct {
 
 	mu          sync.Mutex
 	peers       []*models.Peer // the last successfully loaded usable peers (read-only)
+	all         []*models.Peer // the last successfully loaded rows, enabled or not (read-only)
 	loadedAt    time.Time      // when the last read was attempted, successful or not
 	loadFailed  bool           // that attempt failed: retry after peerListErrorTTL
 	loading     bool           // a read is running; other callers use the last good list
 	errLoggedAt time.Time      // rate limit of the read-error log line
+	allLoggedAt time.Time      // the same for the GetPeers read of r.all
 	names       string         // the loaded peer names, to log only real changes
 	skipped     string         // the names skipped as unusable, likewise
 	dns         map[string]*peerDNSEntry
@@ -131,6 +144,9 @@ func (r *PeerRegistry) Enabled() []*models.Peer {
 // peers it holds are shared: callers only read them. The read runs outside the mutex, and
 // only one at a time: every other caller meanwhile answers from the last good list (nil
 // until the first successful read, so nothing may feed until the table could be read).
+//
+// The same reload also fills r.all with every row of a store that offers GetPeers
+// (MatchAnyIP, plan peering-stats), so the two lists come from one read of the table.
 func (r *PeerRegistry) enabledPeers() []*models.Peer {
 	if r == nil || r.store == nil {
 		return nil
@@ -150,11 +166,26 @@ func (r *PeerRegistry) enabledPeers() []*models.Peer {
 	r.mu.Unlock()
 
 	peers, err := r.store.GetEnabledPeers()
+	var all []*models.Peer
+	allErr := errNoPeerAllStore
+	if s, ok := r.store.(PeerAllStore); ok {
+		all, allErr = s.GetPeers()
+	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.loading = false
 	r.loadedAt = r.now()
+	if allErr == nil {
+		r.all = all
+	} else if !errors.Is(allErr, errNoPeerAllStore) {
+		// Only the Denied attribution of the statistics uses this list, so a failed read
+		// keeps the last one and never stops the peer match below.
+		if r.allLoggedAt.IsZero() || r.loadedAt.Sub(r.allLoggedAt) >= peerLogEvery {
+			r.allLoggedAt = r.loadedAt
+			log.Printf("[NNTP-PEER] cannot read all peer rows, keeping %d known row(s): %v", len(r.all), allErr)
+		}
+	}
 	if err != nil {
 		r.loadFailed = true
 		if r.errLoggedAt.IsZero() || r.loadedAt.Sub(r.errLoggedAt) >= peerLogEvery {
@@ -181,6 +212,22 @@ func (r *PeerRegistry) enabledPeers() []*models.Peer {
 		}
 	}
 	return r.peers
+}
+
+// errNoPeerAllStore marks a store that does not offer GetPeers: nothing is logged for it.
+var errNoPeerAllStore = errors.New("peer store without GetPeers")
+
+// allPeers returns the cached peer rows, enabled or not, from the same reload as
+// enabledPeers (nil for a store without GetPeers). The slice and its peers are shared:
+// callers only read them.
+func (r *PeerRegistry) allPeers() []*models.Peer {
+	if r == nil || r.store == nil {
+		return nil
+	}
+	r.enabledPeers() // one cached reload fills both lists
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.all
 }
 
 // peerUsable splits the loaded peers into the ones that may be matched and the ones whose
@@ -217,6 +264,26 @@ func (r *PeerRegistry) MatchIP(ip net.IP) *models.Peer {
 	}
 	for _, p := range r.enabledPeers() {
 		if p.InUsername != "" || p.Hosts == "" {
+			continue
+		}
+		if r.hostsMatch(p, ip) {
+			return p
+		}
+	}
+	return nil
+}
+
+// MatchAnyIP returns the peer row whose hosts hold ip, enabled or not, or nil. The first
+// match in name order wins. It answers "which peer row is this address configured as?" for
+// the statistics of a feed command that was denied (plan peering-stats): a row without
+// hosts (a peer that may only log in) can never be recognised by its address, so it never
+// matches. It decides nothing about permissions; MatchIP does that.
+func (r *PeerRegistry) MatchAnyIP(ip net.IP) *models.Peer {
+	if ip == nil {
+		return nil
+	}
+	for _, p := range r.allPeers() {
+		if p == nil || p.Hosts == "" {
 			continue
 		}
 		if r.hostsMatch(p, ip) {
@@ -426,6 +493,183 @@ func (c *ClientConnection) peerName() string {
 		return ""
 	}
 	return c.peer.Name
+}
+
+// ---------------------------------------------------------------------------
+// Incoming peer statistics (plan peering-stats, slice stats-in)
+//
+// Every peer connection and every connection whose feed command is denied counts for one
+// peerstats.PeerRef: the peer it feeds as, the peer row its address is configured as (a
+// disabled row that tried) or peerstats.UnknownPeer. The counters of the connection are
+// kept here as well, so Closed can report the totals of that one connection.
+//
+// Only the connection's own goroutine touches connPeerStats, so it needs no lock, and the
+// collector is called without holding any lock of this package.
+
+// peerStatsCheckedMax bounds the set of message-ids a connection CHECKed, so a long
+// streaming session cannot grow it without end. When an id falls out of the set, the
+// TAKETHIS that follows its CHECK counts as an offer of its own.
+const peerStatsCheckedMax = 4096
+
+// connPeerStats are the peer statistics of one client connection.
+type connPeerStats struct {
+	ref     peerstats.PeerRef
+	total   peerstats.Counters  // everything counted on this connection, for Closed
+	started time.Time           // when the connection began to count for ref
+	checked map[string]struct{} // ids CHECKed here and not transferred yet
+	order   []string            // insertion order of checked, to bound it
+}
+
+// peerStatsCollector is the server's collector, peerstats.Nop when there is none.
+func (c *ClientConnection) peerStatsCollector() peerstats.Collector {
+	if c == nil || c.server == nil {
+		return peerstats.Nop
+	}
+	return c.server.PeerStats()
+}
+
+// peerStatsPeer opens the counters of a peer connection (the address match of resolvePeer
+// or a peer login): Connected once, as soon as the connection became a peer connection.
+func (c *ClientConnection) peerStatsPeer() {
+	if c.peer == nil {
+		return
+	}
+	ref := peerstats.PeerRef{ID: c.peer.ID, Name: c.peer.Name}
+	if c.pstats != nil && c.pstats.ref == ref {
+		return
+	}
+	c.peerStatsOpen(ref)
+}
+
+// peerStatsOpen starts counting this connection for ref. A connection that counted for
+// another ref before (a denial attributed to a peer row that was enabled afterwards) is
+// closed out first, so its counters are not mixed up.
+func (c *ClientConnection) peerStatsOpen(ref peerstats.PeerRef) {
+	if c.pstats != nil {
+		if c.pstats.ref == ref {
+			return
+		}
+		c.peerStatsClose()
+	}
+	c.pstats = &connPeerStats{ref: ref, started: time.Now()}
+	remote := ""
+	if c.conn != nil && c.conn.RemoteAddr() != nil {
+		remote = c.conn.RemoteAddr().String()
+	}
+	c.peerStatsCollector().Connected(ref, peerstats.In, remote)
+}
+
+// peerStatsClose ends the counting of this connection (Closed with its totals). It is
+// called when the session ends and does nothing on a connection that never counted.
+func (c *ClientConnection) peerStatsClose() {
+	ps := c.pstats
+	if ps == nil {
+		return
+	}
+	c.pstats = nil
+	c.peerStatsCollector().Closed(ps.ref, peerstats.In, ps.total, time.Since(ps.started))
+}
+
+// peerStatsAdd counts delta for this connection. A peer connection that has not been
+// opened yet is opened here, so no counter is lost without its Connected.
+func (c *ClientConnection) peerStatsAdd(delta peerstats.Counters) {
+	if delta.IsZero() {
+		return
+	}
+	c.peerStatsPeer()
+	ps := c.pstats
+	if ps == nil {
+		return
+	}
+	ps.total.Add(delta)
+	c.peerStatsCollector().Add(ps.ref, peerstats.In, delta)
+}
+
+// peerStatsDenied counts one feed command (IHAVE, CHECK, TAKETHIS, MODE STREAM) that was
+// refused because this connection is no enabled peer (502/480). It is attributed to the
+// peer row this address is configured as, enabled or not, and to peerstats.UnknownPeer
+// when no row holds it; the first denial opens the counters of the connection, so a plain
+// reader that never sends a feed command produces no event at all.
+func (c *ClientConnection) peerStatsDenied() {
+	if c.server == nil {
+		return
+	}
+	if c.pstats == nil {
+		ref := peerstats.UnknownPeer
+		if p := c.server.Peers.MatchAnyIP(c.remoteIP()); p != nil {
+			ref = peerstats.PeerRef{ID: p.ID, Name: p.Name}
+		}
+		c.peerStatsOpen(ref)
+	}
+	c.peerStatsAdd(peerstats.Counters{Denied: 1})
+}
+
+// peerStatsOffer reports whether this feed command is a new offer and remembers it: a CHECK
+// and the TAKETHIS (or IHAVE) of the same id on the same connection are one offer, as in
+// innd. check says whether the command was a CHECK; messageID is already valid, "" when the
+// command carried none.
+func (c *ClientConnection) peerStatsOffer(check bool, messageID string) bool {
+	c.peerStatsPeer()
+	ps := c.pstats
+	if ps == nil {
+		return false
+	}
+	if messageID == "" {
+		return true
+	}
+	if _, ok := ps.checked[messageID]; ok {
+		if !check {
+			// The transfer of a CHECKed id: it was counted as an offer by the CHECK, and
+			// the next CHECK of the same id starts a new offer.
+			delete(ps.checked, messageID)
+		}
+		return false
+	}
+	if check {
+		if ps.checked == nil {
+			ps.checked = make(map[string]struct{})
+		}
+		if len(ps.order) >= peerStatsCheckedMax {
+			delete(ps.checked, ps.order[0])
+			ps.order = append(ps.order[:0], ps.order[1:]...)
+		}
+		ps.checked[messageID] = struct{}{}
+		ps.order = append(ps.order, messageID)
+	}
+	return true
+}
+
+// peerFeedCounters maps one answer to a feed command to the counters of the peer that sent
+// it (plan peering-stats, "Counting rules"): offer says whether the command was a new
+// offer, code is the reply code, size the wire size of the article when it was read and dup
+// whether the store found the transferred article to be a duplicate (counted as Duplicate
+// instead of Rejected, as innd counts it).
+func peerFeedCounters(offer bool, code int, size int64, dup bool) peerstats.Counters {
+	var d peerstats.Counters
+	if offer {
+		d.Offered = 1
+	}
+	switch {
+	case dup:
+		d.Duplicate, d.DupBytes = 1, size
+	case code == 235 || code == 239:
+		d.Accepted, d.AccBytes = 1, size
+	case code == 435 || code == 438:
+		d.Refused = 1
+	case code == 437 || code == 439:
+		d.Rejected, d.RejBytes = 1, size
+	case code == 436 || code == 431:
+		d.Deferred = 1
+	}
+	return d
+}
+
+// feedWireSize is the wire size of an article a peer transferred, 0 when none was read.
+func feedWireSize(head, body []string) int64 {
+	if len(head) == 0 && len(body) == 0 {
+		return 0
+	}
+	return int64(common.WireArticleSize(head, body))
 }
 
 // ---------------------------------------------------------------------------
