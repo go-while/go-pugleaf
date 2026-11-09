@@ -208,6 +208,28 @@ func TestToolsTestDeleteArticlesNoOverviewWarning(t *testing.T) {
 	}
 }
 
+// TestToolsTestDeleteArticlesKeepsSurvivingReplyRows: expiring a reply in the middle of a
+// thread removes its own row only; a surviving reply below it keeps its row, so it stays in
+// the live thread (plan thread-orphan-followups: intake writes reply rows now).
+func TestToolsTestDeleteArticlesKeepsSurvivingReplyRows(t *testing.T) {
+	g := toolsTestGroupDB(t)
+	// thread 4: root 4, reply 5 to 4 (expires), reply 2 to 5 (survives)
+	if _, err := g.DB.Exec(`INSERT INTO threads (root_article, parent_article, child_article) VALUES
+		(4, NULL, 4), (4, 4, 5), (4, 5, 2)`); err != nil {
+		t.Fatalf("insert threads: %v", err)
+	}
+	if err := deleteArticles(g, []int64{5}, historyTrim{}); err != nil {
+		t.Fatalf("deleteArticles: %v", err)
+	}
+	var left int
+	if err := g.DB.QueryRow("SELECT COUNT(*) FROM threads WHERE child_article = 5").Scan(&left); err != nil || left != 0 {
+		t.Fatalf("row of the expired reply left = %d (%v), want 0", left, err)
+	}
+	if err := g.DB.QueryRow("SELECT COUNT(*) FROM threads WHERE child_article = 2 AND root_article = 4").Scan(&left); err != nil || left != 1 {
+		t.Fatalf("row of the surviving reply = %d (%v), want 1", left, err)
+	}
+}
+
 // toolsTestCountersGroup creates newsgroup name in the main database with articles 1..n in its
 // group database (created through GetGroupDB, so it has the current schema and article_num_seq).
 func toolsTestCountersGroup(t *testing.T, db *database.Database, name string, n int) {

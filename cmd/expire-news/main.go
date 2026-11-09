@@ -676,17 +676,19 @@ func deleteArticles(groupDB *database.GroupDB, articleNums []int64, trim history
 
 		// No overview delete: the legacy overview table is gone since the unified schema (migrations/old/).
 
-		// Delete related thread entries using OR conditions for all relationships
-		// This is more complex as we need to check multiple columns
+		// Thread rows: the expired articles' own rows, and every row of a thread whose root
+		// expired (its thread_cache row goes below, so those replies are orphans until the next
+		// rebuild). A surviving reply whose parent expired keeps its row: it is still in a live
+		// thread (intake and the rebuild write reply rows, plan thread-orphan-followups), and
+		// dropping it would make the next reply to it a bogus root.
 		threadQuery := fmt.Sprintf(
-			"DELETE FROM threads WHERE root_article IN (%s) OR child_article IN (%s) OR parent_article IN (%s)",
-			placeholders, placeholders, placeholders)
+			"DELETE FROM threads WHERE root_article IN (%s) OR child_article IN (%s)",
+			placeholders, placeholders)
 
-		// We need to repeat args 3 times for the 3 IN clauses
-		threadArgs := make([]interface{}, len(args)*3)
+		// We need to repeat args 2 times for the 2 IN clauses
+		threadArgs := make([]interface{}, len(args)*2)
 		copy(threadArgs[0:len(args)], args)
-		copy(threadArgs[len(args):len(args)*2], args)
-		copy(threadArgs[len(args)*2:], args)
+		copy(threadArgs[len(args):], args)
 
 		_, err = tx.Exec(threadQuery, threadArgs...)
 		if err != nil {
