@@ -134,3 +134,22 @@ gofmt on touched dirs, `go vet ./...`, `go build ./...`, the full race test list
 - `recover-db -reorder-by-datesent` writes `<group>.db.new` and stops: it does not swap files, update the main
   DB's group counters, or fix the `groupID:articleNum` history tokens (needs `history-rebuild`). Printing the
   remaining steps, or a `-swap` mode, would be its own plan.
+
+## Progress (2026-11-09)
+- Wave 1 (worktrees under /tank0/claude/trees/go-pugleaf/):
+  - intake `worktree-agent-a733fd9dc15264f53` d4507c7 + review fixes bdc4db6 (order-independent batch placement
+    with in-batch cycle guard, threads inserts through RetryableTransactionExec, negative ref cache, dead
+    StringPtrSlice pool removed, thread_cache last_activity/last_child_number maxed with the stored values,
+    GetThreadsCount also counts parent_article = 0) → merge fa18068.
+  - rebuild `worktree-agent-a44f5932a9ee2203a` 0dec213, ddb70b7 + review fixes fe05996 (NULL/unparsable date_sent
+    no longer aborts a group after the tables were cleared, last_activity/last_child_number written, absolute
+    reply_count in one transaction, msgid map released early, doc corrections) → merge b6402fc.
+- Wave 2 (inline): bf43ffe expire-news keeps the threads rows of surviving replies whose parent expired (the
+  parent_article arm would orphan them now that intake writes reply rows); 0ba6fc0 rebuild skips a self-reference
+  like intake + TestThrIntakeRebuildParity (intake vs rebuild on one in-order fixture: threads, thread_cache,
+  reply_count identical; fails without the self-reference fix). BUGS.md: no matching entry, none added.
+- Follow-ups (not in this plan): cmd/fix-references keeps a private copy of the old threading rule (writes
+  parent_article = 0 for orphans, no thread_cache, no reply_count) → make it call RebuildThreadsFromScratch or drop
+  its threading mode; expire-news still drops the rows of all replies when a thread root expires (they are
+  orphans until a rebuild); intake writes child_articles in DateSent order, the rebuild sorted by number
+  (membership identical); intake stores a future root_date verbatim, the rebuild clamps it.

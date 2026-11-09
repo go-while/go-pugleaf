@@ -654,8 +654,20 @@ func (db *Database) DeleteNewsgroup(name string) (bool, error) {
 	return deleted, nil
 }
 
-const query_GetThreadsCount = `SELECT COUNT(*) FROM threads`
+// query_GetThreadsCount counts the group's threads, that is its thread ROOTS: the threads
+// table holds one row per threaded article (a root is (root, NULL, root, 0), a reply is
+// (root, parent, child, depth)), so COUNT(*) counted articles, not threads. It read like a
+// thread count only while intake wrote no reply rows at all; a rebuild wrote them and made
+// the stats total jump (plan thread-orphan-followups). parent_article IS NULL is exactly the
+// root rows and needs no DISTINCT. parent_article = 0 counts as a root as well: the batch
+// writer and the rebuild write NULL, but cmd/fix-references inserts its orphan roots with a
+// parent_article of 0, and a group last repaired with that tool would otherwise report no
+// threads at all.
+const query_GetThreadsCount = `SELECT COUNT(*) FROM threads WHERE parent_article IS NULL OR parent_article = 0`
 
+// GetThreadsCount returns the number of threads in the group: its thread roots. The threads
+// readers that return rows (GetThreads below, GetThreadsPaged in db_threads_paged.go) keep
+// returning every row, roots and replies alike.
 func (db *Database) GetThreadsCount(groupDB *GroupDB) (int64, error) {
 	var count int64
 
@@ -756,6 +768,11 @@ func (db *Database) InsertThread(groupDB *GroupDB, t *models.Thread, a *models.A
 
 const query_GetThreads = `SELECT id, root_article, parent_article, child_article, depth, thread_order FROM threads`
 
+// GetThreads returns ALL rows of the group's threads table, one per threaded article: the
+// thread roots (parent_article NULL, child_article == root_article, depth 0) and the replies
+// (root, parent, child, depth). It is not a list of threads - GetThreadsCount counts those -
+// and filtering it to roots would be a behaviour change for its readers (the /api threads
+// endpoint through GetThreadsPaged, which returns all rows as well).
 func (db *Database) GetThreads(groupDB *GroupDB) ([]*models.Thread, error) {
 	rows, err := RetryableQuery(groupDB.DB, query_GetThreads)
 	if err != nil {
