@@ -159,7 +159,7 @@ type Article struct {
 	NewsgroupsPtr []*string           `json:"-" db:"-"` // Parsed newsgroup for threading
 	ProcessQueue  chan *string        `json:"-" db:"-"` // newsgroup ptr for batching
 	Posted        bool                `json:"-" db:"-"` // set by the NNTP POST handler: injected here (proto-article)
-	FeedOut       bool                `json:"-" db:"-"` // plan nntp-peering: queue this article for the peers once it is committed (set by Processor.ProcessArticle for a non-bulk intake: IHAVE/TAKETHIS/POST; never for fetched, imported or web-queued articles)
+	FeedOut       bool                `json:"-" db:"-"` // plan nntp-peering: queue this article for the peers once it is committed (set by Processor.ProcessArticle for a non-bulk intake: IHAVE/TAKETHIS/POST, and for web posts (Posted); never for fetched or imported articles)
 	FeedStored    bool                `json:"-" db:"-"` // plan nntp-peering: some group's batch really inserted this article's row (db_batch.go); an article every group ignored as a stored duplicate is new to none of them and is not fed
 }
 

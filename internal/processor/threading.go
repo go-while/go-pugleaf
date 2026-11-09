@@ -270,15 +270,17 @@ func (proc *Processor) ProcessArticle(article *models.Article, legacyNewsgroup s
 	// the history index is written by the batch system after the article was committed (db_batch.go)
 	article.MsgIdItem = msgIdItem
 
-	// Outgoing transit feed (plan nntp-peering): only an article this server accepted on the
-	// NNTP feed (IHAVE/TAKETHIS) or through NNTP POST is queued for the peers, which is
-	// exactly the non-bulk path. Fetched and imported articles (bulkmode, including the
-	// web post queue's own copies) are never queued, so an archive import does not flood
-	// the peers. The batch writer reads the marker at its commit point (db_batch.go,
-	// database.feedSnapshot); it is set either way, never left over from the article pool.
+	// Outgoing transit feed (plan nntp-peering): an article this server accepted on the NNTP
+	// feed (IHAVE/TAKETHIS) or through NNTP POST (the non-bulk path), or a web post (the post
+	// queue worker files its copies through the bulk path with Posted set), is queued for the
+	// peers. Fetched and imported articles (bulk, never Posted) are not, so an archive import
+	// does not flood the peers. The batch writer reads the marker at its commit point
+	// (db_batch.go, database.feedSnapshot) in a process that installed the feed hook
+	// (nntp-server, and cmd/web for its own posts); it is set either way, never left over
+	// from the article pool.
 	// FeedStored is the batch writer's own answer to "was this row really new to some
 	// group?" and starts false for the same reason.
-	article.FeedOut = !bulkmode
+	article.FeedOut = !bulkmode || article.Posted
 	article.FeedStored = false
 
 	article.ArticleNums = make(map[*string]int64)
