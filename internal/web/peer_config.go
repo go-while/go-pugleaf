@@ -25,16 +25,40 @@ type PeerConfigSnippets struct {
 }
 
 // peerConfigSnippets builds both snippets. ourHost is this server's Path identity and host
-// name (config local_nntp_hostname); empty gives a placeholder.
-func peerConfigSnippets(p *models.Peer, ourHost string) PeerConfigSnippets {
+// name (config local_nntp_hostname); empty gives a placeholder. serverMax is the size limit
+// of a peer without its own in_max_size (the admin setting "Article Size Limit"; 0 = unknown).
+func peerConfigSnippets(p *models.Peer, ourHost string, serverMax int64) PeerConfigSnippets {
 	ourHost = strings.TrimSpace(ourHost)
 	if ourHost == "" {
 		ourHost = "news.your-site.example"
 	}
+	maxSize := peerInMaxSize(p, serverMax)
 	return PeerConfigSnippets{
-		INN:    peerConfigINN(p, ourHost),
-		Diablo: peerConfigDiablo(p, ourHost),
+		INN:    peerConfigINN(p, ourHost, maxSize),
+		Diablo: peerConfigDiablo(p, ourHost, maxSize),
 	}
+}
+
+// peerInMaxSize is the largest article we take from p: its in_max_size, else serverMax.
+func peerInMaxSize(p *models.Peer, serverMax int64) int64 {
+	if p.InMaxSize > 0 {
+		return p.InMaxSize
+	}
+	if serverMax > 0 {
+		return serverMax
+	}
+	return 0
+}
+
+// diabloSize writes a byte count the way dnewsfeeds reads it (bsizetol: k = 1024).
+func diabloSize(n int64) string {
+	switch {
+	case n%(1<<20) == 0:
+		return fmt.Sprintf("%dm", n>>20)
+	case n%1024 == 0:
+		return fmt.Sprintf("%dk", n>>10)
+	}
+	return fmt.Sprintf("%d", n)
 }
 
 // peerConfigLabel is a config label for our side: the host name with characters the
@@ -63,7 +87,7 @@ func innPatterns(list, def string) string {
 	return strings.Join(pats, ",")
 }
 
-func peerConfigINN(p *models.Peer, ourHost string) string {
+func peerConfigINN(p *models.Peer, ourHost string, maxSize int64) string {
 	var b strings.Builder
 	label := peerConfigLabel(ourHost)
 	fmt.Fprintf(&b, "# INN configuration for %s to peer with %s (go-pugleaf)\n", p.PathToken, ourHost)
@@ -97,7 +121,13 @@ func peerConfigINN(p *models.Peer, ourHost string) string {
 		}
 		fmt.Fprintf(&b, "%s\\\n", ourHost)
 		fmt.Fprintf(&b, "    :%s\\\n", innNoControl(form))
-		b.WriteString("    :Tm:innfeed!\n")
+		if maxSize > 0 {
+			// newsfeeds(5) "<size": only articles smaller than size.
+			fmt.Fprintf(&b, "    :Tm,<%d:innfeed!\n", maxSize)
+			fmt.Fprintf(&b, "# We take articles up to %d bytes from you; bigger ones would be rejected.\n", maxSize)
+		} else {
+			b.WriteString("    :Tm:innfeed!\n")
+		}
 
 		b.WriteString("\n# --- innfeed.conf ---\n")
 		fmt.Fprintf(&b, "peer %s {\n", ourHost)
@@ -150,7 +180,7 @@ func diabloGroupLines(list, def string) []string {
 	return lines
 }
 
-func peerConfigDiablo(p *models.Peer, ourHost string) string {
+func peerConfigDiablo(p *models.Peer, ourHost string, maxSize int64) string {
 	var b strings.Builder
 	label := peerConfigLabel(ourHost)
 	fmt.Fprintf(&b, "# Diablo dnewsfeeds for %s to peer with %s (go-pugleaf)\n", p.PathToken, ourHost)
@@ -178,6 +208,10 @@ func peerConfigDiablo(p *models.Peer, ourHost string) string {
 		fmt.Fprintf(&b, "    port        %d\n", peerConfigDefaultPort)
 		b.WriteString("    maxparallel 2\n")
 		b.WriteString("    stream      on\n")
+		if maxSize > 0 {
+			fmt.Fprintf(&b, "    # we take articles up to %d bytes from you\n", maxSize)
+			fmt.Fprintf(&b, "    maxsize     %s\n", diabloSize(maxSize))
+		}
 		for _, l := range diabloGroupLines(p.InPatterns, "*") {
 			b.WriteString(l + "\n")
 		}

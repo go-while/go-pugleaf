@@ -98,3 +98,25 @@ func (db *Database) MaxCrossPosts() int {
 	}
 	return n
 }
+
+// Bounds of the admin setting "Article Size Limit" (config WebPostMaxArticleSize), the range
+// the settings form and the web post page accept.
+const (
+	MinArticleSizeLimit int64 = 1000
+	MaxArticleSizeLimit int64 = 16 << 20
+)
+
+// ArticleSizeLimit returns the admin setting "Article Size Limit" (config
+// WebPostMaxArticleSize) in bytes: the limit of web posts, and of nntp-server when it runs
+// without -maxartsize. ok is false when the value is missing, unreadable or out of range.
+func (db *Database) ArticleSizeLimit() (int64, bool) {
+	v, err := db.GetConfigValue(config.CFG_KEY_WEBPOSTSIZE)
+	if err != nil {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+	if err != nil || n < MinArticleSizeLimit || n > MaxArticleSizeLimit {
+		return 0, false
+	}
+	return n, true
+}

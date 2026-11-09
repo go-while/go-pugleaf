@@ -16,17 +16,24 @@ import (
 // Peers (table peers, migration 0034, plan nntp-peering). Only a peer may feed us with IHAVE,
 // MODE STREAM, CHECK and TAKETHIS; the outgoing feed sends to peers with out_enabled.
 
+// Bounds of peers.in_max_size (bytes) when it is not 0 (0 = the server limit, -maxartsize).
+// The upper bound keeps the drain limit of an oversized article within 64 MiB.
+const (
+	MinPeerInMaxSize int64 = 1024
+	MaxPeerInMaxSize int64 = 16 << 20
+)
+
 // ErrPeerAuth is returned by AuthenticatePeer for an unknown login, a wrong password or a
 // disabled peer (one error for all three: no login enumeration).
 var ErrPeerAuth = errors.New("peer authentication failed")
 
-const peerColumns = `id, name, path_token, hosts, in_username, in_password_hash, in_patterns,
+const peerColumns = `id, name, path_token, hosts, in_username, in_password_hash, in_patterns, in_max_size,
 	out_enabled, out_host, out_port, out_tls, out_username, out_password, out_patterns, out_flags,
 	max_conns, enabled, notes, created_at, updated_at`
 
 func scanPeer(scan func(dest ...interface{}) error) (*models.Peer, error) {
 	var p models.Peer
-	err := scan(&p.ID, &p.Name, &p.PathToken, &p.Hosts, &p.InUsername, &p.InPasswordHash, &p.InPatterns,
+	err := scan(&p.ID, &p.Name, &p.PathToken, &p.Hosts, &p.InUsername, &p.InPasswordHash, &p.InPatterns, &p.InMaxSize,
 		&p.OutEnabled, &p.OutHost, &p.OutPort, &p.OutTLS, &p.OutUsername, &p.OutPassword, &p.OutPatterns, &p.OutFlags,
 		&p.MaxConns, &p.Enabled, &p.Notes, &p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
@@ -121,6 +128,10 @@ func ValidatePeer(p *models.Peer) error {
 	if p.MaxConns < 1 || p.MaxConns > 64 {
 		return fmt.Errorf("peer %q: max_conns %d out of range 1..64", p.Name, p.MaxConns)
 	}
+	if p.InMaxSize != 0 && (p.InMaxSize < MinPeerInMaxSize || p.InMaxSize > MaxPeerInMaxSize) {
+		return fmt.Errorf("peer %q: in_max_size %d out of range (0 = server limit, or %d..%d bytes)",
+			p.Name, p.InMaxSize, MinPeerInMaxSize, MaxPeerInMaxSize)
+	}
 	if p.OutEnabled && p.OutHost == "" {
 		return fmt.Errorf("peer %q: outgoing feed enabled without out_host", p.Name)
 	}
@@ -174,10 +185,10 @@ func (db *Database) InsertPeer(p *models.Peer, inPassword string) (int64, error)
 	if err != nil {
 		return 0, err
 	}
-	res, err := RetryableExec(db.mainDB, `INSERT INTO peers (name, path_token, hosts, in_username, in_password_hash, in_patterns,
+	res, err := RetryableExec(db.mainDB, `INSERT INTO peers (name, path_token, hosts, in_username, in_password_hash, in_patterns, in_max_size,
 		out_enabled, out_host, out_port, out_tls, out_username, out_password, out_patterns, out_flags, max_conns, enabled, notes)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		p.Name, p.PathToken, p.Hosts, p.InUsername, hash, p.InPatterns,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		p.Name, p.PathToken, p.Hosts, p.InUsername, hash, p.InPatterns, p.InMaxSize,
 		p.OutEnabled, p.OutHost, p.OutPort, p.OutTLS, p.OutUsername, p.OutPassword, p.OutPatterns, p.OutFlags,
 		p.MaxConns, p.Enabled, p.Notes)
 	if err != nil {
@@ -197,10 +208,10 @@ func (db *Database) UpdatePeer(p *models.Peer) error {
 	if err := ValidatePeer(p); err != nil {
 		return err
 	}
-	res, err := RetryableExec(db.mainDB, `UPDATE peers SET name = ?, path_token = ?, hosts = ?, in_username = ?, in_patterns = ?,
+	res, err := RetryableExec(db.mainDB, `UPDATE peers SET name = ?, path_token = ?, hosts = ?, in_username = ?, in_patterns = ?, in_max_size = ?,
 		out_enabled = ?, out_host = ?, out_port = ?, out_tls = ?, out_username = ?, out_patterns = ?, out_flags = ?,
 		max_conns = ?, enabled = ?, notes = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		p.Name, p.PathToken, p.Hosts, p.InUsername, p.InPatterns,
+		p.Name, p.PathToken, p.Hosts, p.InUsername, p.InPatterns, p.InMaxSize,
 		p.OutEnabled, p.OutHost, p.OutPort, p.OutTLS, p.OutUsername, p.OutPatterns, p.OutFlags,
 		p.MaxConns, p.Enabled, p.Notes, p.ID)
 	if err != nil {

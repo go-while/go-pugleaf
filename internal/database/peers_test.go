@@ -79,6 +79,9 @@ func TestPeersValidate(t *testing.T) {
 		{Name: "x", PathToken: "a", Hosts: "h", OutPort: 70000},
 		{Name: "x", PathToken: "a", Hosts: "h", MaxConns: 65},
 		{Name: "x", PathToken: "a", Hosts: "h", OutEnabled: true},
+		{Name: "x", PathToken: "a", Hosts: "h", InMaxSize: 512},
+		{Name: "x", PathToken: "a", Hosts: "h", InMaxSize: MaxPeerInMaxSize + 1},
+		{Name: "x", PathToken: "a", Hosts: "h", InMaxSize: -1},
 		{Name: "x", PathToken: "a"},
 	} {
 		if err := ValidatePeer(&p); err == nil {
@@ -117,6 +120,46 @@ func TestPeersHistoryRejectDays(t *testing.T) {
 		}
 		if got := db.HistoryRejectDays(); got != c.want {
 			t.Errorf("HistoryRejectDays with %q = %d, want %d", c.v, got, c.want)
+		}
+	}
+}
+
+// TestPeersInMaxSize: in_max_size is stored, read back and updated (0 = the server limit).
+func TestPeersInMaxSize(t *testing.T) {
+	db := w0DB(t)
+	p := &models.Peer{Name: w0Name("max"), PathToken: "a", Hosts: "127.0.0.1", InMaxSize: 262144}
+	id, err := db.InsertPeer(p, "")
+	if err != nil {
+		t.Fatalf("InsertPeer: %v", err)
+	}
+	got, err := db.GetPeerByID(id)
+	if err != nil || got.InMaxSize != 262144 {
+		t.Fatalf("GetPeerByID: InMaxSize=%v err=%v, want 262144", got, err)
+	}
+	got.InMaxSize = 0
+	if err := db.UpdatePeer(got); err != nil {
+		t.Fatalf("UpdatePeer: %v", err)
+	}
+	if again, err := db.GetPeerByID(id); err != nil || again.InMaxSize != 0 {
+		t.Fatalf("after the update: %+v err=%v, want InMaxSize 0", again, err)
+	}
+}
+
+// TestArticleSizeLimit: the admin setting "Article Size Limit" is read with its bounds.
+func TestArticleSizeLimit(t *testing.T) {
+	db := w0DB(t)
+	old, _ := db.GetConfigValue(config.CFG_KEY_WEBPOSTSIZE)
+	t.Cleanup(func() { _ = db.SetConfigValue(config.CFG_KEY_WEBPOSTSIZE, old) })
+	for _, tc := range []struct {
+		v    string
+		want int64
+		ok   bool
+	}{{"262144", 262144, true}, {"999", 0, false}, {"x", 0, false}, {"", 0, false}, {"16777217", 0, false}} {
+		if err := db.SetConfigValue(config.CFG_KEY_WEBPOSTSIZE, tc.v); err != nil {
+			t.Fatalf("SetConfigValue: %v", err)
+		}
+		if n, ok := db.ArticleSizeLimit(); n != tc.want || ok != tc.ok {
+			t.Errorf("ArticleSizeLimit with %q = %d, %v; want %d, %v", tc.v, n, ok, tc.want, tc.ok)
 		}
 	}
 }

@@ -48,7 +48,7 @@ func TestPeerPresetsINNVariables(t *testing.T) {
 	presets := peerPatternPresets()
 	text := presets[len(presets)-1]
 	p := &models.Peer{Name: "n", PathToken: "news.n.example", Hosts: "192.0.2.9", InPatterns: text.Patterns}
-	got := peerConfigSnippets(p, "news.a.example").INN
+	got := peerConfigSnippets(p, "news.a.example", 0).INN
 	for _, want := range []string{
 		"$NEWSDEEFDEFAULT=\\\n    !control,!control.*,!junk,!junk.*,!local,\\\n",
 		"$NEWSDEEFNOBINARY=\\\n    @a.b.*,",
@@ -59,7 +59,7 @@ func TestPeerPresetsINNVariables(t *testing.T) {
 		}
 	}
 	p.InPatterns = text.Patterns + ",!rec.*"
-	got = peerConfigSnippets(p, "news.a.example").INN
+	got = peerConfigSnippets(p, "news.a.example", 0).INN
 	if strings.Contains(got, "$NEWSDEEF") {
 		t.Errorf("an edited preset must be written expanded:\n%s", got)
 	}

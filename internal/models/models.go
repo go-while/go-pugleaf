@@ -580,6 +580,7 @@ type Peer struct {
 	InUsername     string    `json:"in_username" db:"in_username"` // optional AUTHINFO login of the peer
 	InPasswordHash string    `json:"-" db:"in_password_hash"`      // bcrypt
 	InPatterns     string    `json:"in_patterns" db:"in_patterns"` // wildmat list the peer may send us
+	InMaxSize      int64     `json:"in_max_size" db:"in_max_size"` // largest article we take from the peer (bytes, 0 = server limit)
 	OutEnabled     bool      `json:"out_enabled" db:"out_enabled"` // we feed this peer
 	OutHost        string    `json:"out_host" db:"out_host"`
 	OutPort        int       `json:"out_port" db:"out_port"`

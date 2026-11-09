@@ -269,6 +269,13 @@
                               </select>
                             </div>
                           </div>
+                          <div class="col-md-3">
+                            <div class="mb-3">
+                              <label class="form-label">Max article size from the peer (bytes)</label>
+                              <input type="number" class="form-control" name="in_max_size" value="{{if .InMaxSize}}{{.InMaxSize}}{{end}}" min="0" max="16777216" placeholder="{{if $.ServerMaxArtSize}}{{$.ServerMaxArtSize}} (server limit){{else}}server limit{{end}}">
+                              <div class="form-text">Empty = the server limit (CFG &ldquo;Article Size Limit&rdquo;). Announced in the INN/Diablo config below.</div>
+                            </div>
+                          </div>
                         </div>
                         <hr class="my-3">
                         <h6>Outgoing (we feed the peer)</h6>
@@ -432,6 +439,13 @@
                   <option value="">preset&hellip;</option>
                   {{range $.PatternPresets}}<option value="{{.Patterns}}">{{.Label}}</option>{{end}}
                 </select>
+              </div>
+            </div>
+            <div class="col-md-3">
+              <div class="mb-3">
+                <label class="form-label">Max article size from the peer (bytes)</label>
+                <input type="number" class="form-control" name="in_max_size" min="0" max="16777216" placeholder="{{if $.ServerMaxArtSize}}{{$.ServerMaxArtSize}} (server limit){{else}}server limit{{end}}">
+                <div class="form-text">Empty = the server limit (CFG &ldquo;Article Size Limit&rdquo;).</div>
               </div>
             </div>
           </div>

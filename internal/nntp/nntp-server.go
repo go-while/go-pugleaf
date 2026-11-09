@@ -113,6 +113,9 @@ type NNTPServer struct {
 	// collector, PeerStats reads it. An atomic pointer, so it may be set while the server
 	// runs; nil means peerstats.Nop, which counts nothing.
 	peerStats atomic.Pointer[peerstats.Collector]
+	// artSize, when set (SetArticleSizeSource), gives the article size limit instead of
+	// Config.NNTP.MaxArtSize: nntp-server without -maxartsize follows the admin setting.
+	artSize atomic.Pointer[func() (int64, bool)]
 
 	shutdown chan struct{}
 	wg       *sync.WaitGroup // Use external waitgroup for coordination

@@ -154,7 +154,7 @@ func (c *ClientConnection) handleIHave(args []string) error {
 		return err
 	}
 
-	head, body, err := c.readArticleBlock(c.server.MaxArticleBytes())
+	head, body, err := c.readArticleBlock(c.feedArticleBytes())
 	switch {
 	case errors.Is(err, ErrArticleDrainLimit):
 		log.Printf("[NNTP] IHAVE %s: article too large to drain, closing the connection", messageID)
@@ -249,7 +249,7 @@ func (c *ClientConnection) handleTakeThis(args []string) error {
 
 	// Streaming mode: the client sends the article without waiting, so it is always
 	// consumed (bounded) before the reply, also for the early error replies.
-	head, body, err := c.readArticleBlock(c.server.MaxArticleBytes())
+	head, body, err := c.readArticleBlock(c.feedArticleBytes())
 	if !allowed {
 		head, body = nil, nil // never keep an article this client may not send
 	}
