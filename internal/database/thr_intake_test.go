@@ -147,13 +147,18 @@ func thrIntakeReplyCount(t *testing.T, db *Database, group, messageID string) in
 	return count
 }
 
-// thrCacheRow is one thread_cache row: the thread's message count and its children.
+// thrCacheRow is one thread_cache row: the thread's message count, its children and the two
+// columns the batch writer maxes instead of overwriting.
 type thrCacheRow struct {
-	messageCount int
-	children     []int64
+	messageCount  int
+	children      []int64
+	lastChild     int64
+	lastActivity  string
+	childrenOrder []int64
 }
 
-// thrIntakeCache returns the group's thread_cache rows by thread root.
+// thrIntakeCache returns the group's thread_cache rows by thread root. last_activity comes back
+// as the stored string, which this writer always formats as UTC "2006-01-02 15:04:05".
 func thrIntakeCache(t *testing.T, db *Database, group string) map[int64]thrCacheRow {
 	t.Helper()
 	groupDB, err := db.GetGroupDB(group)
@@ -161,7 +166,8 @@ func thrIntakeCache(t *testing.T, db *Database, group string) map[int64]thrCache
 		t.Fatalf("GetGroupDB(%s): %v", group, err)
 	}
 	defer groupDB.Return()
-	rows, err := RetryableQuery(groupDB.DB, "SELECT thread_root, message_count, child_articles FROM thread_cache")
+	rows, err := RetryableQuery(groupDB.DB,
+		"SELECT thread_root, message_count, child_articles, COALESCE(last_child_number, 0), COALESCE(last_activity, '') FROM thread_cache")
 	if err != nil {
 		t.Fatalf("select thread_cache: %v", err)
 	}
@@ -171,10 +177,12 @@ func thrIntakeCache(t *testing.T, db *Database, group string) map[int64]thrCache
 		var root int64
 		var count int
 		var children string
-		if err := rows.Scan(&root, &count, &children); err != nil {
+		var lastChild int64
+		var lastActivity string
+		if err := rows.Scan(&root, &count, &children, &lastChild, &lastActivity); err != nil {
 			t.Fatalf("scan thread_cache: %v", err)
 		}
-		entry := thrCacheRow{messageCount: count}
+		entry := thrCacheRow{messageCount: count, lastChild: lastChild, lastActivity: lastActivity}
 		for _, field := range strings.Split(children, ",") {
 			if field == "" {
 				continue
@@ -184,6 +192,7 @@ func thrIntakeCache(t *testing.T, db *Database, group string) map[int64]thrCache
 				t.Fatalf("thread_cache child_articles %q of root %d: %v", children, root, err)
 			}
 			entry.children = append(entry.children, num)
+			entry.childrenOrder = append(entry.childrenOrder, num)
 		}
 		sort.Slice(entry.children, func(i, j int) bool { return entry.children[i] < entry.children[j] })
 		out[root] = entry
@@ -572,5 +581,148 @@ func TestThrIntakeDisableThreadingWritesNothing(t *testing.T) {
 	}
 	if stored != 3 {
 		t.Errorf("DisableThreading: articles stored = %d, want 3", stored)
+	}
+}
+
+// TestThrIntakePlacementIsOrderIndependent: a parent whose DateSent is LATER than its own
+// reply's (a poster's clock behind, or a date an importer could not read) is still the reply's
+// parent, although the batch is written oldest first and the parent is therefore written after
+// its child. Placement looks at the whole batch at once; the sort only decides row order.
+func TestThrIntakePlacementIsOrderIndependent(t *testing.T) {
+	db := fuBatchIsolatedDB(t)
+	group := w0Name("thrintake.clockskew")
+	task := db.Batch.GetOrCreateTasksMapKey(group)
+
+	parent := thrIntakeMsgID("parent")
+	reply := thrIntakeMsgID("reply")
+	// Parent first in the slice, so it gets the lower article number, but its Date is two
+	// minutes AFTER the reply's: sorted oldest first, the reply is written first.
+	thrIntakeRun(t, db, task,
+		thrIntakeArticle(parent, 5, nil, task),
+		thrIntakeArticle(reply, 3, []string{parent}, task),
+	)
+
+	parentNum := thrIntakeNum(t, db, group, parent)
+	replyNum := thrIntakeNum(t, db, group, reply)
+	if parentNum == 0 || replyNum == 0 {
+		t.Fatalf("articles not stored: parent = %d, reply = %d", parentNum, replyNum)
+	}
+	wantRoot(t, db, group, parentNum, "clock skew: the parent with the later Date")
+	wantReply(t, db, group, replyNum, parentNum, parentNum, 1, "clock skew: the reply with the earlier Date")
+	if got := thrIntakeThreadsCount(t, db, group); got != 1 {
+		t.Errorf("GetThreadsCount = %d, want 1: the reply must not become a second root (the rebuild puts it under the parent, and both must agree)", got)
+	}
+	if got := thrIntakeReplyCount(t, db, group, parent); got != 1 {
+		t.Errorf("reply_count of the parent = %d, want 1", got)
+	}
+}
+
+// TestThrIntakeReferenceCycle: two articles of one batch that reference each other (and an
+// article that references itself) must not hang the placement walk. The article where the cycle
+// is detected becomes a thread root, as the rebuild does.
+func TestThrIntakeReferenceCycle(t *testing.T) {
+	db := fuBatchIsolatedDB(t)
+	group := w0Name("thrintake.cycle")
+	task := db.Batch.GetOrCreateTasksMapKey(group)
+
+	a := thrIntakeMsgID("cycle-a")
+	b := thrIntakeMsgID("cycle-b")
+	// A references B and B references A, both in the same batch. A is the older one, so the
+	// walk starts at A and detects the cycle there.
+	thrIntakeRun(t, db, task,
+		thrIntakeArticle(a, 1, []string{b}, task),
+		thrIntakeArticle(b, 2, []string{a}, task),
+	)
+
+	aNum := thrIntakeNum(t, db, group, a)
+	bNum := thrIntakeNum(t, db, group, b)
+	rows := thrIntakeThreads(t, db, group)
+	if len(rows) != 2 {
+		t.Fatalf("threads rows = %v, want one per article", rows)
+	}
+	if got := thrIntakeThreadsCount(t, db, group); got != 1 {
+		t.Errorf("GetThreadsCount = %d, want 1: a cycle must leave exactly one root, not two and not none", got)
+	}
+	wantRoot(t, db, group, aNum, "cycle: the article the cycle was detected at")
+	wantReply(t, db, group, bNum, aNum, aNum, 1, "cycle: the other article")
+
+	// A self-reference is no parent either.
+	selfMsgID := thrIntakeMsgID("self")
+	self := thrIntakeArticle(selfMsgID, 3, nil, task)
+	self.RefSlice = []string{selfMsgID}
+	self.References = selfMsgID
+	thrIntakeRun(t, db, task, self)
+	wantRoot(t, db, group, thrIntakeNum(t, db, group, selfMsgID), "self-reference")
+	if got := thrIntakeThreadsCount(t, db, group); got != 2 {
+		t.Errorf("GetThreadsCount = %d, want 2 after the self-referencing article", got)
+	}
+}
+
+// TestThrIntakeCacheActivityIsMaxed: a backfilled reply - older and, within its batch, not the
+// last one written - must not move a thread down the group listing (which orders by
+// last_activity DESC) nor lower last_child_number. Both columns are the maximum over the stored
+// row and the batch, which is what the rebuild writes too.
+func TestThrIntakeCacheActivityIsMaxed(t *testing.T) {
+	db := fuBatchIsolatedDB(t)
+	group := w0Name("thrintake.maxed")
+	task := db.Batch.GetOrCreateTasksMapKey(group)
+
+	root := thrIntakeMsgID("root")
+	newest := thrIntakeMsgID("newest")
+	thrIntakeRun(t, db, task,
+		thrIntakeArticle(root, 0, nil, task),               // article 1, 12:00
+		thrIntakeArticle(newest, 60, []string{root}, task), // article 2, 13:00
+	)
+	rootNum := thrIntakeNum(t, db, group, root)
+	before := thrIntakeCache(t, db, group)[rootNum]
+	if before.lastActivity != "2020-03-01 13:00:00" || before.lastChild != 2 {
+		t.Fatalf("thread_cache after the first batch: last_activity %q, last_child_number %d, want \"2020-03-01 13:00:00\" and 2",
+			before.lastActivity, before.lastChild)
+	}
+
+	// Two older replies, the higher-numbered one written FIRST (it is the older of the two), so
+	// the batch's last written child (3) is not its highest (4) and both are older than 13:00.
+	backfillA := thrIntakeMsgID("backfill-a") // article 3, 12:30
+	backfillB := thrIntakeMsgID("backfill-b") // article 4, 12:20
+	thrIntakeRun(t, db, task,
+		thrIntakeArticle(backfillA, 30, []string{root}, task),
+		thrIntakeArticle(backfillB, 20, []string{root}, task),
+	)
+
+	after := thrIntakeCache(t, db, group)[rootNum]
+	if after.lastActivity != "2020-03-01 13:00:00" {
+		t.Errorf("thread_cache last_activity = %q, want \"2020-03-01 13:00:00\": a backfilled older reply moved the thread", after.lastActivity)
+	}
+	if after.lastChild != 4 {
+		t.Errorf("thread_cache last_child_number = %d, want 4 (the highest number in the thread, not the last one written: %v)", after.lastChild, after.childrenOrder)
+	}
+	if after.messageCount != 4 {
+		t.Errorf("thread_cache message_count = %d, want 4", after.messageCount)
+	}
+	if len(after.children) != 3 || after.children[0] != 2 || after.children[1] != 3 || after.children[2] != 4 {
+		t.Errorf("thread_cache children = %v, want [2 3 4]", after.children)
+	}
+	// The premise of the last_child_number check: this batch appended 4 before 3.
+	if len(after.childrenOrder) == 3 && after.childrenOrder[2] != 3 {
+		t.Logf("note: child_articles order is %v, so the clobbering this test pins is no longer reproducible this way", after.childrenOrder)
+	}
+}
+
+// TestThrIntakeThreadsCountCountsLegacyZeroParent: cmd/fix-references writes an orphan root
+// with parent_article = 0 instead of NULL, and such a row must still count as a thread.
+func TestThrIntakeThreadsCountCountsLegacyZeroParent(t *testing.T) {
+	db := fuBatchIsolatedDB(t)
+	group := w0Name("thrintake.zeroparent")
+	task := db.Batch.GetOrCreateTasksMapKey(group)
+
+	thrIntakeRun(t, db, task, thrIntakeArticle(thrIntakeMsgID("root"), 1, nil, task))
+	if got := thrIntakeThreadsCount(t, db, group); got != 1 {
+		t.Fatalf("GetThreadsCount = %d, want 1", got)
+	}
+	// A root the way cmd/fix-references leaves it.
+	adfBatchExec(t, db, group,
+		"INSERT INTO threads (root_article, parent_article, child_article, depth, thread_order) VALUES (?, 0, ?, 0, 0)", 42, 42)
+	if got := thrIntakeThreadsCount(t, db, group); got != 2 {
+		t.Errorf("GetThreadsCount = %d, want 2: a root with parent_article 0 is a thread as well", got)
 	}
 }

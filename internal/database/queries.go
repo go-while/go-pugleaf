@@ -659,8 +659,11 @@ func (db *Database) DeleteNewsgroup(name string) (bool, error) {
 // (root, parent, child, depth)), so COUNT(*) counted articles, not threads. It read like a
 // thread count only while intake wrote no reply rows at all; a rebuild wrote them and made
 // the stats total jump (plan thread-orphan-followups). parent_article IS NULL is exactly the
-// root rows and needs no DISTINCT.
-const query_GetThreadsCount = `SELECT COUNT(*) FROM threads WHERE parent_article IS NULL`
+// root rows and needs no DISTINCT. parent_article = 0 counts as a root as well: the batch
+// writer and the rebuild write NULL, but cmd/fix-references inserts its orphan roots with a
+// parent_article of 0, and a group last repaired with that tool would otherwise report no
+// threads at all.
+const query_GetThreadsCount = `SELECT COUNT(*) FROM threads WHERE parent_article IS NULL OR parent_article = 0`
 
 // GetThreadsCount returns the number of threads in the group: its thread roots. The threads
 // readers that return rows (GetThreads below, GetThreadsPaged in db_threads_paged.go) keep
