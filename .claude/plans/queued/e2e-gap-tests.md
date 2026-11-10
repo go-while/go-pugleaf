@@ -22,6 +22,13 @@ package `tlscert` (CA, leafs incl. expired / not-yet-valid / wrong-name, PEM fil
 `StartTLS`, fakeserver STARTTLS, `PeerOptions` (`HoldGreeting`, `GreetingDelay`, `CapabilitiesReply`,
 `ModeStreamReply`, `DropAfterChecks`, `SilentAfterModeStream`), `Faults` applied to `PeerHandler`, 7 more
 conformance reader checks (incl. NEWNEWS), canlock, mailrec + `cmd/fakesendmail`.
+Kit main 750ef8b (PR #5, untagged) adds: conformance starttls / starttls-twice / starttls-pipelined
+(CVE-2011-0411) / tls-capabilities / compress*, `Options.Allow`, `Report.Require/RequireNoFail`; `proc.Run/TryRun`
+(timeout, capped output, exit code), process-group kill, `Options.Daemonizes`, `GoBuild`;
+`testkit.ShortTempDir/MaxSocketPath`; client `Try{Post,Ihave,Takethis}` return (code, line, sent, err),
+`Expect{Post,Ihave,Takethis}`, `SendBytes`; fakeserver `NewPeer/StartPeer`, `ArticlesRaw`, `OnArticleRaw`;
+article `PrependPath`, `PathEntries`, `NewArticle`. Behaviour change: a `proc` server exiting 0 before listening
+fails unless `Options.Daemonizes`.
 Kit behaviour changes to absorb on the bump: fakeserver Store CAPABILITIES lists `LIST ... ACTIVE.TIMES HEADERS`;
 `LIST ACTIVE.TIMES` answers 215 (was 501); implicit-TLS fakeserver handshakes before the greeting.
 
@@ -138,8 +145,9 @@ parity (DEL) with INN: `strict-del-passes` is deliberate.
   `xrefEnv.start/stop` → `proc.StartTCP`; `flPqFake` ×2 → fakeserver Script; `adfTorSilentProxy` → RawStall;
   FreePort/WaitFor copies → `testkit`; 5 Expect copies → `client.ExpectCmd`; 4 caps parsers →
   `client.Capabilities`; `e2eWire` stuffing → `client.Stuff`; cert/StartTLS/Ihave/Post/Login copies →
-  `tlscert`/client; `e2e_binary_rfc` N50-N56 → `conformance.Run` (skip NEWNEWS). Survey section 3 items
-  (runIsolated, knownBug, GoBuild, RecordingConn, ParseGroup211/ExpectID, PEM-to-TempDir, fake SOCKS5) only after
+  `tlscert`/client; `e2e_binary_rfc` N50-N56 and the STARTTLS checks (N57, `nntp-rfc-starttls_test.go:277`) → `conformance.Run`
+  (skip NEWNEWS); the 3 `GoBuild` copies and `xrefEnv.tool` → `proc.GoBuild` / `proc.Run`. Survey section 3 items
+  (runIsolated, knownBug, RecordingConn, ParseGroup211/ExpectID, PEM-to-TempDir, fake SOCKS5) only after
   nntp-testkit-1 has moved them into a tagged kit; until then keep our copies.
   Checks: full list; test count must not drop (compare `go test -list . ./...` before/after).
 
