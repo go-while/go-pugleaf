@@ -135,12 +135,13 @@ parity (DEL) with INN: `strict-del-passes` is deliberate.
 ## Waves
 
 ### Wave 0 (inline, on plan-e2e-gap-tests)
-- Bump `github.com/go-while/nntp-testkit` to the kit tag that contains PR #2 + #3 (expected v0.12.0; ask
-  nntp-testkit-1 / go-while for the name). `go get`, `go mod tidy`.
+- Bump `github.com/go-while/nntp-testkit` to **v0.12.0** (released 2026-11-11, contains PR #2, #3, #5; release
+  notes list the behaviour changes). `go get github.com/go-while/nntp-testkit@v0.12.0`, `go mod tidy`.
 - Fix expectations broken by the bump: CAPABILITIES LIST line of the fake Store (`ACTIVE.TIMES HEADERS`),
   `LIST ACTIVE.TIMES` 215, implicit-TLS fakeserver greeting order.
-- `PUGLEAF_TEST_DEADLINE` vs kit `NNTP_TEST_DEADLINE`: per nntp-testkit-1's answer (kit accepts extra env names,
-  or go-pugleaf maps it in TestMain).
+- Deadline: the kit reads only `NNTP_TEST_DEADLINE` (`testkit.EnvDeadline`, default 60 s). Keep go-pugleaf's
+  mapping of `PUGLEAF_TEST_DEADLINE` into the kit (as today); replace our own `hDeadlineFromEnv`/`testWaitFromEnv`
+  copies by `testkit.Deadline()` only where the mapping guarantees the same value.
 - Checks: full CLAUDE.md list green.
 
 ### Wave 1 (parallel, disjoint files)
@@ -175,8 +176,8 @@ parity (DEL) with INN: `strict-del-passes` is deliberate.
   `client.Capabilities`; `e2eWire` stuffing → `client.Stuff`; cert/StartTLS/Ihave/Post/Login copies →
   `tlscert`/client; `e2e_binary_rfc` N50-N56 and the STARTTLS checks (N57, `nntp-rfc-starttls_test.go:277`) → `conformance.Run`
   (skip NEWNEWS); the 3 `GoBuild` copies and `xrefEnv.tool` → `proc.GoBuild` / `proc.Run`. Survey section 3 items
-  (runIsolated, knownBug, RecordingConn, ParseGroup211/ExpectID, PEM-to-TempDir, fake SOCKS5) only after
-  nntp-testkit-1 has moved them into a tagged kit; until then keep our copies.
+  (runIsolated, knownBug, RecordingConn, ParseGroup211/ExpectID, fake SOCKS5) are NOT in v0.12.0: keep our copies
+  (PEM-to-TempDir → `tlscert` files, which v0.12.0 has).
   Checks: full list; test count must not drop (compare `go test -list . ./...` before/after).
 
 ## Checks
