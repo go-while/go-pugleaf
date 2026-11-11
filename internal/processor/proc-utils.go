@@ -675,24 +675,31 @@ func normalizeDateString(dateStr string) string {
 // other two-digit year (00..49 and 69..99 already agree with RFC 5322) is left untouched,
 // so no date that parses today changes its reading. A misread year matters: it trips the
 // 72 h stale / 24 h future check of peer intake and 437s an otherwise valid article.
+//
+// A three-digit year is only expanded up to next year: "199" (2099) or "999" is a broken
+// field, not a date, and stays unreadable, so a bulk article keeps falling back to its other
+// date headers instead of being filed with, and then refused for, a far-future date.
 func rewriteObsYear(dateStr string) string {
-	return obsYearRe.ReplaceAllStringFunc(dateStr, func(s string) string {
-		m := obsYearRe.FindStringSubmatch(s)
-		if m == nil {
-			return s
+	m := obsYearRe.FindStringSubmatchIndex(dateStr)
+	if m == nil {
+		return dateStr
+	}
+	y, err := strconv.Atoi(dateStr[m[4]:m[5]])
+	if err != nil {
+		return dateStr
+	}
+	switch {
+	case m[5]-m[4] == 3:
+		if y+1900 > time.Now().UTC().Year()+1 {
+			return dateStr
 		}
-		y, err := strconv.Atoi(m[2])
-		if err != nil {
-			return s
-		}
-		switch {
-		case len(m[2]) == 3, y >= 50 && y <= 68:
-			y += 1900
-		default:
-			return s
-		}
-		return m[1] + strconv.Itoa(y) + m[3]
-	})
+		y += 1900
+	case y >= 50 && y <= 68:
+		y += 1900
+	default:
+		return dateStr
+	}
+	return dateStr[:m[4]] + strconv.Itoa(y) + dateStr[m[5]:]
 }
 
 // fallbackDateHeaders are tried, in order, when the Date header is missing or unreadable
@@ -706,9 +713,14 @@ var fallbackDateHeaders = []string{"posted", "date-received", "nntp-posting-date
 // them like an unreadable Date and prefers a fallback header (Date-Received is usually sane).
 var minArchiveDate = time.Date(1980, 1, 1, 0, 0, 0, 0, time.UTC)
 
-// archiveDateUsable reports whether t is a parsed date from the Usenet era.
+// archiveDateUsable reports whether t is a parsed date from the Usenet era: not zero, not
+// before 1980, and not further ahead than the future margin ProcessArticle allows. A
+// far-future Date (a broken clock, or a year a mailer wrote as "2099") is as unusable as a
+// pre-Usenet one: without the upper bound bulk intake would file the article with a date
+// threading.go then refuses as "date in the future" and remembers as a reject, although the
+// article carries a sane Date-Received or Posted.
 func archiveDateUsable(t time.Time) bool {
-	return !t.IsZero() && !t.Before(minArchiveDate)
+	return !t.IsZero() && !t.Before(minArchiveDate) && !t.After(time.Now().UTC().Add(MaxFutureDate))
 }
 
 // fallbackDate returns the first usable secondary date header and its name, or the zero

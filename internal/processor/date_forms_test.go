@@ -1,8 +1,8 @@
-package common_test
+package processor
 
 // G21 of the plan e2e-gap-tests: the RFC 5322 Date forms a Usenet article really carries,
-// run through processor.ParseNNTPDateStrict (the parser non-bulk intake rejects an article
-// with, D10) and its lenient sibling ParseNNTPDate.
+// run through ParseNNTPDateStrict (the parser non-bulk intake rejects an article with, D10)
+// and its lenient sibling ParseNNTPDate.
 //
 // Source of the corpus: INN tests/lib/date-t.c (test_dates and test_dates_lax), with INN's
 // own expected epoch seconds kept as the expectation, so the two implementations are
@@ -16,16 +16,13 @@ package common_test
 // year or zone matters: it trips the 72 h stale / 24 h future check of peer intake and 437s
 // an otherwise valid article.
 //
-// Identifiers use the df prefix. No wall clock: every case is a fixed historical date.
-//
-// This file lives in internal/common per the plan's slice, as an external test package, so
-// it may import internal/processor (which imports internal/common).
+// Identifiers use the df prefix. No wall clock is asserted: every case is a fixed
+// historical date, or (for the archive fallback) a year far enough ahead that no clock
+// reading changes the outcome.
 
 import (
 	"testing"
 	"time"
-
-	"github.com/go-while/go-pugleaf/internal/processor"
 )
 
 // dfUnix returns the epoch seconds of a UTC date, for the cases INN does not cover.
@@ -49,7 +46,7 @@ type dfCase struct {
 // dfRun checks one case against ParseNNTPDateStrict and ParseNNTPDate.
 func dfRun(t *testing.T, tc dfCase) {
 	t.Helper()
-	got, ok := processor.ParseNNTPDateStrict(tc.in)
+	got, ok := ParseNNTPDateStrict(tc.in)
 	if ok != tc.ok {
 		t.Errorf("ParseNNTPDateStrict(%q) ok = %v, want %v (t = %v, INN: %s)", tc.in, ok, tc.ok, got, tc.inn)
 		return
@@ -65,7 +62,7 @@ func dfRun(t *testing.T, tc dfCase) {
 			tc.in, got.UTC(), got.Unix(), time.Unix(tc.want, 0).UTC(), tc.want, tc.inn)
 	}
 	// The lenient entry point must return the same instant for everything that parses.
-	if lax := processor.ParseNNTPDate(tc.in); !lax.Equal(got) {
+	if lax := ParseNNTPDate(tc.in); !lax.Equal(got) {
 		t.Errorf("ParseNNTPDate(%q) = %v, want %v (the strict result)", tc.in, lax.UTC(), got.UTC())
 	}
 }
@@ -119,7 +116,8 @@ func TestDateFormsINNStrict(t *testing.T) {
 // TestDateFormsObsYear: the RFC 5322 §4.3 year rules in full. A two-digit year 00..49 is
 // 20xx and 50..99 is 19xx, a three-digit year is an offset from 1900. Go's "06" layout
 // pivots at 69 instead of 50 and cannot read three digits at all, so normalizeDateString
-// rewrites exactly those two readings (processor.rewriteObsYear).
+// rewrites exactly those two readings (rewriteObsYear), and a three-digit year only as far
+// as next year: beyond that the field is broken, not a date, and stays unreadable.
 func TestDateFormsObsYear(t *testing.T) {
 	for _, tc := range []dfCase{
 		{"00", "Fri, 28 May 00 11:01:32 +0000", true, dfUnix(2000, time.May, 28, 11, 1, 32), "-", ""},
@@ -131,7 +129,10 @@ func TestDateFormsObsYear(t *testing.T) {
 		{"99", "Fri, 28 May 99 11:01:32 +0000", true, dfUnix(1999, time.May, 28, 11, 1, 32), "-", ""},
 		{"104", "Fri, 28 May 104 11:01:32 +0000", true, dfUnix(2004, time.May, 28, 11, 1, 32), "-", ""},
 		{"004", "28 May 004 11:01:32 +0000", true, dfUnix(1904, time.May, 28, 11, 1, 32), "-", ""},
-		{"199", "28 May 199 11:01:32 +0000", true, dfUnix(2099, time.May, 28, 11, 1, 32), "-", ""},
+		// a three-digit year beyond next year is not expanded and stays unreadable, so the
+		// archive path keeps using the article's fallback date headers
+		{"199", "28 May 199 11:01:32 +0000", false, 0, "-", ""},
+		{"999", "28 May 999 11:01:32 +0000", false, 0, "-", ""},
 		// the rewrite is anchored on the year position, so a four-digit year, a day next to
 		// the month and a ctime-style year after the time are untouched
 		{"4digit", "Fri, 28 May 2004 11:01:32 +0000", true, dfUnix(2004, time.May, 28, 11, 1, 32), "-", ""},
@@ -190,5 +191,58 @@ func TestDateFormsRejected(t *testing.T) {
 		{"unknown-month", "Fri, 28 Foo 2004 11:01:32 +0100", false, 0, "strict", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) { dfRun(t, tc) })
+	}
+}
+
+// TestDateFormsArchiveFutureFallback: a Date a bulk (archive) article cannot be filed with
+// must yield to its B-news fallback headers, for a far-future year exactly as for a
+// pre-Usenet one. Without the upper bound of archiveDateUsable the article would be filed
+// with the future date, and threading.go would then refuse it as "date in the future" and
+// remember the reject (setCaseDupes), so an import that worked before would drop it.
+//
+// TestDateParseBulkArticleDate covers the pre-1980 and unreadable cases; only the
+// future-date ones are new here. The years are far enough ahead that no clock reading
+// changes the outcome.
+func TestDateFormsArchiveFutureFallback(t *testing.T) {
+	const received = "Sat, 8-Aug-87 11:47:19 EDT" // 1987-08-08 15:47:19 UTC
+	for _, tc := range []struct {
+		name, date     string
+		fallback       bool // the article carries a usable Date-Received
+		want, wantName string
+	}{
+		// a four-digit far-future year: readable, but not a date to file an article with
+		{"4digit-future-fallback", "Fri, 28 May 2099 11:01:32 +0000", true, "1987-08-08 15:47:19", "date-received"},
+		// the same year written as an obs-year: unreadable, same fallback
+		{"3digit-future-fallback", "28 May 199 11:01:32 +0000", true, "1987-08-08 15:47:19", "date-received"},
+		{"3digit-999-fallback", "28 May 999 11:01:32 +0000", true, "1987-08-08 15:47:19", "date-received"},
+		// a three-digit year that is a real date is still read, and wins over the fallback
+		{"3digit-past-kept", "28 May 104 11:01:32 +0000", true, "2004-05-28 11:01:32", ""},
+		// no usable fallback: the future date is kept, so the article is still filed and the
+		// decision stays with ProcessArticle (as a pre-Usenet Date without a fallback is)
+		{"future-no-fallback", "Fri, 28 May 2099 11:01:32 +0000", false, "2099-05-28 11:01:32", ""},
+		{"3digit-future-no-fallback", "28 May 199 11:01:32 +0000", false, "0001-01-01 00:00:00", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var headers map[string][]string
+			if tc.fallback {
+				headers = map[string][]string{"date-received": {received}}
+			}
+			got, name := bulkArticleDate(tc.date, headers)
+			if g := got.UTC().Format("2006-01-02 15:04:05"); g != tc.want || name != tc.wantName {
+				t.Errorf("bulkArticleDate(%q, %v) = %s via %q, want %s via %q",
+					tc.date, headers, g, name, tc.want, tc.wantName)
+			}
+		})
+	}
+	// The bound is the one ProcessArticle applies, so no article is filed with a date the
+	// same run would then refuse.
+	if MaxFutureDate != 24*time.Hour {
+		t.Errorf("MaxFutureDate = %v, want 24h (RFC 5537 §3.7)", MaxFutureDate)
+	}
+	if archiveDateUsable(time.Now().UTC().Add(MaxFutureDate + time.Hour)) {
+		t.Error("archiveDateUsable accepted a date beyond MaxFutureDate")
+	}
+	if !archiveDateUsable(time.Now().UTC()) {
+		t.Error("archiveDateUsable refused the present")
 	}
 }
