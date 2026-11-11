@@ -180,10 +180,15 @@ func (pool *Pool) XHdrStreamedWait(group string, header string, start, end int64
 }
 
 // streamXHdr runs the XHDR stream on client (which closes xhdrChan) and gives the connection
-// back: to the pool after a complete stream, closed after any error (the response may be
-// unread).
+// back: to the pool after a complete stream and after a 423 (ErrNoArticlesInRange: the status
+// line was read completely, so the session is in sync, as in Pool.XOver), closed after any
+// other error (the response may be unread).
 func (pool *Pool) streamXHdr(client *BackendConn, group string, header string, start, end int64, xhdrChan chan<- HeaderLine, shutdownChan <-chan struct{}) error {
 	if err := client.XHdrStreamed(group, header, start, end, xhdrChan, shutdownChan); err != nil {
+		if errors.Is(err, ErrNoArticlesInRange) {
+			pool.Put(client)
+			return err
+		}
 		client.ForceCloseConn()
 		return err
 	}
