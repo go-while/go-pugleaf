@@ -245,3 +245,14 @@ once at peer B, never at A, queue empty afterwards, peer stats show accepted 1 i
     loss) — XHdrStreamed re-asks after the last record (≤ MaxXHdrReasks=16 per batch), only 423 = empty range,
     streamXHdr keeps the connection after 423; `// W2-fetch` and `// FU-progress` pins.
 - 2026-11-11: fetch path = relay rules decided; wave 2 paused by go-while after wave 1 ("Not yet").
+- Wave 2 (2026-11-11): slice intake-policy, worktree-agent-a7b93da3cbba71dc9 (577f600, 4c82608, 21d4a81, 6c0f92d,
+  c7a56b8) → merge 36e9cd3; review MERGE AFTER FIXES, all fixed; full list green (33), known bugs: only 430.
+  Migration 0037_main_peers_header_check.sql (peers.header_check default relay; config PeerArticleMaxAgeHours=240
+  (go-while: INN artcutoff 10 days; the plan's "72 h exists" was wrong, peer intake had no past cutoff),
+  PeerArticleMaxFutureHours=24). testing-001 has an unrelated 0038_main_bad_bots_2026_11.sql — filenames are the
+  migration key, never rename 0037. HeaderBlockRelay = innd rules; strict = nnrpd (Path line exempt from 998 for
+  strict peers); unknown mode → strict; fetch keeps bare CR/LF verbatim (malformed lines still dropped) and rejects
+  NUL in the body; D2 NUL body rejected on POST/IHAVE/TAKETHIS; D3 `<` only inside [..]; D4 strict ": " + value;
+  an age refusal is NOT remembered (common.NotRemembered) so raising the limit brings the article back (the future
+  limit still remembers); RelayHeaders relays a bare CR verbatim (only LF/NUL make a block unrelayable); one honest
+  size (IntakeWireSize, un-stuffed, before feedPath / injectProtoArticle) for server, peer and group limits.
