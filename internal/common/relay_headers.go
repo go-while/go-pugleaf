@@ -87,8 +87,13 @@ func relayHeaders(article *models.Article, localHost string, ignoreGoogle bool) 
 	incomplete := ""
 	for i, l := range raw {
 		l = strings.TrimSuffix(l, "\r")
-		if strings.ContainsAny(l, "\r\n\x00") {
-			return nil, fmt.Errorf("%w: CR, LF or NUL inside header line %d", ErrRelayHeadersInvalid, i+1)
+		// LF would split the line on the wire and NUL is refused on every intake path, so
+		// such a block is never relayable. A bare CR is relayed verbatim: intake accepts it
+		// from a peer under the relay rules (plan e2e-gap-tests, D1, as innd does) and it
+		// survives CRLF framing, so refusing it here would drop the queue row of an article
+		// we accepted (review item 3).
+		if strings.ContainsAny(l, "\n\x00") {
+			return nil, fmt.Errorf("%w: LF or NUL inside header line %d", ErrRelayHeadersInvalid, i+1)
 		}
 		if l != "" && (l[0] == ' ' || l[0] == '\t') {
 			if len(fields) == 0 {

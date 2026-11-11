@@ -616,22 +616,22 @@ func TestCliUpTLSHostile(t *testing.T) {
 	}
 }
 
-// W2-fetch: if wave 2 gives the fetch path relay rules (accept a bare CR, reject NUL in the
-// header and in the body), this test and TestDLArtUpArticleNULAndCR in internal/processor
-// are the pins to update.
-//
-// G19: a fetched article whose header block holds a bare CR and a NUL octet. The client
-// stores both verbatim (nothing is turned into a space or dropped); the fetch-mode header
-// check is what refuses such an article (common.CheckHeaderBlock rule 1, in both modes),
-// so nothing reaches the database. Source: NewsCache TestUpstreamArticleNULAndCR.
+// G19 (wave 2, "Fetch = relay rules"): a fetched article whose header block holds a bare CR
+// or a NUL octet. The client stores both verbatim (nothing is turned into a space or
+// dropped); the fetch-mode header check then accepts the bare CR (counted, innd behaviour)
+// and refuses the NUL, so only the NUL article is kept out of the database
+// (internal/processor/proc_DLArt_upstream_test.go runs both through DownloadArticles).
+// Source: NewsCache TestUpstreamArticleNULAndCR.
 func TestCliUpArticleNULAndCR(t *testing.T) {
 	const id = "<nulcr.1.upstream.faults@fakeserver.invalid>"
 	for _, tc := range []struct {
-		name   string
-		header string
+		name     string
+		header   string
+		wantKept bool // the fetch-mode header check keeps the block (bare CR) or rejects it (NUL)
+		wantCR   int
 	}{
-		{"bare-cr", "Subject: before\rafter"},
-		{"nul", "Subject: before\x00after"},
+		{name: "bare-cr", header: "Subject: before\rafter", wantKept: true, wantCR: 1},
+		{name: "nul", header: "Subject: before\x00after"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			st := cliFakeNewStore()
@@ -667,12 +667,22 @@ func TestCliUpArticleNULAndCR(t *testing.T) {
 			if want := strings.TrimPrefix(tc.header, "Subject: "); art.Subject != want {
 				t.Errorf("Subject = %q, want %q (the client normalizes nothing)", art.Subject, want)
 			}
-			// the fetch-mode check refuses the block: the fetcher stores nothing
-			// (internal/processor/proc_DLArt_upstream_test.go runs the same case through
-			// DownloadArticles)
-			_, cerr := common.CheckHeaderBlock(strings.Split(art.HeadersJSON, "\n"), common.HeaderBlockFetch)
-			if !errors.Is(cerr, common.ErrIntakeRejected) {
-				t.Errorf("CheckHeaderBlock(fetch) = %v, want ErrIntakeRejected for %q", cerr, tc.header)
+			// the fetch-mode check: a bare CR is accepted and counted, a NUL rejects
+			kept, defects, cerr := common.CheckHeaderBlockDefects(strings.Split(art.HeadersJSON, "\n"), common.HeaderBlockFetch)
+			if !tc.wantKept {
+				if !errors.Is(cerr, common.ErrIntakeRejected) {
+					t.Errorf("CheckHeaderBlockDefects(fetch) = %v, want ErrIntakeRejected for %q", cerr, tc.header)
+				}
+				return
+			}
+			if cerr != nil {
+				t.Fatalf("CheckHeaderBlockDefects(fetch) = %v, want the block accepted for %q", cerr, tc.header)
+			}
+			if defects.BareCR != tc.wantCR {
+				t.Errorf("defects = %+v, want BareCR %d", defects, tc.wantCR)
+			}
+			if !strings.Contains(strings.Join(kept, "\n"), tc.header) {
+				t.Errorf("the accepted block does not hold %q verbatim: %q", tc.header, kept)
 			}
 		})
 	}

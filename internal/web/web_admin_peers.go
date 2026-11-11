@@ -551,6 +551,9 @@ func peerFromForm(c *Context, peer *models.Peer) error {
 	} else {
 		peer.InMaxSize = 0
 	}
+	// Empty means the column default "relay" (database.ValidatePeer fills it); an unknown
+	// value is refused there, so the admin sees the error.
+	peer.HeaderCheck = strings.TrimSpace(c.PostForm("header_check"))
 	peer.OutEnabled = peerFormBool(c, "out_enabled")
 	peer.OutHost = strings.TrimSpace(c.PostForm("out_host"))
 	if outPortGiven {

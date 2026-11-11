@@ -23,17 +23,28 @@ const (
 	MaxPeerInMaxSize int64 = 16 << 20
 )
 
+// Values of peers.header_check (migration 0037, plan e2e-gap-tests D1/D4): the header rules
+// intake applies to the articles this peer feeds us (IHAVE/TAKETHIS).
+const (
+	// PeerHeaderCheckRelay is the innd behaviour and the column default: no header line
+	// length limit, a bare CR or LF inside a header line is stored verbatim and logged.
+	PeerHeaderCheckRelay = "relay"
+	// PeerHeaderCheckStrict is the nnrpd behaviour nntp-server always uses for POST:
+	// at most 998 octets per header line, exactly ": " and a non-empty value.
+	PeerHeaderCheckStrict = "strict"
+)
+
 // ErrPeerAuth is returned by AuthenticatePeer for an unknown login, a wrong password or a
 // disabled peer (one error for all three: no login enumeration).
 var ErrPeerAuth = errors.New("peer authentication failed")
 
-const peerColumns = `id, name, path_token, hosts, in_username, in_password_hash, in_patterns, in_max_size,
+const peerColumns = `id, name, path_token, hosts, in_username, in_password_hash, in_patterns, in_max_size, header_check,
 	out_enabled, out_host, out_port, out_tls, out_username, out_password, out_patterns, out_flags,
 	max_conns, enabled, notes, created_at, updated_at`
 
 func scanPeer(scan func(dest ...interface{}) error) (*models.Peer, error) {
 	var p models.Peer
-	err := scan(&p.ID, &p.Name, &p.PathToken, &p.Hosts, &p.InUsername, &p.InPasswordHash, &p.InPatterns, &p.InMaxSize,
+	err := scan(&p.ID, &p.Name, &p.PathToken, &p.Hosts, &p.InUsername, &p.InPasswordHash, &p.InPatterns, &p.InMaxSize, &p.HeaderCheck,
 		&p.OutEnabled, &p.OutHost, &p.OutPort, &p.OutTLS, &p.OutUsername, &p.OutPassword, &p.OutPatterns, &p.OutFlags,
 		&p.MaxConns, &p.Enabled, &p.Notes, &p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
@@ -132,6 +143,14 @@ func ValidatePeer(p *models.Peer) error {
 		return fmt.Errorf("peer %q: in_max_size %d out of range (0 = server limit, or %d..%d bytes)",
 			p.Name, p.InMaxSize, MinPeerInMaxSize, MaxPeerInMaxSize)
 	}
+	p.HeaderCheck = strings.ToLower(strings.TrimSpace(p.HeaderCheck))
+	if p.HeaderCheck == "" {
+		p.HeaderCheck = PeerHeaderCheckRelay // the column default (migration 0037)
+	}
+	if p.HeaderCheck != PeerHeaderCheckRelay && p.HeaderCheck != PeerHeaderCheckStrict {
+		return fmt.Errorf("peer %q: header_check %q must be %q or %q",
+			p.Name, p.HeaderCheck, PeerHeaderCheckRelay, PeerHeaderCheckStrict)
+	}
 	if p.OutEnabled && p.OutHost == "" {
 		return fmt.Errorf("peer %q: outgoing feed enabled without out_host", p.Name)
 	}
@@ -185,10 +204,10 @@ func (db *Database) InsertPeer(p *models.Peer, inPassword string) (int64, error)
 	if err != nil {
 		return 0, err
 	}
-	res, err := RetryableExec(db.mainDB, `INSERT INTO peers (name, path_token, hosts, in_username, in_password_hash, in_patterns, in_max_size,
+	res, err := RetryableExec(db.mainDB, `INSERT INTO peers (name, path_token, hosts, in_username, in_password_hash, in_patterns, in_max_size, header_check,
 		out_enabled, out_host, out_port, out_tls, out_username, out_password, out_patterns, out_flags, max_conns, enabled, notes)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		p.Name, p.PathToken, p.Hosts, p.InUsername, hash, p.InPatterns, p.InMaxSize,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		p.Name, p.PathToken, p.Hosts, p.InUsername, hash, p.InPatterns, p.InMaxSize, p.HeaderCheck,
 		p.OutEnabled, p.OutHost, p.OutPort, p.OutTLS, p.OutUsername, p.OutPassword, p.OutPatterns, p.OutFlags,
 		p.MaxConns, p.Enabled, p.Notes)
 	if err != nil {
@@ -208,10 +227,10 @@ func (db *Database) UpdatePeer(p *models.Peer) error {
 	if err := ValidatePeer(p); err != nil {
 		return err
 	}
-	res, err := RetryableExec(db.mainDB, `UPDATE peers SET name = ?, path_token = ?, hosts = ?, in_username = ?, in_patterns = ?, in_max_size = ?,
+	res, err := RetryableExec(db.mainDB, `UPDATE peers SET name = ?, path_token = ?, hosts = ?, in_username = ?, in_patterns = ?, in_max_size = ?, header_check = ?,
 		out_enabled = ?, out_host = ?, out_port = ?, out_tls = ?, out_username = ?, out_patterns = ?, out_flags = ?,
 		max_conns = ?, enabled = ?, notes = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		p.Name, p.PathToken, p.Hosts, p.InUsername, p.InPatterns, p.InMaxSize,
+		p.Name, p.PathToken, p.Hosts, p.InUsername, p.InPatterns, p.InMaxSize, p.HeaderCheck,
 		p.OutEnabled, p.OutHost, p.OutPort, p.OutTLS, p.OutUsername, p.OutPatterns, p.OutFlags,
 		p.MaxConns, p.Enabled, p.Notes, p.ID)
 	if err != nil {

@@ -435,9 +435,12 @@ func (proc *Processor) ProcessIncomingArticle(article *models.Article) (int, err
 	// article in (unknown, inactive, refusing it or too small a max_art_size).
 	// Never remembered: a duplicate (CaseDupes: already known), an in-flight claim or a
 	// temporary failure (CaseRetry, common.ErrIntakeTemporary: the peer may offer it again),
-	// and POST (ProcessPostedArticle: the user may fix the article and post it again with the
-	// same message-id).
-	if code == history.CaseError && errors.Is(err, common.ErrIntakeRejected) {
+	// a refusal that depends on a setting and not on the article (common.ErrIntakeNotRemembered,
+	// today the peer age cutoff: raising or disabling PeerArticleMaxAgeHours must bring those
+	// articles back, and an archive transfer must not poison the history index), and POST
+	// (ProcessPostedArticle: the user may fix the article and post it again with the same
+	// message-id).
+	if code == history.CaseError && errors.Is(err, common.ErrIntakeRejected) && !errors.Is(err, common.ErrIntakeNotRemembered) {
 		proc.RememberReject(messageID)
 	}
 	return code, err

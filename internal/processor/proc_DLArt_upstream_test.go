@@ -61,6 +61,9 @@ type upFake struct {
 	// nil: the article's headers.
 	articleHeaders func(n int64, headers []string) []string
 
+	// articleBody rewrites the body ARTICLE serves (a NUL octet). nil: the article's body.
+	articleBody func(n int64, body []string) []string
+
 	// articleDropID: ARTICLE for this message-id writes its status line and one header line
 	// and then closes the connection (the kit's Faults.DropInMultiline for one article).
 	articleDropID string
@@ -206,7 +209,11 @@ func (f *upFake) article(c *fakeserver.Conn, group string, args []string) bool {
 		out = append(out, dlFakeStuff(h))
 	}
 	out = append(out, "")
-	for _, b := range a.Body {
+	body := a.Body
+	if f.articleBody != nil {
+		body = f.articleBody(a.Number, append([]string(nil), body...))
+	}
+	for _, b := range body {
 		out = append(out, dlFakeStuff(b))
 	}
 	_ = c.WriteLines(append(out, ".")...)
@@ -481,39 +488,71 @@ func TestDLArtUpModeReaderRefused(t *testing.T) {
 	}
 }
 
-// W2-fetch: if wave 2 gives the fetch path relay rules (accept a bare CR, reject NUL in the
-// header and in the body), this test and TestCliUpArticleNULAndCR in internal/nntp are the
-// pins to update.
+// storedHeaders returns the stored header blocks of the group database, joined with "\n".
+func (e *dlFakeEnv) storedHeaders() string {
+	e.t.Helper()
+	groupDB, err := e.proc.DB.GetGroupDB(e.group)
+	if err != nil {
+		e.t.Fatalf("GetGroupDB(%s): %v", e.group, err)
+	}
+	defer groupDB.Return()
+	rows, err := database.RetryableQuery(groupDB.DB, "SELECT headers_json FROM articles", nil)
+	if err != nil {
+		e.t.Fatalf("select headers_json: %v", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var h string
+		if err := rows.Scan(&h); err != nil {
+			e.t.Fatalf("scan headers_json: %v", err)
+		}
+		out = append(out, h)
+	}
+	if err := rows.Err(); err != nil {
+		e.t.Fatalf("rows: %v", err)
+	}
+	return strings.Join(out, "\n")
+}
+
+// G19 (wave 2, "Fetch = relay rules"): a fetched article whose header block holds a bare CR,
+// or whose header block or body holds a NUL octet.
 //
-// G19: a fetched article whose header block holds a bare CR or a NUL octet.
-//
-// Pinned behaviour: the fetch-mode header check refuses the whole article (common.
-// CheckHeaderBlock rule 1 rejects NUL, CR and LF in both modes, so the bare CR is not
-// turned into a space and the NUL is not dropped), nothing is stored, the run itself
-// succeeds and the progress moves past the refused articles: a defect article is not
-// fetched again. The client keeps both octets verbatim
+// The fetch path follows the relay rules (plan e2e-gap-tests, item (e)): a bare CR inside a
+// header line is accepted and stored verbatim (counted, and logged once per article like
+// innd "accepted but includes CR without LF"), a NUL in the header block or in the body
+// refuses the whole article. Either way the run succeeds and the progress moves past the
+// range: a refused article is not fetched again. The client keeps both octets verbatim
 // (internal/nntp/nntp-client-upstream-faults_test.go TestCliUpArticleNULAndCR).
 func TestDLArtUpArticleNULAndCR(t *testing.T) {
+	const crSubject = "Subject: before\rafter"
 	for _, tc := range []struct {
 		name    string
-		subject string
+		subject string // "" = the generated Subject
+		body    string // "" = the generated body
+		stored  bool   // the article is stored (accepted)
+		logLine string // log text expected once per article
 	}{
-		{"bare-cr", "Subject: before\rafter"},
-		{"nul", "Subject: before\x00after"},
+		{name: "bare-cr-header", subject: crSubject, stored: true, logLine: "accepted but includes CR without LF(1)"},
+		{name: "nul-header", subject: "Subject: before\x00after", logLine: "(bulk) rejected"},
+		{name: "nul-body", body: "body before\x00after", logLine: "(bulk) rejected: article contains NUL"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			const high = 10
 			group := dlFakeNewGroup()
-			f := &upFake{
-				high: high,
-				articleHeaders: func(n int64, headers []string) []string {
+			f := &upFake{high: high}
+			if tc.subject != "" {
+				f.articleHeaders = func(n int64, headers []string) []string {
 					for i, h := range headers {
 						if strings.HasPrefix(h, "Subject:") {
 							headers[i] = tc.subject
 						}
 					}
 					return headers
-				},
+				}
+			}
+			if tc.body != "" {
+				f.articleBody = func(n int64, body []string) []string { return []string{tc.body} }
 			}
 			e := upFakeSetup(t, group, f)
 
@@ -521,11 +560,17 @@ func TestDLArtUpArticleNULAndCR(t *testing.T) {
 			if err := e.run(1, high); err != nil {
 				t.Fatalf("DownloadArticles: %v", err)
 			}
-			if got := e.stored(); len(got) != 0 {
-				t.Errorf("%d articles with a defect header block stored: %v", len(got), got)
+			if tc.stored {
+				e.wantStoredRange(1, high)
+				// the bare CR is stored verbatim, nothing is normalized away
+				if headers := e.storedHeaders(); !strings.Contains(headers, crSubject) {
+					t.Errorf("the stored header block does not hold %q verbatim: %q", crSubject, headers)
+				}
+			} else if got := e.stored(); len(got) != 0 {
+				t.Errorf("%d articles with a NUL octet stored: %v", len(got), got)
 			}
-			if n := strings.Count(logs.String(), "(bulk) rejected"); n != high {
-				t.Errorf("%d '(bulk) rejected' log lines, want %d (one per article)", n, high)
+			if n := strings.Count(logs.String(), tc.logLine); n != high {
+				t.Errorf("%d %q log lines, want %d (one per article)", n, tc.logLine, high)
 			}
 			e.wantProgress(high)
 		})

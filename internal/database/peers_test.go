@@ -3,7 +3,9 @@ package database
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/models"
@@ -98,6 +100,108 @@ func TestPeersValidate(t *testing.T) {
 	}
 	if _, err := w0DB(t).InsertPeer(&models.Peer{Name: w0Name("pw"), PathToken: "a", Hosts: "127.0.0.1"}, "secret-password"); err == nil {
 		t.Error("InsertPeer with a password and no login: want an error")
+	}
+}
+
+// TestPeersHeaderCheck: the header_check column (migration 0037, plan e2e-gap-tests D1/D4):
+// the default is "relay", "strict" round-trips through insert and update, the value is
+// normalized (case, white space) and anything else is refused.
+func TestPeersHeaderCheck(t *testing.T) {
+	db := w0DB(t)
+	name := w0Name("peerhc")
+	p := &models.Peer{Name: name, PathToken: "hc.example.org", Hosts: "127.0.0.2", Enabled: true}
+	id, err := db.InsertPeer(p, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.GetPeerByID(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.HeaderCheck != PeerHeaderCheckRelay {
+		t.Errorf("stored header_check = %q, want %q (the column default)", got.HeaderCheck, PeerHeaderCheckRelay)
+	}
+	got.HeaderCheck = " STRICT "
+	if err := db.UpdatePeer(got); err != nil {
+		t.Fatal(err)
+	}
+	again, err := db.GetPeerByID(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.HeaderCheck != PeerHeaderCheckStrict {
+		t.Errorf("header_check after the update = %q, want %q", again.HeaderCheck, PeerHeaderCheckStrict)
+	}
+	// an unknown value never reaches the table
+	again.HeaderCheck = "lax"
+	if err := db.UpdatePeer(again); err == nil {
+		t.Error("UpdatePeer with header_check \"lax\": want an error")
+	}
+	stillStrict, err := db.GetPeerByID(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stillStrict.HeaderCheck != PeerHeaderCheckStrict {
+		t.Errorf("header_check after the refused update = %q, want %q", stillStrict.HeaderCheck, PeerHeaderCheckStrict)
+	}
+	insert := &models.Peer{Name: w0Name("peerhc2"), PathToken: "hc2.example.org", Hosts: "127.0.0.3", HeaderCheck: "nonsense"}
+	if _, err := db.InsertPeer(insert, ""); err == nil {
+		t.Error("InsertPeer with an unknown header_check: want an error")
+	}
+	if err := db.DeletePeer(id); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestPeersDateLimits: the two peer Date limits (migration 0037) default to 240 h (INN's
+// artcutoff default of 10 days) and 24 h,
+// follow the config value and read 0 as "limit off"; invalid and out-of-range values read as
+// the default.
+func TestPeersDateLimits(t *testing.T) {
+	db := w0DB(t)
+	for _, c := range []struct {
+		key  string
+		def  time.Duration
+		read func() time.Duration
+	}{
+		{config.CFG_KEY_PEERDATEMAXAGE, 240 * time.Hour, db.PeerDateMaxAge},
+		{config.CFG_KEY_PEERDATEMAXFUTURE, 24 * time.Hour, db.PeerDateMaxFuture},
+	} {
+		old, err := db.GetConfigValue(c.key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := fmt.Sprintf("%d", int(c.def/time.Hour)); old != want {
+			t.Errorf("seeded %s = %q, want %q (migration 0037)", c.key, old, want)
+		}
+		t.Cleanup(func() { _ = db.SetConfigValue(c.key, old) })
+		for _, tc := range []struct {
+			v    string
+			want time.Duration
+		}{
+			{"0", 0},
+			{" 48 ", 48 * time.Hour},
+			{"-1", c.def},
+			{"x", c.def},
+			{"", c.def},
+			{fmt.Sprintf("%d", config.PeerDateHoursLimit), time.Duration(config.PeerDateHoursLimit) * time.Hour},
+			{fmt.Sprintf("%d", config.PeerDateHoursLimit+1), c.def},
+		} {
+			if err := db.SetConfigValue(c.key, tc.v); err != nil {
+				t.Fatal(err)
+			}
+			if got := c.read(); got != tc.want {
+				t.Errorf("%s = %q: read %v, want %v", c.key, tc.v, got, tc.want)
+			}
+		}
+	}
+	// a nil database reads the defaults (tests without a main DB)
+	var none *Database
+	if got := none.PeerDateMaxAge(); got != 240*time.Hour {
+		t.Errorf("(*Database)(nil).PeerDateMaxAge() = %v, want 240h", got)
+	}
+	if got := none.PeerDateMaxFuture(); got != 24*time.Hour {
+		t.Errorf("(*Database)(nil).PeerDateMaxFuture() = %v, want 24h", got)
 	}
 }
 

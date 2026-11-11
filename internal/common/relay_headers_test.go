@@ -276,6 +276,46 @@ func TestCliHdrRelayGoogleAndDate(t *testing.T) {
 	}
 }
 
+// TestCliHdrRelayBareCR: a stored header line with a bare CR inside it is relayed verbatim
+// (plan e2e-gap-tests, D1: intake accepts it from a peer under the relay rules, as innd does,
+// so the sender must not drop the article). Only LF and NUL make a block unrelayable.
+func TestCliHdrRelayBareCR(t *testing.T) {
+	const crSubject = "Subject: hello\rworld"
+	stored := []string{
+		"Path: up.invalid!poster!not-for-mail",
+		"From: A <a@b.invalid>",
+		"Newsgroups: a.b",
+		crSubject,
+		"X-Cr: a\rb",
+		"Date: " + cliHdrDate,
+		"Message-ID: " + cliHdrMsgID,
+	}
+	a := cliHdrArticle(cliHdrLines(stored...), "up.invalid!poster!not-for-mail")
+	got, err := relayHeaders(a, cliHdrHost, false)
+	if err != nil {
+		t.Fatalf("relayHeaders with a bare CR: %v", err)
+	}
+	want := []string{
+		"Path: news.test.invalid!up.invalid!poster!not-for-mail",
+		"From: A <a@b.invalid>",
+		"Newsgroups: a.b",
+		crSubject,
+		"X-Cr: a\rb",
+		"Date: " + cliHdrDate,
+		"Message-ID: " + cliHdrMsgID,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("relayed block:\n got %q\nwant %q", got, want)
+	}
+	// an LF inside a line is not relayable (defensive: the stored block is split on LF)
+	bad := cliHdrArticle(strings.Join([]string{"Path: p!not-for-mail", "From: A <a@b.invalid>",
+		"Newsgroups: a.b", "Subject: a\nb", "Date: " + cliHdrDate, "Message-ID: " + cliHdrMsgID}, "\x00"),
+		"p!not-for-mail")
+	if _, err := relayHeaders(bad, cliHdrHost, false); !errors.Is(err, ErrRelayHeadersInvalid) {
+		t.Errorf("block with NUL separators: err = %v, want ErrRelayHeadersInvalid", err)
+	}
+}
+
 // Unsafe blocks wrap ErrRelayHeadersInvalid, also when they are incomplete too.
 func TestCliHdrRelayInvalid(t *testing.T) {
 	base := []string{"Path: p!not-for-mail", "From: A <a@b.invalid>", "Newsgroups: a.b", "Subject: s",
@@ -289,7 +329,8 @@ func TestCliHdrRelayInvalid(t *testing.T) {
 		{"Message-ID differs", with(), "<other@test.invalid>"},
 		{"invalid Message-ID", cliHdrLines("From: A <a@b.invalid>", "Newsgroups: a.b", "Subject: s",
 			"Date: "+cliHdrDate, "Message-ID: <no-at-sign>"), "<no-at-sign>"},
-		{"bare CR", with("X-Bad: a\rb"), cliHdrMsgID},
+		// a bare CR is relayed verbatim (TestCliHdrRelayBareCR); LF cannot occur inside a
+		// stored line (the block is split on LF), so NUL is the reachable unsafe octet
 		{"NUL", with("X-Bad: a\x00b"), cliHdrMsgID},
 		{"duplicate and incomplete", cliHdrLines("Subject: s", "Subject: t", "From: A <a@b.invalid>"), cliHdrMsgID},
 	}

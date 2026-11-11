@@ -159,8 +159,15 @@ type Article struct {
 	NewsgroupsPtr []*string           `json:"-" db:"-"` // Parsed newsgroup for threading
 	ProcessQueue  chan *string        `json:"-" db:"-"` // newsgroup ptr for batching
 	Posted        bool                `json:"-" db:"-"` // set by the NNTP POST handler: injected here (proto-article)
-	FeedOut       bool                `json:"-" db:"-"` // plan nntp-peering: queue this article for the peers once it is committed (set by Processor.ProcessArticle for a non-bulk intake: IHAVE/TAKETHIS/POST, and for web posts (Posted); never for fetched or imported articles)
-	FeedStored    bool                `json:"-" db:"-"` // plan nntp-peering: some group's batch really inserted this article's row (db_batch.go); an article every group ignored as a stored duplicate is new to none of them and is not fed
+	// IntakeHeaderCheck is the header_check of the peer that fed this article
+	// ("relay" or "strict", plan e2e-gap-tests D1/D4); "" and every POST are strict.
+	IntakeHeaderCheck string `json:"-" db:"-"`
+	// IntakeWireSize is the size of the article as it arrived (common.WireArticleSize of the
+	// un-stuffed lines, taken before the server prepended its Path identity or injected the
+	// headers of a POST); 0 = unknown, the intake then measures the stored block.
+	IntakeWireSize int  `json:"-" db:"-"`
+	FeedOut        bool `json:"-" db:"-"` // plan nntp-peering: queue this article for the peers once it is committed (set by Processor.ProcessArticle for a non-bulk intake: IHAVE/TAKETHIS/POST, and for web posts (Posted); never for fetched or imported articles)
+	FeedStored     bool `json:"-" db:"-"` // plan nntp-peering: some group's batch really inserted this article's row (db_batch.go); an article every group ignored as a stored duplicate is new to none of them and is not fed
 }
 
 var ArticlePool = make(chan *Article, 128*1024)
@@ -211,6 +218,8 @@ func RecycleArticle(art *Article) {
 	art.NewsgroupsPtr = nil
 	art.ProcessQueue = nil
 	art.Posted = false
+	art.IntakeHeaderCheck = ""
+	art.IntakeWireSize = 0
 	art.FeedOut = false
 	art.FeedStored = false
 
@@ -575,13 +584,14 @@ type NNTPUser struct {
 type Peer struct {
 	ID             int64     `json:"id" db:"id"`
 	Name           string    `json:"name" db:"name"`
-	PathToken      string    `json:"path_token" db:"path_token"`   // the peer's Path identity
-	Hosts          string    `json:"hosts" db:"hosts"`             // comma list: hostname, IP, CIDR; empty = AUTHINFO only
-	InUsername     string    `json:"in_username" db:"in_username"` // optional AUTHINFO login of the peer
-	InPasswordHash string    `json:"-" db:"in_password_hash"`      // bcrypt
-	InPatterns     string    `json:"in_patterns" db:"in_patterns"` // wildmat list the peer may send us
-	InMaxSize      int64     `json:"in_max_size" db:"in_max_size"` // largest article we take from the peer (bytes, 0 = server limit)
-	OutEnabled     bool      `json:"out_enabled" db:"out_enabled"` // we feed this peer
+	PathToken      string    `json:"path_token" db:"path_token"`     // the peer's Path identity
+	Hosts          string    `json:"hosts" db:"hosts"`               // comma list: hostname, IP, CIDR; empty = AUTHINFO only
+	InUsername     string    `json:"in_username" db:"in_username"`   // optional AUTHINFO login of the peer
+	InPasswordHash string    `json:"-" db:"in_password_hash"`        // bcrypt
+	InPatterns     string    `json:"in_patterns" db:"in_patterns"`   // wildmat list the peer may send us
+	InMaxSize      int64     `json:"in_max_size" db:"in_max_size"`   // largest article we take from the peer (bytes, 0 = server limit)
+	HeaderCheck    string    `json:"header_check" db:"header_check"` // header rules of IHAVE/TAKETHIS from this peer: "relay" (innd, default) or "strict" (nnrpd)
+	OutEnabled     bool      `json:"out_enabled" db:"out_enabled"`   // we feed this peer
 	OutHost        string    `json:"out_host" db:"out_host"`
 	OutPort        int       `json:"out_port" db:"out_port"`
 	OutTLS         bool      `json:"out_tls" db:"out_tls"`

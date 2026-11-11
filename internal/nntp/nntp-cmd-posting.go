@@ -67,6 +67,11 @@ func (c *ClientConnection) handlePost() error {
 		return err // I/O error: nothing can be written
 	}
 
+	// The size of what the poster sent, taken before injectProtoArticle adds Message-ID,
+	// Date, Injection-Date, Injection-Info and the Path identity: a group's max_art_size
+	// must not count the headers this server injected (plan e2e-gap-tests, item (c)).
+	size := feedWireSize(head, body)
+
 	head, err = c.injectProtoArticle(head)
 	if err != nil {
 		log.Printf("[NNTP] POST refused: %v", err)
@@ -82,6 +87,7 @@ func (c *ClientConnection) handlePost() error {
 		return c.sendResponse(441, "Posting failed (invalid article)")
 	}
 	article.Posted = true // injected here: the processor applies the POST-only group policy
+	c.setIntakePolicy(article, size)
 
 	// Copy the id and the groups before the hand-off: once the processor returns, the batch
 	// goroutine may already have cleared the struct (db_batch.go processNewsgroupBatch),
@@ -187,6 +193,7 @@ func (c *ClientConnection) handleIHave(args []string) error {
 		c.peerStatsAdd(peerFeedCounters(offer, 437, size, false))
 		return c.sendResponse(437, "Rejected (invalid article)")
 	}
+	c.setIntakePolicy(article, size)
 	if !reconcileMessageID(article, messageID) {
 		log.Printf("IHAVE message-id mismatch: command '%s' article '%s'", messageID, article.MessageID)
 		c.rememberReject(messageID)
@@ -205,6 +212,21 @@ func (c *ClientConnection) handleIHave(args []string) error {
 		return c.closeAfterReply(reply, text)
 	}
 	return c.sendResponse(reply, text)
+}
+
+// setIntakePolicy carries the intake policy of this connection into the processor (plan
+// e2e-gap-tests, D1/D4 and item (c)): size is the article as it arrived (un-stuffed, before
+// feedPath or injectProtoArticle changed the header block), which a group's max_art_size is
+// compared against, and the sending peer's header_check selects the header rules. A POST
+// (article.Posted) is always checked strictly, whatever the connection's peer says.
+func (c *ClientConnection) setIntakePolicy(article *models.Article, size int64) {
+	if article == nil {
+		return
+	}
+	article.IntakeWireSize = int(size)
+	if c.peer != nil {
+		article.IntakeHeaderCheck = c.peer.HeaderCheck
+	}
 }
 
 // articleGroupNames returns the names behind article.NewsgroupsPtr (the Newsgroups header as
@@ -335,6 +357,7 @@ func (c *ClientConnection) handleTakeThis(args []string) error {
 		c.peerStatsAdd(peerFeedCounters(offer, 439, size, false))
 		return reply(439, "Rejected (invalid article)")
 	}
+	c.setIntakePolicy(article, size)
 	if !reconcileMessageID(article, id) {
 		log.Printf("TAKETHIS message-id mismatch: command '%s' article '%s'", id, article.MessageID)
 		c.rememberReject(id)
