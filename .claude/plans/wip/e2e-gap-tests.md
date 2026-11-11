@@ -172,6 +172,17 @@ parity (DEL) with INN: `strict-del-passes` is deliberate.
   `internal/common` (D3); update the wave-1 pins marked `// D1..D4` and the INN-derived G9 NUL-in-body case.
   Checks: full list.
 
+  Added from wave 1 (intake-wire report): (a) G9 framing rejects and the D1/D2/D4 rules need tests in
+  `internal/processor` (the internal/nntp harness's fake processor never runs `validateIntakeHeaders`), incl.
+  per-peer `header_check` relay vs strict through `ProcessIncomingArticle`; (b) group `max_art_size` at exactly
+  N and N+1 (`resolveIntakeGroups`); (c) size accounting: the group limit is measured after `feedPath` prepended
+  our Path identity (+ `.MISMATCH`), ~55 octets more than transferred, and the server limit
+  (`readArticleBlock`) counts dot-stuffing while `common.WireArticleSize` does not — make all three limits
+  (server, peer `in_max_size`, group) measure the same thing (un-stuffed article as received, before
+  `feedPath`; INN's Bytes also excludes the stuffing dots) and update TestIwProcessorWireSize /
+  TestIwSizeLimitDotStuffing; (d) the D3 pins in `nntp-intake-wire_test.go` (`// D3`: IHAVE `<x@[a<b]>` → 501,
+  CHECK → 438) become 335/238.
+
 ### Wave 3 (after wave 1+2 merged; touches many test files, so alone)
 - slice `helper-cleanup`: survey section 4 rows — `e2eClient`, `sessDialRaw`, `hNewClient` → kit client;
   `xrefEnv.start/stop` → `proc.StartTCP`; `flPqFake` ×2 → fakeserver Script; `adfTorSilentProxy` → RawStall;
