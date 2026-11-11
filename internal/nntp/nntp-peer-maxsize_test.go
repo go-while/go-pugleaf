@@ -11,17 +11,11 @@ import (
 // peerMaxSizeIHAVE offers one ~3.8 KB article by IHAVE and returns the final status code.
 func peerMaxSizeIHAVE(t *testing.T, c *client.Conn, id, group string) int {
 	t.Helper()
-	code, line := c.Cmd("IHAVE %s", id)
-	if err := client.ExpectCode(code, line, 335); err != nil {
-		t.Fatalf("IHAVE %s: %v", id, err)
-	}
 	filler := strings.Repeat("x some filler to pass the byte limit\r\n", 100)
-	if err := c.Send(strings.TrimSuffix(peerArticle(id, "upstream.invalid!x", group), ".\r\n") + filler + ".\r\n"); err != nil {
-		t.Fatalf("send: %v", err)
-	}
-	code, _, err := c.ReadStatus()
-	if err != nil {
-		t.Fatalf("IHAVE %s status: %v", id, err)
+	art := append(peerArticleRaw(id, "upstream.invalid!x", group), filler...)
+	code, line, sent := c.Ihave(id, art)
+	if !sent {
+		t.Fatalf("IHAVE %s: %q, want 335 and the article transferred", id, line)
 	}
 	return code
 }

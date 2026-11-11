@@ -20,7 +20,6 @@ package main
 // <t7-<test>-<seq>@test.invalid> message-ids.
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"database/sql"
@@ -48,6 +47,9 @@ import (
 	"github.com/go-while/go-pugleaf/internal/models"
 	"github.com/go-while/go-pugleaf/internal/nntp"
 	"github.com/go-while/go-pugleaf/internal/processor"
+	testkit "github.com/go-while/nntp-testkit"
+	"github.com/go-while/nntp-testkit/client"
+	"github.com/go-while/nntp-testkit/proc"
 )
 
 // e2eHostname is processor.LocalNNTPHostname in the in-process tests.
@@ -61,15 +63,24 @@ const e2ePeerPathToken = "e2e.client.invalid"
 // asynchronous commits, server and post-queue waits. It only stops a hung test; a passing test
 // never waits on it. Override with PUGLEAF_TEST_DEADLINE (a Go duration, e.g. 120s).
 // Plan test-timing-hardening D3.
-var testWait = testWaitFromEnv(60 * time.Second)
+// It is testkit.Deadline(), so the kit's own hang guards (client, proc, conformance,
+// testkit.WaitFor) use the same value.
+var testWait = testDeadline()
 
-func testWaitFromEnv(def time.Duration) time.Duration {
-	if v := os.Getenv("PUGLEAF_TEST_DEADLINE"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil && d > 0 {
-			return d
+// testDeadline hands PUGLEAF_TEST_DEADLINE to the kit, which reads only NNTP_TEST_DEADLINE
+// (testkit.EnvDeadline), and returns the kit's hang guard. An NNTP_TEST_DEADLINE set by the
+// caller wins. The mapping lives in this initialiser, not in TestMain, because testWait and
+// e2eCommitWait are package variables: Go evaluates those before TestMain runs.
+// Plan e2e-gap-tests wave 3.
+func testDeadline() time.Duration {
+	if os.Getenv(testkit.EnvDeadline) == "" {
+		if v := os.Getenv("PUGLEAF_TEST_DEADLINE"); v != "" {
+			if err := os.Setenv(testkit.EnvDeadline, v); err != nil {
+				fmt.Fprintln(os.Stderr, "[E2E] Setenv "+testkit.EnvDeadline+":", err)
+			}
 		}
 	}
-	return def
+	return testkit.Deadline()
 }
 
 // e2eCommitWait bounds every poll for an asynchronously committed article.
@@ -270,6 +281,11 @@ func e2eTeardown(code int, keep bool, srv *nntp.NNTPServer, srvWG *sync.WaitGrou
 	if err := db.Shutdown(); err != nil {
 		fail("Shutdown: " + err.Error())
 	}
+	if e2eBinDir != "" {
+		if err := os.RemoveAll(e2eBinDir); err != nil {
+			fail("removing the build directory: " + err.Error())
+		}
+	}
 	if !keep {
 		// kept only on request: every PUGLEAF_KNOWN_BUGS=1 run exits non-zero
 		if os.Getenv("PUGLEAF_TEST_KEEP") == "1" {
@@ -279,6 +295,27 @@ func e2eTeardown(code int, keep bool, srv *nntp.NNTPServer, srvWG *sync.WaitGrou
 		}
 	}
 	return code
+}
+
+// e2eBinDir is the one output directory of e2eBuild in this test binary: proc.GoBuild caches
+// a build per (output path, package, ldflags), so every test that needs the same binary shares
+// one build. It is removed in e2eTeardown.
+var (
+	e2eBinOnce sync.Once
+	e2eBinDir  string
+	e2eBinErr  error
+)
+
+// e2eBuild builds a main package of this repository with the appVersion the binaries need (the
+// default "-unset-" makes them refuse to start) and returns the binary's path (kit
+// proc.GoBuild: one "go build" under a timeout of at least five minutes, cached per process).
+func e2eBuild(t *testing.T, pkg string) string {
+	t.Helper()
+	e2eBinOnce.Do(func() { e2eBinDir, e2eBinErr = os.MkdirTemp("", "pugleaf-e2ebin-") })
+	if e2eBinErr != nil {
+		t.Fatalf("MkdirTemp: %v", e2eBinErr)
+	}
+	return proc.GoBuild(t, e2eBinDir, pkg, "-X main.appVersion=e2e-test")
 }
 
 // e2eWaitTimeout runs fn in a goroutine and reports whether it returned within d.
@@ -418,217 +455,87 @@ func e2eTail(s string, n int) string {
 // ---------------------------------------------------------------------------
 // Client
 
-// e2eClient is a raw NNTP client with a per-operation deadline.
-type e2eClient struct {
-	Conn     net.Conn
-	R        *bufio.Reader
-	Greeting string
-	Deadline time.Duration
-}
+// The test client is client.Conn of github.com/go-while/nntp-testkit, always in strict mode:
+// a bare LF, a bare CR, bad dot-stuffing or a missing terminator from the server fails the
+// test, so these tests also catch wire mistakes of go-pugleaf's server.
 
 // e2eDialAddr connects to addr and reads the greeting. The connection is
-// tracked and closed at teardown.
-func e2eDialAddr(addr string, deadline time.Duration) (*e2eClient, error) {
-	conn, err := net.DialTimeout("tcp", addr, deadline)
+// tracked and closed at teardown. The client carries no tb: use the Try forms,
+// or attach one with WithTB (e2eDial does).
+func e2eDialAddr(addr string, deadline time.Duration) (*client.Conn, error) {
+	c, err := client.TryDial(addr, deadline)
 	if err != nil {
 		return nil, err
 	}
 	e2eConnsMu.Lock()
-	e2eConns = append(e2eConns, conn)
+	e2eConns = append(e2eConns, c.Conn)
 	e2eConnsMu.Unlock()
-	c := &e2eClient{Conn: conn, R: bufio.NewReaderSize(conn, 1<<16), Deadline: deadline}
-	line, err := c.readLine()
-	if err != nil {
-		_ = conn.Close()
-		return nil, fmt.Errorf("greeting: %w", err)
-	}
-	c.Greeting = line
 	return c, nil
 }
 
 // e2eDial connects to the in-process server; the client is closed when t ends.
-func e2eDial(t *testing.T) *e2eClient {
+func e2eDial(t *testing.T) *client.Conn {
 	t.Helper()
 	e2eNeedDB(t)
 	c, err := e2eDialAddr(e2eAddr, testWait)
 	if err != nil {
 		t.Fatalf("dial %s: %v", e2eAddr, err)
 	}
-	t.Cleanup(c.close)
-	return c
+	return c.WithTB(t) // registers t.Cleanup(c.Close)
 }
 
-func (c *e2eClient) close() { _ = c.Conn.Close() }
-
-func (c *e2eClient) bump() { _ = c.Conn.SetDeadline(time.Now().Add(c.Deadline)) }
-
-// readLine reads one line without its CRLF (or LF).
-func (c *e2eClient) readLine() (string, error) {
-	c.bump()
-	line, err := c.R.ReadString('\n')
-	if err != nil {
-		return line, err
+// e2eAuth authenticates or fails the test (RFC 4643 §2.3: 381 then 281).
+func e2eAuth(t *testing.T, c *client.Conn, user, pass string) {
+	t.Helper()
+	if code, line := c.Login(user, pass); code != 281 {
+		t.Fatalf("AUTHINFO %s: code=%d line=%q", user, code, line)
 	}
-	return strings.TrimRight(line, "\r\n"), nil
 }
 
-// send writes raw bytes (no CRLF appended).
-func (c *e2eClient) send(raw string) error {
-	c.bump()
-	_, err := io.WriteString(c.Conn, raw)
-	return err
-}
-
-// readStatus reads the next status line.
-func (c *e2eClient) readStatus() (int, string, error) {
-	line, err := c.readLine()
-	if err != nil {
-		return 0, line, err
+// e2ePost posts an article (not dot-stuffed, no terminator: e2eArticle) with the kit's POST
+// and returns the final status. A refusal before the transfer (anything but 340) is an error
+// here: every caller expects the reply to the article, not to the POST command, and the kit
+// reports that refusal as a result (sent false) instead.
+func e2ePost(c *client.Conn, article []byte) (int, string, error) {
+	code, line, sent, err := c.TryPost(article)
+	if err == nil && !sent {
+		err = fmt.Errorf("POST: got %q, want 340", line)
 	}
-	code, err := e2eParseCode(line)
 	return code, line, err
 }
 
-// tryCmd sends one command line and reads the status line.
-func (c *e2eClient) tryCmd(format string, args ...interface{}) (int, string, error) {
-	if err := c.send(fmt.Sprintf(format, args...) + "\r\n"); err != nil {
-		return 0, "", err
-	}
-	return c.readStatus()
-}
-
-// cmd is tryCmd that fails the test on I/O or parse errors.
-func (c *e2eClient) cmd(t *testing.T, format string, args ...interface{}) (int, string) {
+// e2eMustPost is e2ePost that fails the test instead of returning the error.
+func e2eMustPost(t *testing.T, c *client.Conn, article []byte) (int, string) {
 	t.Helper()
-	code, line, err := c.tryCmd(format, args...)
-	if err != nil {
-		t.Fatalf("cmd %q: %v (line %q)", fmt.Sprintf(format, args...), err, line)
-	}
-	return code, line
-}
-
-// tryDotLines reads a dot-terminated block, un-stuffs leading dots, strips CRLF.
-func (c *e2eClient) tryDotLines() ([]string, error) {
-	var out []string
-	for {
-		line, err := c.readLine()
-		if err != nil {
-			return out, fmt.Errorf("reading block: %w after %d lines", err, len(out))
-		}
-		if line == "." {
-			return out, nil
-		}
-		if strings.HasPrefix(line, "..") {
-			line = line[1:]
-		}
-		out = append(out, line)
-	}
-}
-
-func (c *e2eClient) readDotLines(t *testing.T) []string {
-	t.Helper()
-	out, err := c.tryDotLines()
-	if err != nil {
-		t.Fatal(err)
-	}
-	return out
-}
-
-// rawUntilDot returns the exact bytes up to and including the ".\r\n" line.
-func (c *e2eClient) rawUntilDot(t *testing.T) []byte {
-	t.Helper()
-	var buf bytes.Buffer
-	for {
-		c.bump()
-		line, err := c.R.ReadBytes('\n')
-		buf.Write(line)
-		if err != nil {
-			t.Fatalf("rawUntilDot: %v after %d bytes", err, buf.Len())
-		}
-		if bytes.Equal(line, []byte(".\r\n")) || bytes.Equal(line, []byte(".\n")) {
-			return buf.Bytes()
-		}
-	}
-}
-
-// tryAuth runs AUTHINFO USER/PASS and returns the final status.
-func (c *e2eClient) tryAuth(user, pass string) (int, string, error) {
-	code, line, err := c.tryCmd("AUTHINFO USER %s", user)
-	if err != nil || code != 381 {
-		return code, line, err
-	}
-	return c.tryCmd("AUTHINFO PASS %s", pass)
-}
-
-// auth authenticates or fails the test (RFC 4643 §2.3: 381 then 281).
-func (c *e2eClient) auth(t *testing.T, user, pass string) {
-	t.Helper()
-	code, line, err := c.tryAuth(user, pass)
-	if err != nil || code != 281 {
-		t.Fatalf("AUTHINFO %s: code=%d line=%q err=%v", user, code, line, err)
-	}
-}
-
-// tryPost runs POST with a ready wire article (e2eWire) and returns the final status.
-func (c *e2eClient) tryPost(wire string) (int, string, error) {
-	code, line, err := c.tryCmd("POST")
-	if err != nil {
-		return code, line, err
-	}
-	if code != 340 {
-		return code, line, fmt.Errorf("POST: got %q, want 340", line)
-	}
-	if err := c.send(wire); err != nil {
-		return 0, "", err
-	}
-	return c.readStatus()
-}
-
-// post is tryPost that fails the test on I/O errors.
-func (c *e2eClient) post(t *testing.T, wire string) (int, string) {
-	t.Helper()
-	code, line, err := c.tryPost(wire)
+	code, line, err := e2ePost(c, article)
 	if err != nil {
 		t.Fatalf("POST: %v (line %q)", err, line)
 	}
 	return code, line
 }
 
-// e2eParseCode extracts the 3-digit status code at the start of line.
-func e2eParseCode(line string) (int, error) {
-	if len(line) < 3 || (len(line) > 3 && line[3] != ' ') {
-		return 0, fmt.Errorf("bad status line %q", line)
-	}
-	code, err := strconv.Atoi(line[:3])
-	if err != nil || code < 100 || code > 599 {
-		return 0, fmt.Errorf("bad status line %q", line)
-	}
-	return code, nil
-}
-
 // ---------------------------------------------------------------------------
 // Articles
 
-// e2eWire builds the wire form of an article: CRLF line ends, dot-stuffing and
-// the terminating ".\r\n".
+// e2eLines joins a header block and a body into the lines of one article (the empty line
+// between them included).
+func e2eLines(head, body []string) []string {
+	lines := make([]string, 0, len(head)+len(body)+1)
+	lines = append(lines, head...)
+	lines = append(lines, "")
+	return append(lines, body...)
+}
+
+// e2eArticle returns the article in wire form: CRLF line ends, not dot-stuffed and without a
+// terminator, which is what the kit's POST/IHAVE/TAKETHIS take.
+func e2eArticle(head, body []string) []byte {
+	return []byte(strings.Join(e2eLines(head, body), "\r\n") + "\r\n")
+}
+
+// e2eWire builds what a client sends after POST, IHAVE or TAKETHIS: the article dot-stuffed,
+// with the terminating ".\r\n" (kit client.Stuff).
 func e2eWire(head, body []string) string {
-	var b strings.Builder
-	w := func(l string) {
-		if strings.HasPrefix(l, ".") {
-			b.WriteString(".")
-		}
-		b.WriteString(l)
-		b.WriteString("\r\n")
-	}
-	for _, l := range head {
-		w(l)
-	}
-	b.WriteString("\r\n")
-	for _, l := range body {
-		w(l)
-	}
-	b.WriteString(".\r\n")
-	return b.String()
+	return client.Stuff(e2eLines(head, body))
 }
 
 // e2eHead returns a complete RFC 5536 header block. Empty msgid or date leave
@@ -694,7 +601,7 @@ var (
 )
 
 // e2ePoster dials and authenticates the shared posting user.
-func e2ePoster(t *testing.T) *e2eClient {
+func e2ePoster(t *testing.T) *client.Conn {
 	t.Helper()
 	c := e2eDial(t)
 	e2ePosterMu.Lock()
@@ -703,7 +610,7 @@ func e2ePoster(t *testing.T) *e2eClient {
 	}
 	user, pass := e2ePosterUser, e2ePosterPass
 	e2ePosterMu.Unlock()
-	c.auth(t, user, pass)
+	e2eAuth(t, c, user, pass)
 	return c
 }
 
@@ -821,10 +728,10 @@ func e2eWaitStored(t *testing.T, msgid string, groups ...string) map[string]int6
 }
 
 // e2eWaitGroupCount polls GROUP until it reports count articles; returns the 211 line.
-func (c *e2eClient) waitGroupCount(group string, count int) (string, error) {
+func e2eWaitGroupCount(c *client.Conn, group string, count int) (string, error) {
 	var last string
 	err := e2eWaitFor(e2eCommitWait, func() error {
-		code, line, err := c.tryCmd("GROUP %s", group)
+		code, line, err := c.TryCmd("GROUP %s", group)
 		if err != nil {
 			return err
 		}
@@ -884,17 +791,17 @@ func TestE2EPost(t *testing.T) {
 	c := e2ePoster(t)
 
 	// RFC 3977 §6.3.1.2: 240 article received OK
-	if code, line := c.post(t, e2eWire(e2eHead(id, g, "E2E post", e2eNow()), body)); code != 240 {
+	if code, line := e2eMustPost(t, c, e2eArticle(e2eHead(id, g, "E2E post", e2eNow()), body)); code != 240 {
 		t.Fatalf("POST: %q, want 240", line)
 	}
 	e2eWaitStored(t, id, g)
 
 	// ARTICLE <id> with no group selected (RFC 3977 §6.2.1.2: 220 0 <id>, found via history)
-	code, line := c.cmd(t, "ARTICLE %s", id)
+	code, line := c.Cmd("ARTICLE %s", id)
 	if code != 220 || !strings.Contains(line, id) {
 		t.Fatalf("ARTICLE %s: %q, want 220 ... %s", id, line, id)
 	}
-	head, gotBody := e2eSplitArticle(c.readDotLines(t))
+	head, gotBody := e2eSplitArticle(c.ReadDotLines())
 	if err := e2eExpectLines(gotBody, body); err != nil {
 		t.Fatalf("ARTICLE body: %v", err)
 	}
@@ -903,11 +810,11 @@ func TestE2EPost(t *testing.T) {
 	}
 
 	// HEAD <id> (RFC 3977 §6.2.2: 221 and the headers only)
-	code, line = c.cmd(t, "HEAD %s", id)
+	code, line = c.Cmd("HEAD %s", id)
 	if code != 221 {
 		t.Fatalf("HEAD %s: %q, want 221", id, line)
 	}
-	hdrs := c.readDotLines(t)
+	hdrs := c.ReadDotLines()
 	if v := e2eHeaderValue(hdrs, "Subject"); v != "E2E post" {
 		t.Fatalf("HEAD Subject %q, want %q (headers %q)", v, "E2E post", hdrs)
 	}
@@ -916,16 +823,16 @@ func TestE2EPost(t *testing.T) {
 	}
 
 	// GROUP reports the article (async newsgroups counter update), ARTICLE 1 works
-	if line, err := c.waitGroupCount(g, 1); err != nil {
+	if line, err := e2eWaitGroupCount(c, g, 1); err != nil {
 		t.Fatal(err)
 	} else if f := strings.Fields(line); f[3] != "1" {
 		t.Fatalf("GROUP %s: %q, want high 1", g, line)
 	}
-	code, line = c.cmd(t, "ARTICLE 1")
+	code, line = c.Cmd("ARTICLE 1")
 	if code != 220 || !strings.HasPrefix(line, "220 1 "+id) {
 		t.Fatalf("ARTICLE 1: %q, want 220 1 %s", line, id)
 	}
-	_, gotBody = e2eSplitArticle(c.readDotLines(t))
+	_, gotBody = e2eSplitArticle(c.ReadDotLines())
 	if err := e2eExpectLines(gotBody, body); err != nil {
 		t.Fatalf("ARTICLE 1 body: %v", err)
 	}
@@ -962,15 +869,15 @@ func TestE2EPostGeneratedHeaders(t *testing.T) {
 	t.Run("no-message-id", func(t *testing.T) {
 		g := e2eGroup(t, "genmid")
 		c := e2ePoster(t)
-		code, line := c.post(t, e2eWire(e2eHead("", g, "E2E no message-id", e2eNow()), []string{"body"}))
+		code, line := e2eMustPost(t, c, e2eArticle(e2eHead("", g, "E2E no message-id", e2eNow()), []string{"body"}))
 		var err error
 		if code != 240 {
 			err = fmt.Errorf("POST without Message-ID: %q, want 240", line)
-		} else if _, werr := c.waitGroupCount(g, 1); werr != nil {
+		} else if _, werr := e2eWaitGroupCount(c, g, 1); werr != nil {
 			err = werr
-		} else if code, line, rerr := c.tryCmd("HEAD 1"); rerr != nil || code != 221 {
+		} else if code, line, rerr := c.TryCmd("HEAD 1"); rerr != nil || code != 221 {
 			err = fmt.Errorf("HEAD 1: %q %v", line, rerr)
-		} else if hdrs, rerr := c.tryDotLines(); rerr != nil {
+		} else if hdrs, rerr := c.TryReadDotLines(); rerr != nil {
 			err = rerr
 		} else if v := e2eHeaderValue(hdrs, "Message-ID"); !strings.HasPrefix(v, "<") || !strings.Contains(v, "@") {
 			err = fmt.Errorf("stored article has no generated Message-ID (headers %q)", hdrs)
@@ -985,15 +892,15 @@ func TestE2EPostGeneratedHeaders(t *testing.T) {
 		g := e2eGroup(t, "gendate")
 		id := e2eMsgID("gendate")
 		c := e2ePoster(t)
-		code, line := c.post(t, e2eWire(e2eHead(id, g, "E2E no date", ""), []string{"body"}))
+		code, line := e2eMustPost(t, c, e2eArticle(e2eHead(id, g, "E2E no date", ""), []string{"body"}))
 		var err error
 		if code != 240 {
 			err = fmt.Errorf("POST without Date: %q, want 240", line)
 		} else if serr := e2eWaitFor(e2eCommitWait, func() error { _, e := e2eStored(id, g); return e }); serr != nil {
 			err = serr
-		} else if code, line, rerr := c.tryCmd("HEAD %s", id); rerr != nil || code != 221 {
+		} else if code, line, rerr := c.TryCmd("HEAD %s", id); rerr != nil || code != 221 {
 			err = fmt.Errorf("HEAD %s: %q %v", id, line, rerr)
-		} else if hdrs, rerr := c.tryDotLines(); rerr != nil {
+		} else if hdrs, rerr := c.TryReadDotLines(); rerr != nil {
 			err = rerr
 		} else if processor.ParseNNTPDate(e2eHeaderValue(hdrs, "Date")).IsZero() {
 			err = fmt.Errorf("stored article has no valid generated Date (headers %q)", hdrs)
@@ -1014,18 +921,18 @@ func TestE2EIHave(t *testing.T) {
 	g := e2eGroup(t, "ihave")
 	id := e2eMsgID("ihave")
 	c := e2ePoster(t)
-	if code, line := c.cmd(t, "IHAVE %s", id); code != 335 {
+	if code, line := c.Cmd("IHAVE %s", id); code != 335 {
 		t.Fatalf("IHAVE %s: %q, want 335", id, line)
 	}
-	if err := c.send(e2eWire(e2eHead(id, g, "E2E ihave", e2eNow()), []string{"ihave body"})); err != nil {
+	if err := c.Send(e2eWire(e2eHead(id, g, "E2E ihave", e2eNow()), []string{"ihave body"})); err != nil {
 		t.Fatal(err)
 	}
-	if code, line, err := c.readStatus(); err != nil || code != 235 {
+	if code, line, err := c.ReadStatus(); err != nil || code != 235 {
 		t.Fatalf("IHAVE article: code=%d line=%q err=%v, want 235", code, line, err)
 	}
 	e2eWaitStored(t, id, g)
 	err := e2eWaitFor(e2eCommitWait, func() error {
-		code, line := c.cmd(t, "IHAVE %s", id)
+		code, line := c.Cmd("IHAVE %s", id)
 		switch code {
 		case 435:
 			return nil
@@ -1052,14 +959,14 @@ func TestE2EIHaveDuplicateNotInHistory(t *testing.T) {
 	id := e2eMsgID("dup")
 	e2eArticleSQL(t, g, id, "E2E seeded duplicate", "seeded body")
 	c := e2ePoster(t)
-	if code, line := c.cmd(t, "IHAVE %s", id); code != 335 {
+	if code, line := c.Cmd("IHAVE %s", id); code != 335 {
 		// history does not know the id, so 335 is the expected offer reply
 		t.Fatalf("IHAVE %s: %q, want 335", id, line)
 	}
-	if err := c.send(e2eWire(e2eHead(id, g, "E2E seeded duplicate", e2eNow()), []string{"seeded body"})); err != nil {
+	if err := c.Send(e2eWire(e2eHead(id, g, "E2E seeded duplicate", e2eNow()), []string{"seeded body"})); err != nil {
 		t.Fatal(err)
 	}
-	code, line, err := c.readStatus()
+	code, line, err := c.ReadStatus()
 	if err != nil {
 		t.Fatalf("IHAVE article: %v", err)
 	}
@@ -1068,7 +975,7 @@ func TestE2EIHaveDuplicateNotInHistory(t *testing.T) {
 	}
 	// history self-heal: the id is known from now on
 	if err := e2eWaitFor(e2eCommitWait, func() error {
-		if code, line := c.cmd(t, "IHAVE %s", id); code != 435 {
+		if code, line := c.Cmd("IHAVE %s", id); code != 435 {
 			if code == 335 {
 				t.Fatalf("IHAVE %s again: %q, the stored article is wanted again", id, line)
 			}
@@ -1089,10 +996,10 @@ func TestE2ETakeThis(t *testing.T) {
 	c := e2ePoster(t)
 
 	// a committed article for the duplicate case
-	if err := c.send("TAKETHIS " + pre + "\r\n" + e2eWire(e2eHead(pre, g, "E2E takethis pre", e2eNow()), []string{"pre"})); err != nil {
+	if err := c.Send("TAKETHIS " + pre + "\r\n" + e2eWire(e2eHead(pre, g, "E2E takethis pre", e2eNow()), []string{"pre"})); err != nil {
 		t.Fatal(err)
 	}
-	if code, line, err := c.readStatus(); err != nil || code != 239 {
+	if code, line, err := c.ReadStatus(); err != nil || code != 239 {
 		t.Fatalf("TAKETHIS %s: code=%d line=%q err=%v, want 239", pre, code, line, err)
 	}
 	e2eWaitStored(t, pre, g)
@@ -1101,7 +1008,7 @@ func TestE2ETakeThis(t *testing.T) {
 	stream := "TAKETHIS " + fresh + "\r\n" + e2eWire(e2eHead(fresh, g, "E2E takethis new", e2eNow()), []string{"new"}) +
 		"TAKETHIS " + pre + "\r\n" + e2eWire(e2eHead(pre, g, "E2E takethis dup", e2eNow()), []string{"dup"}) +
 		"TAKETHIS " + mism + "\r\n" + e2eWire(e2eHead(other, g, "E2E takethis mismatch", e2eNow()), []string{"mismatch"})
-	if err := c.send(stream); err != nil {
+	if err := c.Send(stream); err != nil {
 		t.Fatal(err)
 	}
 	want := []struct {
@@ -1109,7 +1016,7 @@ func TestE2ETakeThis(t *testing.T) {
 		id   string
 	}{{239, fresh}, {439, pre}, {439, mism}}
 	for i, w := range want {
-		code, line, err := c.readStatus()
+		code, line, err := c.ReadStatus()
 		if err != nil {
 			t.Fatalf("reply %d: %v (line %q)", i+1, err, line)
 		}
@@ -1137,25 +1044,25 @@ func TestE2ERejectMissingNewsgroups(t *testing.T) {
 	t.Run("post", func(t *testing.T) {
 		c := e2ePoster(t)
 		id := e2eMsgID("nong")
-		code, line := c.post(t, e2eWire(append(head[:len(head):len(head)], "Message-ID: "+id), []string{"body"}))
+		code, line := e2eMustPost(t, c, e2eArticle(append(head[:len(head):len(head)], "Message-ID: "+id), []string{"body"}))
 		if code != 441 {
 			t.Fatalf("POST without Newsgroups: %q, want 441", line)
 		}
 		// the connection stays usable
-		if code, line := c.cmd(t, "MODE READER"); code != 200 && code != 201 {
+		if code, line := c.Cmd("MODE READER"); code != 200 && code != 201 {
 			t.Fatalf("MODE READER after the rejection: %q", line)
 		}
 	})
 	t.Run("ihave", func(t *testing.T) {
 		c := e2ePoster(t)
 		id := e2eMsgID("nong")
-		if code, line := c.cmd(t, "IHAVE %s", id); code != 335 {
+		if code, line := c.Cmd("IHAVE %s", id); code != 335 {
 			t.Fatalf("IHAVE %s: %q, want 335", id, line)
 		}
-		if err := c.send(e2eWire(append(head[:len(head):len(head)], "Message-ID: "+id), []string{"body"})); err != nil {
+		if err := c.Send(e2eWire(append(head[:len(head):len(head)], "Message-ID: "+id), []string{"body"})); err != nil {
 			t.Fatal(err)
 		}
-		code, line, err := c.readStatus()
+		code, line, err := c.ReadStatus()
 		if err != nil {
 			t.Fatalf("IHAVE article: %v", err)
 		}
@@ -1186,7 +1093,7 @@ func TestE2ERejectUnknownGroup(t *testing.T) {
 		t.Fatalf("%s exists before the test (%d)", file, n)
 	}
 	c := e2ePoster(t)
-	code, line := c.post(t, e2eWire(e2eHead(id, g, "E2E unknown group", e2eNow()), []string{"body"}))
+	code, line := e2eMustPost(t, c, e2eArticle(e2eHead(id, g, "E2E unknown group", e2eNow()), []string{"body"}))
 	var errs []string
 	if code != 441 {
 		errs = append(errs, fmt.Sprintf("POST to %s: %q, want 441", g, line))
@@ -1198,7 +1105,7 @@ func TestE2ERejectUnknownGroup(t *testing.T) {
 	// article in an existing group pass through the batch before checking it
 	sg := e2eGroup(t, "sentinel")
 	sid := e2eMsgID("sentinel")
-	if code, line := c.post(t, e2eWire(e2eHead(sid, sg, "E2E sentinel", e2eNow()), []string{"sentinel"})); code != 240 {
+	if code, line := e2eMustPost(t, c, e2eArticle(e2eHead(sid, sg, "E2E sentinel", e2eNow()), []string{"sentinel"})); code != 240 {
 		t.Fatalf("POST sentinel to %s: %q, want 240", sg, line)
 	}
 	e2eWaitStored(t, sid, sg)
@@ -1237,11 +1144,11 @@ func TestE2ESizeLimits(t *testing.T) {
 			body = append(body, fmt.Sprintf("%04d %s", i, strings.Repeat("x", 60)))
 		}
 		c := e2ePoster(t)
-		code, line := c.post(t, e2eWire(e2eHead(id, g, "E2E big", e2eNow()), body))
+		code, line := e2eMustPost(t, c, e2eArticle(e2eHead(id, g, "E2E big", e2eNow()), body))
 		if code != 441 {
 			t.Fatalf("POST of a %d-byte article with MaxArtSize %d: %q, want 441", 1000*65, e2eMaxArtSize, line)
 		}
-		if code, line := c.cmd(t, "MODE READER"); code != 200 && code != 201 {
+		if code, line := c.Cmd("MODE READER"); code != 200 && code != 201 {
 			t.Fatalf("MODE READER after the big article: %q", line)
 		}
 		if _, err := e2eStored(id, g); err == nil {
@@ -1261,20 +1168,20 @@ func e2eOversizeChild(t *testing.T) {
 	id := e2eMsgID("lines")
 	c := e2ePoster(t)
 	local := c.Conn.LocalAddr().String()
-	if code, line := c.cmd(t, "POST"); code != 340 {
+	if code, line := c.Cmd("POST"); code != 340 {
 		t.Fatalf("POST: %q, want 340", line)
 	}
 	body := make([]string, 20000)
 	for i := range body {
 		body[i] = fmt.Sprintf("line %05d", i)
 	}
-	wireErr := c.send(e2eWire(e2eHead(id, g, "E2E 20000 lines", e2eNow()), body)) // may fail: server closed
-	code, line, err := c.readStatus()
+	wireErr := c.Send(e2eWire(e2eHead(id, g, "E2E 20000 lines", e2eNow()), body)) // may fail: server closed
+	code, line, err := c.ReadStatus()
 	// RFC 3977 §6.3.1.2: 441; the article was drained, so the connection stays usable
 	statusOK := err == nil && code == 441
 	usable, modeDetail := false, "not tried"
 	if statusOK {
-		code2, line2, err2 := c.tryCmd("MODE READER")
+		code2, line2, err2 := c.TryCmd("MODE READER")
 		usable = err2 == nil && (code2 == 200 || code2 == 201)
 		modeDetail = fmt.Sprintf("code=%d line=%q err=%v", code2, line2, err2)
 	}
@@ -1329,18 +1236,18 @@ func TestE2EDotStuffingRoundTrip(t *testing.T) {
 	id := e2eMsgID("dots")
 	body := []string{".leading", "..leading", ".", "..", "plain", "", ". space", "end"}
 	c := e2ePoster(t)
-	if code, line := c.post(t, e2eWire(e2eHead(id, g, "E2E dots", e2eNow()), body)); code != 240 {
+	if code, line := e2eMustPost(t, c, e2eArticle(e2eHead(id, g, "E2E dots", e2eNow()), body)); code != 240 {
 		t.Fatalf("POST: %q, want 240", line)
 	}
 	e2eWaitStored(t, id, g)
-	if code, line := c.cmd(t, "GROUP %s", g); code != 211 {
+	if code, line := c.Cmd("GROUP %s", g); code != 211 {
 		t.Fatalf("GROUP %s: %q", g, line)
 	}
-	code, line := c.cmd(t, "BODY %s", id)
+	code, line := c.Cmd("BODY %s", id)
 	if code != 222 {
 		t.Fatalf("BODY %s: %q, want 222", id, line)
 	}
-	got := c.rawUntilDot(t)
+	got := c.RawUntilDot()
 	wire := e2eWire(nil, body)
 	want := wire[len("\r\n"):] // e2eWire(nil, …) starts with the empty separator line
 	if string(got) != want {
@@ -1355,22 +1262,22 @@ func TestE2EDotHeaderLine(t *testing.T) {
 	g := e2eGroup(t, "dothdr")
 	id := e2eMsgID("dothdr")
 	head := e2eHead(id, g, "E2E dot header", e2eNow())
-	head = append(head[:2], append([]string{"."}, head[2:]...)...) // sent as ".." by e2eWire
+	head = append(head[:2], append([]string{"."}, head[2:]...)...) // sent as ".." (client.StuffBytes)
 	c := e2ePoster(t)
-	code, line := c.post(t, e2eWire(head, []string{"body"}))
+	code, line := e2eMustPost(t, c, e2eArticle(head, []string{"body"}))
 	switch code {
 	case 441:
 		// refused at intake (strict header block check)
 	case 240:
 		e2eWaitStored(t, id, g)
-		if code, line := c.cmd(t, "HEAD %s", id); code != 221 {
+		if code, line := c.Cmd("HEAD %s", id); code != 221 {
 			t.Fatalf("POST accepted (want 441); HEAD %s: %q", id, line)
 		}
-		t.Fatalf("POST with a \"..\" header line was accepted (want 441); served head: %q", c.rawUntilDot(t))
+		t.Fatalf("POST with a \"..\" header line was accepted (want 441); served head: %q", c.RawUntilDot())
 	default:
 		t.Fatalf("POST with a \"..\" header line: %q, want 441", line)
 	}
-	if code, line := c.cmd(t, "MODE READER"); code != 200 && code != 201 {
+	if code, line := c.Cmd("MODE READER"); code != 200 && code != 201 {
 		t.Fatalf("MODE READER after the rejection: %q", line)
 	}
 	if _, err := e2eStored(id, g); err == nil {
@@ -1389,7 +1296,7 @@ func TestE2ECrosspost(t *testing.T) {
 	e2eArticleSQL(t, gb, e2eMsgID("xb"), "E2E older 2", "older 2")
 	id := e2eMsgID("xpost")
 	c := e2ePoster(t)
-	if code, line := c.post(t, e2eWire(e2eHead(id, ga+","+gb, "E2E crosspost", e2eNow()), []string{"crosspost body"})); code != 240 {
+	if code, line := e2eMustPost(t, c, e2eArticle(e2eHead(id, ga+","+gb, "E2E crosspost", e2eNow()), []string{"crosspost body"})); code != 240 {
 		t.Fatalf("POST: %q, want 240", line)
 	}
 	nums := e2eWaitStored(t, id, ga, gb)
@@ -1398,31 +1305,31 @@ func TestE2ECrosspost(t *testing.T) {
 	}
 
 	// no group selected: number 0
-	code, line := c.cmd(t, "ARTICLE %s", id)
+	code, line := c.Cmd("ARTICLE %s", id)
 	if code != 220 || !strings.HasPrefix(line, "220 0 "+id) {
 		t.Fatalf("ARTICLE %s without a group: %q, want 220 0 %s", id, line, id)
 	}
-	c.readDotLines(t)
+	c.ReadDotLines()
 
 	// GROUP b: b's number
-	if code, line := c.cmd(t, "GROUP %s", gb); code != 211 {
+	if code, line := c.Cmd("GROUP %s", gb); code != 211 {
 		t.Fatalf("GROUP %s: %q", gb, line)
 	}
-	code, line = c.cmd(t, "ARTICLE %s", id)
+	code, line = c.Cmd("ARTICLE %s", id)
 	if want := fmt.Sprintf("220 %d %s", nums[gb], id); code != 220 || !strings.HasPrefix(line, want) {
 		t.Fatalf("ARTICLE %s in %s: %q, want %q", id, gb, line, want)
 	}
-	c.readDotLines(t)
-	code, line = c.cmd(t, "STAT %s", id)
+	c.ReadDotLines()
+	code, line = c.Cmd("STAT %s", id)
 	if want := fmt.Sprintf("223 %d %s", nums[gb], id); code != 223 || !strings.HasPrefix(line, want) {
 		t.Fatalf("STAT %s in %s: %q, want %q", id, gb, line, want)
 	}
 
 	// GROUP a: a's number
-	if code, line := c.cmd(t, "GROUP %s", ga); code != 211 {
+	if code, line := c.Cmd("GROUP %s", ga); code != 211 {
 		t.Fatalf("GROUP %s: %q", ga, line)
 	}
-	code, line = c.cmd(t, "STAT %s", id)
+	code, line = c.Cmd("STAT %s", id)
 	if want := fmt.Sprintf("223 %d %s", nums[ga], id); code != 223 || !strings.HasPrefix(line, want) {
 		t.Fatalf("STAT %s in %s: %q, want %q", id, ga, line, want)
 	}
@@ -1458,9 +1365,9 @@ func TestE2EHelpers(t *testing.T) {
 		code int
 		ok   bool
 	}{{"240 ok", 240, true}, {"240", 240, true}, {"24", 0, false}, {"2400 x", 0, false}, {"abc x", 0, false}, {"099 x", 0, false}} {
-		code, err := e2eParseCode(tc.line)
+		code, err := client.ParseCode(tc.line)
 		if (err == nil) != tc.ok || code != tc.code {
-			t.Errorf("e2eParseCode(%q) = %d, %v", tc.line, code, err)
+			t.Errorf("client.ParseCode(%q) = %d, %v", tc.line, code, err)
 		}
 	}
 }
@@ -1499,27 +1406,27 @@ func TestE2EHeaderBlockRejects(t *testing.T) {
 	} {
 		id := fmt.Sprintf("<t7-hdrblock-%d@test.invalid>", e2eSeq.Add(1))
 		head := append(e2eHead(id, g, "E2E header block "+tc.name, e2eNow()), tc.extra)
-		if code, line := c.post(t, e2eWire(head, []string{"body"})); code != 441 {
+		if code, line := e2eMustPost(t, c, e2eArticle(head, []string{"body"})); code != 441 {
 			t.Fatalf("%s: POST %q, want 441", tc.name, line)
 		}
 		if _, err := e2eStored(id, g); err == nil {
 			t.Fatalf("%s: the refused article %s was stored", tc.name, id)
 		}
 	}
-	if code, line := c.cmd(t, "MODE READER"); code != 200 && code != 201 {
+	if code, line := c.Cmd("MODE READER"); code != 200 && code != 201 {
 		t.Fatalf("MODE READER after the rejections: %q", line)
 	}
 
 	// IHAVE with two From headers: 335, then 437 (RFC 3977 §6.3.2.2: permanent reject).
 	id := fmt.Sprintf("<t7-hdrblock-%d@test.invalid>", e2eSeq.Add(1))
-	if code, line := c.cmd(t, "IHAVE %s", id); code != 335 {
+	if code, line := c.Cmd("IHAVE %s", id); code != 335 {
 		t.Fatalf("IHAVE %s: %q, want 335", id, line)
 	}
 	head := append(e2eHead(id, g, "E2E header block two from", e2eNow()), "From: Second <second@test.invalid>")
-	if err := c.send(e2eWire(head, []string{"body"})); err != nil {
+	if err := c.Send(e2eWire(head, []string{"body"})); err != nil {
 		t.Fatal(err)
 	}
-	code, line, err := c.readStatus()
+	code, line, err := c.ReadStatus()
 	if err != nil {
 		t.Fatalf("IHAVE article: %v", err)
 	}
@@ -1540,7 +1447,7 @@ func TestE2EGroupPolicy(t *testing.T) {
 	post := func(t *testing.T, id, groups string, extra ...string) (int, string) {
 		t.Helper()
 		head := append(e2eHead(id, groups, "E2E group policy", e2eNow()), extra...)
-		return c.post(t, e2eWire(head, []string{"policy body"}))
+		return e2eMustPost(t, c, e2eArticle(head, []string{"policy body"}))
 	}
 	countFiles := func(name string) int {
 		file := database.SanitizeGroupName(name) + ".db"
@@ -1622,13 +1529,14 @@ func TestE2EGroupPolicy(t *testing.T) {
 	t.Run("ihave-status-n", func(t *testing.T) {
 		g := e2eGroupWith(t, "policy", true, "n", 0)
 		id := newID()
-		if code, line := c.cmd(t, "IHAVE %s", id); code != 335 {
+		cc := c.For(t) // the connection was dialled with the parent t: fail this subtest
+		if code, line := cc.Cmd("IHAVE %s", id); code != 335 {
 			t.Fatalf("IHAVE %s: %q, want 335", id, line)
 		}
-		if err := c.send(e2eWire(e2eHead(id, g, "E2E feed to status n", e2eNow()), []string{"feed body"})); err != nil {
+		if err := cc.Send(e2eWire(e2eHead(id, g, "E2E feed to status n", e2eNow()), []string{"feed body"})); err != nil {
 			t.Fatal(err)
 		}
-		if code, line, err := c.readStatus(); err != nil || code != 235 {
+		if code, line, err := cc.ReadStatus(); err != nil || code != 235 {
 			t.Fatalf("IHAVE to status n %s: code=%d line=%q err=%v, want 235", g, code, line, err)
 		}
 		e2eWaitStored(t, id, g)
@@ -1648,12 +1556,12 @@ func TestE2ENoNullHierarchyRow(t *testing.T) {
 	g := e2eGroupWith(t, "nullhier", true, "y", 0)
 	c := e2ePoster(t)
 	id := fmt.Sprintf("<t7-nullhier-%d@test.invalid>", e2eSeq.Add(1))
-	if code, line := c.post(t, e2eWire(e2eHead(id, g, "E2E null hierarchy", e2eNow()), []string{"body"})); code != 240 {
+	if code, line := e2eMustPost(t, c, e2eArticle(e2eHead(id, g, "E2E null hierarchy", e2eNow()), []string{"body"})); code != 240 {
 		t.Fatalf("POST to %s: %q, want 240", g, line)
 	}
 	unknown := fmt.Sprintf("t7.nullhier.nosuch%d", e2eSeq.Add(1))
 	uid := fmt.Sprintf("<t7-nullhier-%d@test.invalid>", e2eSeq.Add(1))
-	if code, line := c.post(t, e2eWire(e2eHead(uid, unknown, "E2E null hierarchy unknown", e2eNow()), []string{"body"})); code != 441 {
+	if code, line := e2eMustPost(t, c, e2eArticle(e2eHead(uid, unknown, "E2E null hierarchy unknown", e2eNow()), []string{"body"})); code != 441 {
 		t.Fatalf("POST to %s: %q, want 441", unknown, line)
 	}
 	e2eWaitStored(t, id, g)
@@ -1681,7 +1589,7 @@ func TestE2EHistoryAfterIntake(t *testing.T) {
 	var ids []string
 	for i := 0; i < 2; i++ {
 		id := fmt.Sprintf("<t7-histnull-%d@test.invalid>", e2eSeq.Add(1))
-		if code, line := c.post(t, e2eWire(e2eHead(id, g, "E2E history after intake", e2eNow()), []string{"body"})); code != 240 {
+		if code, line := e2eMustPost(t, c, e2eArticle(e2eHead(id, g, "E2E history after intake", e2eNow()), []string{"body"})); code != 240 {
 			t.Fatalf("POST %d to %s: %q, want 240", i+1, g, line)
 		}
 		// wait for the history entry before the next post: two separate batches
@@ -1700,7 +1608,7 @@ func TestE2EHistoryAfterIntake(t *testing.T) {
 		ids = append(ids, id)
 	}
 	for _, id := range ids {
-		if code, line := c.cmd(t, "IHAVE %s", id); code != 435 {
+		if code, line := c.Cmd("IHAVE %s", id); code != 435 {
 			t.Fatalf("IHAVE %s: %q, want 435", id, line)
 		}
 	}
@@ -1718,7 +1626,7 @@ func TestE2EMessageIDSyntax(t *testing.T) {
 		t.Fatalf("test bug: id length %d", len(long))
 	}
 	for _, id := range []string{noBrackets, long} {
-		if code, line := c.post(t, e2eWire(e2eHead(id, g, "E2E message-id syntax", e2eNow()), []string{"body"})); code != 441 {
+		if code, line := e2eMustPost(t, c, e2eArticle(e2eHead(id, g, "E2E message-id syntax", e2eNow()), []string{"body"})); code != 441 {
 			t.Fatalf("POST with Message-ID %q: %q, want 441", id, line)
 		}
 		if _, err := e2eStored(id, g); err == nil {
@@ -1743,7 +1651,7 @@ func TestE2EDateChecks(t *testing.T) {
 		{now.Add(23 * time.Hour).Format(time.RFC1123Z), 240},
 	} {
 		id := fmt.Sprintf("<t7-date-%d@test.invalid>", e2eSeq.Add(1))
-		if code, line := c.post(t, e2eWire(e2eHead(id, g, "E2E date check", tc.date), []string{"body"})); code != tc.want {
+		if code, line := e2eMustPost(t, c, e2eArticle(e2eHead(id, g, "E2E date check", tc.date), []string{"body"})); code != tc.want {
 			t.Fatalf("POST with Date %q: %q, want %d", tc.date, line, tc.want)
 		}
 		if tc.want == 240 {
@@ -1761,7 +1669,7 @@ func TestE2EControlXref(t *testing.T) {
 
 	ctl := fmt.Sprintf("<t7-ctlxref-%d@test.invalid>", e2eSeq.Add(1))
 	head := append(e2eHead(ctl, g, "cmsg cancel <x@y>", e2eNow()), "Control: cancel <x@y>")
-	if code, line := c.post(t, e2eWire(head, []string{"cancel"})); code != 441 {
+	if code, line := e2eMustPost(t, c, e2eArticle(head, []string{"cancel"})); code != 441 {
 		t.Fatalf("POST with Control: %q, want 441", line)
 	}
 	if n := len(e2eLogs.lines("[INTAKE] control message " + ctl + " (cancel) refused: control messages are not processed")); n == 0 {
@@ -1770,7 +1678,7 @@ func TestE2EControlXref(t *testing.T) {
 
 	sup := fmt.Sprintf("<t7-ctlxref-%d@test.invalid>", e2eSeq.Add(1))
 	head = append(e2eHead(sup, g, "E2E supersedes", e2eNow()), "Supersedes: <x@y>")
-	if code, line := c.post(t, e2eWire(head, []string{"superseding"})); code != 240 {
+	if code, line := e2eMustPost(t, c, e2eArticle(head, []string{"superseding"})); code != 240 {
 		t.Fatalf("POST with Supersedes: %q, want 240", line)
 	}
 	e2eWaitStored(t, sup, g)
@@ -1780,14 +1688,14 @@ func TestE2EControlXref(t *testing.T) {
 
 	// a foreign Xref by IHAVE (S4 refuses POST with Xref as a forged trace)
 	xref := fmt.Sprintf("<t7-ctlxref-%d@test.invalid>", e2eSeq.Add(1))
-	if code, line := c.cmd(t, "IHAVE %s", xref); code != 335 {
+	if code, line := c.Cmd("IHAVE %s", xref); code != 335 {
 		t.Fatalf("IHAVE %s: %q, want 335", xref, line)
 	}
 	head = append(e2eHead(xref, g, "E2E foreign xref", e2eNow()), "Xref: other.example g:1")
-	if err := c.send(e2eWire(head, []string{"xref body"})); err != nil {
+	if err := c.Send(e2eWire(head, []string{"xref body"})); err != nil {
 		t.Fatal(err)
 	}
-	if code, line, err := c.readStatus(); err != nil || code != 235 {
+	if code, line, err := c.ReadStatus(); err != nil || code != 235 {
 		t.Fatalf("IHAVE with Xref: code=%d line=%q err=%v, want 235", code, line, err)
 	}
 	e2eWaitStored(t, xref, g)
@@ -1818,7 +1726,7 @@ func TestE2EInFlightRetry(t *testing.T) {
 	g := e2eGroupWith(t, "inflight", true, "y", 0)
 	c := e2ePoster(t)
 	id := fmt.Sprintf("<t7-inflight-%d@test.invalid>", e2eSeq.Add(1))
-	if code, line := c.cmd(t, "IHAVE %s", id); code != 335 {
+	if code, line := c.Cmd("IHAVE %s", id); code != 335 {
 		t.Fatalf("IHAVE %s: %q, want 335", id, line)
 	}
 	// the one allowed global touch (K3): this test's own message-id item
@@ -1826,23 +1734,23 @@ func TestE2EInFlightRetry(t *testing.T) {
 	item.Mux.Lock()
 	item.Response = history.CaseLock
 	item.Mux.Unlock()
-	if err := c.send(e2eWire(e2eHead(id, g, "E2E in flight", e2eNow()), []string{"body"})); err != nil {
+	if err := c.Send(e2eWire(e2eHead(id, g, "E2E in flight", e2eNow()), []string{"body"})); err != nil {
 		t.Fatal(err)
 	}
-	code, line, err := c.readStatus()
+	code, line, err := c.ReadStatus()
 	if err != nil || code != 436 {
 		t.Fatalf("IHAVE of an in-flight id: code=%d line=%q err=%v, want 436", code, line, err)
 	}
 	item.Mux.Lock()
 	item.Response = 0
 	item.Mux.Unlock()
-	if code, line := c.cmd(t, "IHAVE %s", id); code != 335 {
+	if code, line := c.Cmd("IHAVE %s", id); code != 335 {
 		t.Fatalf("IHAVE %s again: %q, want 335", id, line)
 	}
-	if err := c.send(e2eWire(e2eHead(id, g, "E2E in flight", e2eNow()), []string{"body"})); err != nil {
+	if err := c.Send(e2eWire(e2eHead(id, g, "E2E in flight", e2eNow()), []string{"body"})); err != nil {
 		t.Fatal(err)
 	}
-	if code, line, err := c.readStatus(); err != nil || code != 235 {
+	if code, line, err := c.ReadStatus(); err != nil || code != 235 {
 		t.Fatalf("IHAVE retry: code=%d line=%q err=%v, want 235", code, line, err)
 	}
 	e2eWaitStored(t, id, g)
@@ -1870,18 +1778,18 @@ func TestE2EGroupDBOpenFailure(t *testing.T) {
 	})
 	c := e2ePoster(t)
 	id := fmt.Sprintf("<t7-dbfail-%d@test.invalid>", e2eSeq.Add(1))
-	wire := e2eWire(e2eHead(id, g, "E2E group DB open failure", e2eNow()), []string{"body"})
-	if code, line := c.post(t, wire); code != 441 {
+	art := e2eArticle(e2eHead(id, g, "E2E group DB open failure", e2eNow()), []string{"body"})
+	if code, line := e2eMustPost(t, c, art); code != 441 {
 		t.Fatalf("POST to %s: %q, want 441", g, line)
 	}
 	// the temporary failure released the claim: the same id is offered again
-	if code, line := c.cmd(t, "IHAVE %s", id); code != 335 {
+	if code, line := c.Cmd("IHAVE %s", id); code != 335 {
 		t.Fatalf("IHAVE %s after the temporary failure: %q, want 335", id, line)
 	}
-	if err := c.send(wire); err != nil {
+	if err := c.SendBytes(client.StuffBytes(art)); err != nil {
 		t.Fatal(err)
 	}
-	if code, line, err := c.readStatus(); err != nil || code != 436 {
+	if code, line, err := c.ReadStatus(); err != nil || code != 436 {
 		t.Fatalf("IHAVE to %s: code=%d line=%q err=%v, want 436", g, code, line, err)
 	}
 	if ok, err := e2eHist.Exists(id); err != nil || ok {
@@ -1948,16 +1856,16 @@ func TestE2ECaptureSlotReleased(t *testing.T) {
 	c := e2ePoster(t)
 	unknown := fmt.Sprintf("t7.slots.nosuch%d", e2eSeq.Add(1))
 	rejected := fmt.Sprintf("<t7-slots-%d@test.invalid>", e2eSeq.Add(1))
-	if code, line := c.post(t, e2eWire(e2eHead(rejected, unknown, "E2E slots rejected", e2eNow()), []string{"body"})); code != 441 {
+	if code, line := e2eMustPost(t, c, e2eArticle(e2eHead(rejected, unknown, "E2E slots rejected", e2eNow()), []string{"body"})); code != 441 {
 		t.Fatalf("POST to %s: %q, want 441", unknown, line)
 	}
 	xpost := fmt.Sprintf("<t7-slots-%d@test.invalid>", e2eSeq.Add(1))
-	wire := e2eWire(e2eHead(xpost, ga+","+gb, "E2E slots crosspost", e2eNow()), []string{"body"})
-	if code, line := c.post(t, wire); code != 240 {
+	art := e2eArticle(e2eHead(xpost, ga+","+gb, "E2E slots crosspost", e2eNow()), []string{"body"})
+	if code, line := e2eMustPost(t, c, art); code != 240 {
 		t.Fatalf("POST crosspost: %q, want 240", line)
 	}
 	e2eWaitStored(t, xpost, ga, gb)
-	if code, line := c.post(t, wire); code != 441 {
+	if code, line := e2eMustPost(t, c, art); code != 441 {
 		t.Fatalf("POST duplicate: %q, want 441", line)
 	}
 	if err := e2eWaitFor(e2eCommitWait, func() error {
@@ -1982,17 +1890,17 @@ func TestE2EInjectionPathColumn(t *testing.T) {
 	g := e2eGroupWith(t, "pathcol", true, "y", 0)
 	c := e2ePoster(t)
 	pid := fmt.Sprintf("<t7-pathcol-%d@test.invalid>", e2eSeq.Add(1))
-	if code, line := c.post(t, e2eWire(e2eHead(pid, g, "E2E path column post", e2eNow()), []string{"post"})); code != 240 {
+	if code, line := e2eMustPost(t, c, e2eArticle(e2eHead(pid, g, "E2E path column post", e2eNow()), []string{"post"})); code != 240 {
 		t.Fatalf("POST: %q, want 240", line)
 	}
 	iid := fmt.Sprintf("<t7-pathcol-%d@test.invalid>", e2eSeq.Add(1))
-	if code, line := c.cmd(t, "IHAVE %s", iid); code != 335 {
+	if code, line := c.Cmd("IHAVE %s", iid); code != 335 {
 		t.Fatalf("IHAVE %s: %q, want 335", iid, line)
 	}
-	if err := c.send(e2eWire(e2eHead(iid, g, "E2E path column ihave", e2eNow()), []string{"ihave"})); err != nil {
+	if err := c.Send(e2eWire(e2eHead(iid, g, "E2E path column ihave", e2eNow()), []string{"ihave"})); err != nil {
 		t.Fatal(err)
 	}
-	if code, line, err := c.readStatus(); err != nil || code != 235 {
+	if code, line, err := c.ReadStatus(); err != nil || code != 235 {
 		t.Fatalf("IHAVE article: code=%d line=%q err=%v, want 235", code, line, err)
 	}
 	for _, tc := range []struct{ id, path string }{
@@ -2023,10 +1931,10 @@ func TestE2EInjectionPathColumn(t *testing.T) {
 		if len(lines) != 1 || strings.TrimSpace(lines[0][len("path:"):]) != column {
 			t.Fatalf("%s: stored Path lines %q, want one equal to the column %q", tc.id, lines, column)
 		}
-		if code, line := c.cmd(t, "HEAD %s", tc.id); code != 221 {
+		if code, line := c.Cmd("HEAD %s", tc.id); code != 221 {
 			t.Fatalf("HEAD %s: %q, want 221", tc.id, line)
 		}
-		if v := e2eHeaderValue(c.readDotLines(t), "Path"); v != column {
+		if v := e2eHeaderValue(c.ReadDotLines(), "Path"); v != column {
 			t.Fatalf("%s: served Path %q, want the column %q", tc.id, v, column)
 		}
 	}
@@ -2061,7 +1969,7 @@ func TestE2EProtoArticleRejects(t *testing.T) {
 		if tc.extra != "" {
 			head = append(head, tc.extra)
 		}
-		if code, line := c.post(t, e2eWire(head, []string{"body"})); code != tc.want {
+		if code, line := e2eMustPost(t, c, e2eArticle(head, []string{"body"})); code != tc.want {
 			t.Fatalf("%s: POST %q, want %d", tc.name, line, tc.want)
 		}
 		if tc.stored {
@@ -2089,22 +1997,22 @@ func TestE2EFeedPath(t *testing.T) {
 		{"mismatch", "somewhere.else.invalid!not-for-mail", e2eHostname + "!" + e2ePeerPathToken + ".MISMATCH!"},
 	} {
 		id := fmt.Sprintf("<t7-feedpath-%s-%d@test.invalid>", tc.name, e2eSeq.Add(1))
-		if code, line := c.cmd(t, "IHAVE %s", id); code != 335 {
+		if code, line := c.Cmd("IHAVE %s", id); code != 335 {
 			t.Fatalf("%s: IHAVE %s: %q, want 335", tc.name, id, line)
 		}
 		head := e2eHead(id, g, "E2E feed path", e2eNow())
 		head[0] = "Path: " + tc.path
-		if err := c.send(e2eWire(head, []string{"feed path"})); err != nil {
+		if err := c.Send(e2eWire(head, []string{"feed path"})); err != nil {
 			t.Fatal(err)
 		}
-		if code, line, err := c.readStatus(); err != nil || code != 235 {
+		if code, line, err := c.ReadStatus(); err != nil || code != 235 {
 			t.Fatalf("%s: IHAVE article: code=%d line=%q err=%v, want 235", tc.name, code, line, err)
 		}
 		e2eWaitStored(t, id, g)
-		if code, line := c.cmd(t, "HEAD %s", id); code != 221 {
+		if code, line := c.Cmd("HEAD %s", id); code != 221 {
 			t.Fatalf("%s: HEAD %s: %q, want 221", tc.name, id, line)
 		}
-		p := e2eHeaderValue(c.readDotLines(t), "Path")
+		p := e2eHeaderValue(c.ReadDotLines(), "Path")
 		if !strings.HasPrefix(p, tc.prefix) {
 			t.Fatalf("%s: served Path %q, want the prefix %q", tc.name, p, tc.prefix)
 		}
@@ -2129,13 +2037,13 @@ func TestE2EFeedLoopRefused(t *testing.T) {
 	}
 
 	id := fmt.Sprintf("<t7-feedloop-%d@test.invalid>", e2eSeq.Add(1))
-	if code, line := c.cmd(t, "IHAVE %s", id); code != 335 {
+	if code, line := c.Cmd("IHAVE %s", id); code != 335 {
 		t.Fatalf("IHAVE %s: %q, want 335", id, line)
 	}
-	if err := c.send(e2eWire(looped(id), []string{"loop"})); err != nil {
+	if err := c.Send(e2eWire(looped(id), []string{"loop"})); err != nil {
 		t.Fatal(err)
 	}
-	code, line, err := c.readStatus()
+	code, line, err := c.ReadStatus()
 	if err != nil || code != 437 {
 		t.Fatalf("IHAVE of a looped article: code=%d line=%q err=%v, want 437", code, line, err)
 	}
@@ -2147,10 +2055,10 @@ func TestE2EFeedLoopRefused(t *testing.T) {
 	}
 
 	id2 := fmt.Sprintf("<t7-feedloop-%d@test.invalid>", e2eSeq.Add(1))
-	if err := c.send("TAKETHIS " + id2 + "\r\n" + e2eWire(looped(id2), []string{"loop"})); err != nil {
+	if err := c.Send("TAKETHIS " + id2 + "\r\n" + e2eWire(looped(id2), []string{"loop"})); err != nil {
 		t.Fatal(err)
 	}
-	code, line, err = c.readStatus()
+	code, line, err = c.ReadStatus()
 	if err != nil || code != 439 {
 		t.Fatalf("TAKETHIS of a looped article: code=%d line=%q err=%v, want 439", code, line, err)
 	}
@@ -2158,7 +2066,7 @@ func TestE2EFeedLoopRefused(t *testing.T) {
 		t.Fatalf("TAKETHIS reply %q does not carry %s", line, id2)
 	}
 	// the connection is still in sync
-	if code, line := c.cmd(t, "MODE READER"); code != 200 && code != 201 {
+	if code, line := c.Cmd("MODE READER"); code != 200 && code != 201 {
 		t.Fatalf("MODE READER after the refusals: %q", line)
 	}
 }
@@ -2170,20 +2078,20 @@ func TestE2EIHaveInvalidMessageID(t *testing.T) {
 	e2eNeedDB(t)
 	g := e2eGroupWith(t, "badid", true, "y", 0)
 	c := e2ePoster(t)
-	if code, line := c.cmd(t, "IHAVE not-a-message-id"); code != 501 {
+	if code, line := c.Cmd("IHAVE not-a-message-id"); code != 501 {
 		t.Fatalf("IHAVE not-a-message-id: %q, want 501", line)
 	}
 	good := fmt.Sprintf("<t7-badid-%d@test.invalid>", e2eSeq.Add(1))
 	stream := "TAKETHIS not-an-id\r\n" + e2eWire(e2eHead("not-an-id", g, "E2E bad id", e2eNow()), []string{"bad"}) +
 		"TAKETHIS " + good + "\r\n" + e2eWire(e2eHead(good, g, "E2E good id", e2eNow()), []string{"good"})
-	if err := c.send(stream); err != nil {
+	if err := c.Send(stream); err != nil {
 		t.Fatal(err)
 	}
 	for i, w := range []struct {
 		code int
 		id   string
 	}{{439, "not-an-id"}, {239, good}} {
-		code, line, err := c.readStatus()
+		code, line, err := c.ReadStatus()
 		if err != nil {
 			t.Fatalf("reply %d: %v (line %q)", i+1, err, line)
 		}
@@ -2201,13 +2109,13 @@ func TestE2EMissingMessageIDHeader(t *testing.T) {
 	g := e2eGroupWith(t, "nomid", true, "y", 0)
 	c := e2ePoster(t)
 	id := fmt.Sprintf("<t7-nomid-%d@test.invalid>", e2eSeq.Add(1))
-	if code, line := c.cmd(t, "IHAVE %s", id); code != 335 {
+	if code, line := c.Cmd("IHAVE %s", id); code != 335 {
 		t.Fatalf("IHAVE %s: %q, want 335", id, line)
 	}
-	if err := c.send(e2eWire(e2eHead("", g, "E2E no message-id header", e2eNow()), []string{"body"})); err != nil {
+	if err := c.Send(e2eWire(e2eHead("", g, "E2E no message-id header", e2eNow()), []string{"body"})); err != nil {
 		t.Fatal(err)
 	}
-	if code, line, err := c.readStatus(); err != nil || code != 437 {
+	if code, line, err := c.ReadStatus(); err != nil || code != 437 {
 		t.Fatalf("IHAVE article without Message-ID: code=%d line=%q err=%v, want 437", code, line, err)
 	}
 	if _, err := e2eStored(id, g); err == nil {
@@ -2226,16 +2134,16 @@ func TestE2EOversizeFeed(t *testing.T) {
 		big = append(big, fmt.Sprintf("%04d %s", i, strings.Repeat("y", 59)))
 	}
 	id := fmt.Sprintf("<t7-bigfeed-%d@test.invalid>", e2eSeq.Add(1))
-	if code, line := c.cmd(t, "IHAVE %s", id); code != 335 {
+	if code, line := c.Cmd("IHAVE %s", id); code != 335 {
 		t.Fatalf("IHAVE %s: %q, want 335", id, line)
 	}
-	if err := c.send(e2eWire(e2eHead(id, g, "E2E big feed", e2eNow()), big)); err != nil {
+	if err := c.Send(e2eWire(e2eHead(id, g, "E2E big feed", e2eNow()), big)); err != nil {
 		t.Fatal(err)
 	}
-	if code, line, err := c.readStatus(); err != nil || code != 437 {
+	if code, line, err := c.ReadStatus(); err != nil || code != 437 {
 		t.Fatalf("IHAVE of a 64 KiB article: code=%d line=%q err=%v, want 437", code, line, err)
 	}
-	if code, line := c.cmd(t, "MODE READER"); code != 200 && code != 201 {
+	if code, line := c.Cmd("MODE READER"); code != 200 && code != 201 {
 		t.Fatalf("MODE READER after the big article: %q", line)
 	}
 
@@ -2243,14 +2151,14 @@ func TestE2EOversizeFeed(t *testing.T) {
 	id2 := fmt.Sprintf("<t7-bigfeed-%d@test.invalid>", e2eSeq.Add(1))
 	stream := "TAKETHIS " + id1 + "\r\n" + e2eWire(e2eHead(id1, g, "E2E big takethis", e2eNow()), big) +
 		"TAKETHIS " + id2 + "\r\n" + e2eWire(e2eHead(id2, g, "E2E small takethis", e2eNow()), []string{"small"})
-	if err := c.send(stream); err != nil {
+	if err := c.Send(stream); err != nil {
 		t.Fatal(err)
 	}
 	for i, w := range []struct {
 		code int
 		id   string
 	}{{439, id1}, {239, id2}} {
-		code, line, err := c.readStatus()
+		code, line, err := c.ReadStatus()
 		if err != nil {
 			t.Fatalf("reply %d: %v (line %q)", i+1, err, line)
 		}
@@ -2273,17 +2181,17 @@ func TestE2EPostNoPostingStatus(t *testing.T) {
 	g := e2eGroupWith(t, "nopost", true, "n", 0)
 	c := e2ePoster(t)
 	pid := fmt.Sprintf("<t7-nopost-%d@test.invalid>", e2eSeq.Add(1))
-	if code, line := c.post(t, e2eWire(e2eHead(pid, g, "E2E post to status n", e2eNow()), []string{"post"})); code != 441 {
+	if code, line := e2eMustPost(t, c, e2eArticle(e2eHead(pid, g, "E2E post to status n", e2eNow()), []string{"post"})); code != 441 {
 		t.Fatalf("POST to status n %s: %q, want 441", g, line)
 	}
 	iid := fmt.Sprintf("<t7-nopost-%d@test.invalid>", e2eSeq.Add(1))
-	if code, line := c.cmd(t, "IHAVE %s", iid); code != 335 {
+	if code, line := c.Cmd("IHAVE %s", iid); code != 335 {
 		t.Fatalf("IHAVE %s: %q, want 335", iid, line)
 	}
-	if err := c.send(e2eWire(e2eHead(iid, g, "E2E feed to status n", e2eNow()), []string{"feed"})); err != nil {
+	if err := c.Send(e2eWire(e2eHead(iid, g, "E2E feed to status n", e2eNow()), []string{"feed"})); err != nil {
 		t.Fatal(err)
 	}
-	if code, line, err := c.readStatus(); err != nil || code != 235 {
+	if code, line, err := c.ReadStatus(); err != nil || code != 235 {
 		t.Fatalf("IHAVE to status n %s: code=%d line=%q err=%v, want 235", g, code, line, err)
 	}
 	e2eWaitStored(t, iid, g)
@@ -2302,10 +2210,10 @@ func TestE2ETakeThisPeerByAddress(t *testing.T) {
 	g := e2eGroupWith(t, "peeraddr", true, "y", 0)
 	c := e2eDial(t)
 	id := fmt.Sprintf("<t7-peeraddr-%d@test.invalid>", e2eSeq.Add(1))
-	if err := c.send("TAKETHIS " + id + "\r\n" + e2eWire(e2eHead(id, g, "E2E peer by address", e2eNow()), []string{"body"})); err != nil {
+	if err := c.Send("TAKETHIS " + id + "\r\n" + e2eWire(e2eHead(id, g, "E2E peer by address", e2eNow()), []string{"body"})); err != nil {
 		t.Fatal(err)
 	}
-	code, line, err := c.readStatus()
+	code, line, err := c.ReadStatus()
 	if err != nil {
 		t.Fatalf("TAKETHIS reply: %v", err)
 	}
@@ -2313,12 +2221,12 @@ func TestE2ETakeThisPeerByAddress(t *testing.T) {
 		t.Fatalf("TAKETHIS without AUTHINFO: %q, want 239 %s", line, id)
 	}
 	// the article was consumed: the next command is answered
-	if code, line := c.cmd(t, "MODE READER"); code != 200 && code != 201 {
+	if code, line := c.Cmd("MODE READER"); code != 200 && code != 201 {
 		t.Fatalf("MODE READER after the 239: %q", line)
 	}
 	e2eWaitStored(t, id, g)
 	// POST is not granted by being a peer (no user login on this connection)
-	if code, line, err := c.tryCmd("POST"); err != nil || code != 480 {
+	if code, line, err := c.TryCmd("POST"); err != nil || code != 480 {
 		t.Fatalf("POST on a peer connection: code=%d line=%q err=%v, want 480", code, line, err)
 	}
 }

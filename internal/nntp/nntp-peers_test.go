@@ -608,31 +608,31 @@ func peerFeedServer(t *testing.T, patterns string) (*hServer, *hFakeProcessor, *
 	return hs, proc, peer
 }
 
-// peerArticle is the wire form of an article with the given Path and Newsgroups.
-func peerArticle(id, path, groups string) string {
-	return "Path: " + path + "\r\n" +
+// peerArticleRaw is an article with the given Path and Newsgroups as the kit's transfer
+// commands take it: CRLF line ends, not dot-stuffed, no terminator.
+func peerArticleRaw(id, path, groups string) []byte {
+	return []byte("Path: " + path + "\r\n" +
 		"From: Peer <peer@test.invalid>\r\n" +
 		"Newsgroups: " + groups + "\r\n" +
 		"Subject: peer feed\r\n" +
 		"Date: " + time.Now().UTC().Format(time.RFC1123Z) + "\r\n" +
 		"Message-ID: " + id + "\r\n" +
 		"\r\n" +
-		"body\r\n.\r\n"
+		"body\r\n")
+}
+
+// peerArticle is peerArticleRaw in the form a client sends after IHAVE or TAKETHIS:
+// dot-stuffed and with the terminating ".\r\n" (kit client.StuffBytes).
+func peerArticle(id, path, groups string) string {
+	return string(client.StuffBytes(peerArticleRaw(id, path, groups)))
 }
 
 // peerIHave offers one article by IHAVE and returns the final reply.
 func peerIHave(t *testing.T, c *client.Conn, id, path, groups string) (int, string) {
 	t.Helper()
-	code, line := c.Cmd("IHAVE %s", id)
-	if err := client.ExpectCode(code, line, 335); err != nil {
-		t.Fatalf("IHAVE: %v", err)
-	}
-	if err := c.Send(peerArticle(id, path, groups)); err != nil {
-		t.Fatalf("send article: %v", err)
-	}
-	code, line, err := c.ReadStatus()
-	if err != nil {
-		t.Fatalf("IHAVE reply: %v (%q)", err, line)
+	code, line, sent := c.Ihave(id, peerArticleRaw(id, path, groups))
+	if !sent {
+		t.Fatalf("IHAVE %s: %q, want 335 and the article transferred", id, line)
 	}
 	return code, line
 }
@@ -640,13 +640,7 @@ func peerIHave(t *testing.T, c *client.Conn, id, path, groups string) (int, stri
 // peerTakeThis offers one article by TAKETHIS and returns the reply.
 func peerTakeThis(t *testing.T, c *client.Conn, id, path, groups string) (int, string) {
 	t.Helper()
-	if err := c.Send("TAKETHIS " + id + "\r\n" + peerArticle(id, path, groups)); err != nil {
-		t.Fatalf("send TAKETHIS: %v", err)
-	}
-	code, line, err := c.ReadStatus()
-	if err != nil {
-		t.Fatalf("TAKETHIS reply: %v (%q)", err, line)
-	}
+	code, line, _ := c.Takethis(id, peerArticleRaw(id, path, groups))
 	return code, line
 }
 

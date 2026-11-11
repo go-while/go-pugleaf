@@ -34,7 +34,7 @@ package main
 //     statistics (data/cfg/peer-stats.sq3, written on shutdown) count every article in from
 //     peer A and the accepted and refused ones out to peer B.
 //
-// The binary runs through the kit's process runner (proc.GoBuild + proc.StartTCP) with its
+// The binary runs through the kit's process runner (e2eBuild/proc.GoBuild + proc.StartTCP) with its
 // working directory and an absolute -data under t.TempDir(), so the default ./data is never
 // reached; nntpmgr creates the scratch database (schema and migrations) and the groups and
 // peers are seeded by SQL. Ports come from the OS (testkit.FreePort and the fake peers'
@@ -374,9 +374,8 @@ func TestE2ERelayBinary(t *testing.T) {
 	}
 
 	tmp := t.TempDir()
-	bin := filepath.Join(tmp, "bin")
-	server := proc.GoBuild(t, bin, "github.com/go-while/go-pugleaf/cmd/nntp-server", "-X main.appVersion=e2e-test")
-	mgr := proc.GoBuild(t, bin, "github.com/go-while/go-pugleaf/cmd/nntpmgr", "-X main.appVersion=e2e-test")
+	server := e2eBuild(t, "github.com/go-while/go-pugleaf/cmd/nntp-server")
+	mgr := e2eBuild(t, "github.com/go-while/go-pugleaf/cmd/nntpmgr")
 	data := filepath.Join(tmp, "data-test-e2e-relay")
 	run := filepath.Join(tmp, "run")
 	for _, d := range []string{data, run} {

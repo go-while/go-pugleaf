@@ -12,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	testkit "github.com/go-while/nntp-testkit"
 )
 
 // TestSenderNeedsConfig: the three required fields are checked by NewSender.
@@ -104,8 +106,8 @@ func TestSenderAckAndDefer(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sndWaitFor(t, "two items done", func() bool { return len(f.q.doneIDs()) == 2 })
-	sndWaitFor(t, "one item deferred", func() bool { return len(f.q.deferred()) == 1 })
+	testkit.WaitFor(t, sndWait, "two items done", func() bool { return len(f.q.doneIDs()) == 2 })
+	testkit.WaitFor(t, sndWait, "one item deferred", func() bool { return len(f.q.deferred()) == 1 })
 
 	done := strings.Join(f.q.doneIDs(), " ")
 	if !strings.Contains(done, accept) || !strings.Contains(done, refuse) {
@@ -152,7 +154,7 @@ func TestSenderMissingArticle(t *testing.T) {
 	if err := f.s.Start(); err != nil {
 		t.Fatal(err)
 	}
-	sndWaitFor(t, "the missing article to be dropped", func() bool { return len(f.q.doneIDs()) == 1 })
+	testkit.WaitFor(t, sndWait, "the missing article to be dropped", func() bool { return len(f.q.doneIDs()) == 1 })
 	if got := f.q.doneIDs()[0]; got != gone {
 		t.Errorf("done = %q, want %q", got, gone)
 	}
@@ -175,7 +177,7 @@ func TestSenderArticleReadErrorDefers(t *testing.T) {
 	if err := f.s.Start(); err != nil {
 		t.Fatal(err)
 	}
-	sndWaitFor(t, "the item to be deferred", func() bool { return len(f.q.deferred()) > 0 })
+	testkit.WaitFor(t, sndWait, "the item to be deferred", func() bool { return len(f.q.deferred()) > 0 })
 	if ids := f.q.doneIDs(); len(ids) != 0 {
 		t.Errorf("done = %v, want none", ids)
 	}
@@ -202,10 +204,10 @@ func TestSenderConnectFailureDefers(t *testing.T) {
 	if err := f.s.Start(); err != nil {
 		t.Fatal(err)
 	}
-	sndWaitFor(t, "the item to be deferred", func() bool { return len(f.q.deferred()) > 0 })
+	testkit.WaitFor(t, sndWait, "the item to be deferred", func() bool { return len(f.q.deferred()) > 0 })
 	// The deferred item is due only after its backoff: move the sender's clock past it.
 	f.clock.Advance(time.Minute)
-	sndWaitFor(t, "a second connect attempt", func() bool { dials, _, _ := f.dial.counts(); return dials >= 2 })
+	testkit.WaitFor(t, sndWait, "a second connect attempt", func() bool { dials, _, _ := f.dial.counts(); return dials >= 2 })
 	d := f.q.deferred()[0]
 	if !strings.Contains(d.Err, "connection refused") {
 		t.Errorf("last error = %q, want the connect error", d.Err)
@@ -228,7 +230,7 @@ func TestSenderDropPeer(t *testing.T) {
 	if err := f.s.Start(); err != nil {
 		t.Fatal(err)
 	}
-	sndWaitFor(t, "the peer feed to start", func() bool {
+	testkit.WaitFor(t, sndWait, "the peer feed to start", func() bool {
 		f.s.mu.Lock()
 		defer f.s.mu.Unlock()
 		return len(f.s.peers) == 1
@@ -239,7 +241,7 @@ func TestSenderDropPeer(t *testing.T) {
 	f.peers.err = errors.New("main db is busy")
 	f.peers.mu.Unlock()
 	reads := f.peers.readCount()
-	sndWaitFor(t, "another peer list read", func() bool { return f.peers.readCount() > reads+1 })
+	testkit.WaitFor(t, sndWait, "another peer list read", func() bool { return f.peers.readCount() > reads+1 })
 	if dropped := f.q.droppedPeers(); len(dropped) != 0 {
 		t.Fatalf("dropped %v on a peer list error, want none", dropped)
 	}
@@ -251,11 +253,11 @@ func TestSenderDropPeer(t *testing.T) {
 	off := *peer
 	off.OutEnabled = false
 	f.peers.set(&off)
-	sndWaitFor(t, "the peer to be dropped", func() bool { return len(f.q.droppedPeers()) == 1 })
+	testkit.WaitFor(t, sndWait, "the peer to be dropped", func() bool { return len(f.q.droppedPeers()) == 1 })
 	if got := f.q.droppedPeers()[0]; got != 7 {
 		t.Errorf("DropPeer(%d), want 7", got)
 	}
-	sndWaitFor(t, "the peer feed to stop", func() bool {
+	testkit.WaitFor(t, sndWait, "the peer feed to stop", func() bool {
 		f.s.mu.Lock()
 		defer f.s.mu.Unlock()
 		return len(f.s.peers) == 0
@@ -275,7 +277,7 @@ func TestSenderDisabledPeerKeepsQueue(t *testing.T) {
 	if err := f.s.Start(); err != nil {
 		t.Fatal(err)
 	}
-	sndWaitFor(t, "the peer feed to start", func() bool {
+	testkit.WaitFor(t, sndWait, "the peer feed to start", func() bool {
 		f.s.mu.Lock()
 		defer f.s.mu.Unlock()
 		return f.s.peers[5] != nil
@@ -285,7 +287,7 @@ func TestSenderDisabledPeerKeepsQueue(t *testing.T) {
 	disabled := *peer
 	disabled.Enabled = false
 	f.peers.set(&disabled)
-	sndWaitFor(t, "the peer feed to stop", func() bool {
+	testkit.WaitFor(t, sndWait, "the peer feed to stop", func() bool {
 		f.s.mu.Lock()
 		defer f.s.mu.Unlock()
 		return f.s.peers[5] == nil && !f.s.transit[5]
@@ -298,7 +300,7 @@ func TestSenderDisabledPeerKeepsQueue(t *testing.T) {
 		t.Fatal(err)
 	}
 	reads := f.peers.readCount()
-	sndWaitFor(t, "two more peer list reads", func() bool { return f.peers.readCount() >= reads+2 })
+	testkit.WaitFor(t, sndWait, "two more peer list reads", func() bool { return f.peers.readCount() >= reads+2 })
 	if ids := f.q.doneIDs(); len(ids) != 0 {
 		t.Errorf("sent %v to a disabled peer", ids)
 	}
@@ -308,7 +310,7 @@ func TestSenderDisabledPeerKeepsQueue(t *testing.T) {
 
 	// Enabled again: the queue is drained.
 	f.peers.set(peer)
-	sndWaitFor(t, "the queued article to be sent", func() bool { return len(f.q.doneIDs()) == 1 })
+	testkit.WaitFor(t, sndWait, "the queued article to be sent", func() bool { return len(f.q.doneIDs()) == 1 })
 	if dropped := f.q.droppedPeers(); len(dropped) != 0 {
 		t.Errorf("dropped %v, want none", dropped)
 	}
@@ -328,7 +330,7 @@ func TestSenderDropsOrphanedQueue(t *testing.T) {
 	if err := f.s.Start(); err != nil {
 		t.Fatal(err)
 	}
-	sndWaitFor(t, "the orphaned queue to be dropped", func() bool {
+	testkit.WaitFor(t, sndWait, "the orphaned queue to be dropped", func() bool {
 		for _, id := range f.q.droppedPeers() {
 			if id == 99 {
 				return true
@@ -377,7 +379,7 @@ func TestSenderStopDuringConnectKeepsLease(t *testing.T) {
 	go func() { f.s.Stop(); close(stopped) }()
 	// Stop waits for the connect that is already running; releasing it once the sender is
 	// stopping lets the worker see that and return.
-	sndWaitFor(t, "the sender to be stopping", f.s.stopping)
+	testkit.WaitFor(t, sndWait, "the sender to be stopping", f.s.stopping)
 	close(release)
 	select {
 	case <-stopped:
@@ -418,22 +420,22 @@ func TestSenderClearsLastError(t *testing.T) {
 	if err := f.s.Start(); err != nil {
 		t.Fatal(err)
 	}
-	sndWaitFor(t, "the first article to be deferred", func() bool { return len(f.q.deferred()) == 1 })
+	testkit.WaitFor(t, sndWait, "the first article to be deferred", func() bool { return len(f.q.deferred()) == 1 })
 	f.s.mu.Lock()
 	pf := f.s.peers[1]
 	f.s.mu.Unlock()
 	if pf == nil {
 		t.Fatal("no feed for the peer")
 	}
-	sndWaitFor(t, "the last error to be stored", func() bool { return pf.snapshot().LastError != "" })
+	testkit.WaitFor(t, sndWait, "the last error to be stored", func() bool { return pf.snapshot().LastError != "" })
 
 	// The deferred item is due again after its backoff, and the next run is clean.
 	f.clock.Advance(time.Minute)
 	if err := f.q.Enqueue([]Item{{PeerID: 1, MessageID: second, Newsgroup: group}}); err != nil {
 		t.Fatal(err)
 	}
-	sndWaitFor(t, "both articles to be sent", func() bool { return len(f.q.doneIDs()) == 2 })
-	sndWaitFor(t, "the last error to be cleared", func() bool { return pf.snapshot().LastError == "" })
+	testkit.WaitFor(t, sndWait, "both articles to be sent", func() bool { return len(f.q.doneIDs()) == 2 })
+	testkit.WaitFor(t, sndWait, "the last error to be cleared", func() bool { return pf.snapshot().LastError == "" })
 	f.s.Stop()
 	if st, _ := f.q.storedStats(1); st.LastError != "" {
 		t.Errorf("stored last error = %q, want it cleared", st.LastError)
@@ -451,7 +453,7 @@ func TestSenderDepthErrorStillWritesStats(t *testing.T) {
 	if err := f.s.Start(); err != nil {
 		t.Fatal(err)
 	}
-	sndWaitFor(t, "the peer feed to start", func() bool {
+	testkit.WaitFor(t, sndWait, "the peer feed to start", func() bool {
 		f.s.mu.Lock()
 		defer f.s.mu.Unlock()
 		return f.s.peers[1] != nil
@@ -490,7 +492,7 @@ func TestSenderBatchBytes(t *testing.T) {
 	if err := f.s.Start(); err != nil {
 		t.Fatal(err)
 	}
-	sndWaitFor(t, "all three articles to be sent", func() bool { return len(f.q.doneIDs()) == 3 })
+	testkit.WaitFor(t, sndWait, "all three articles to be sent", func() bool { return len(f.q.doneIDs()) == 3 })
 	dials, _, _ := f.dial.counts()
 	if dials != 1 {
 		t.Errorf("dials = %d, want 1: the runs share one connection", dials)
@@ -524,12 +526,12 @@ func TestSenderRestartsOnChange(t *testing.T) {
 	if err := f.s.Start(); err != nil {
 		t.Fatal(err)
 	}
-	sndWaitFor(t, "the first connection", func() bool { dials, _, _ := f.dial.counts(); return dials >= 1 })
+	testkit.WaitFor(t, sndWait, "the first connection", func() bool { dials, _, _ := f.dial.counts(); return dials >= 1 })
 
 	moved := *peer
 	moved.OutHost = "other.invalid"
 	f.peers.set(&moved)
-	sndWaitFor(t, "the restarted feed", func() bool {
+	testkit.WaitFor(t, sndWait, "the restarted feed", func() bool {
 		f.s.mu.Lock()
 		defer f.s.mu.Unlock()
 		pf := f.s.peers[3]
@@ -565,7 +567,7 @@ func TestSenderMaxConns(t *testing.T) {
 	if err := f.s.Start(); err != nil {
 		t.Fatal(err)
 	}
-	sndWaitFor(t, "all items to be sent", func() bool { return len(f.q.doneIDs()) == len(items) })
+	testkit.WaitFor(t, sndWait, "all items to be sent", func() bool { return len(f.q.doneIDs()) == len(items) })
 	dials, _, maxLive := f.dial.counts()
 	if maxLive > conns {
 		t.Errorf("%d connections open at once, want at most %d", maxLive, conns)
@@ -596,7 +598,7 @@ func TestSenderStopUnblocksSend(t *testing.T) {
 	if err := f.s.Start(); err != nil {
 		t.Fatal(err)
 	}
-	sndWaitFor(t, "the blocked send", func() bool { _, live, _ := f.dial.counts(); return live == 1 })
+	testkit.WaitFor(t, sndWait, "the blocked send", func() bool { _, live, _ := f.dial.counts(); return live == 1 })
 
 	stopped := make(chan struct{})
 	go func() { f.s.Stop(); close(stopped) }()
@@ -622,7 +624,7 @@ func TestSenderPrune(t *testing.T) {
 	if err := f.s.Start(); err != nil {
 		t.Fatal(err)
 	}
-	sndWaitFor(t, "two prune calls", func() bool { return f.q.pruneCalls() >= 2 })
+	testkit.WaitFor(t, sndWait, "two prune calls", func() bool { return f.q.pruneCalls() >= 2 })
 }
 
 // TestSenderClaimErrorKeepsRunning: a queue that cannot be claimed from is logged and retried,
@@ -636,7 +638,7 @@ func TestSenderClaimErrorKeepsRunning(t *testing.T) {
 	if err := f.s.Start(); err != nil {
 		t.Fatal(err)
 	}
-	sndWaitFor(t, "repeated claims", func() bool {
+	testkit.WaitFor(t, sndWait, "repeated claims", func() bool {
 		f.q.mu.Lock()
 		defer f.q.mu.Unlock()
 		return f.q.claims >= 3
@@ -658,7 +660,7 @@ func TestSenderSkipsPeerWithoutHost(t *testing.T) {
 	if err := f.s.Start(); err != nil {
 		t.Fatal(err)
 	}
-	sndWaitFor(t, "two peer list reads", func() bool { return f.peers.readCount() >= 2 })
+	testkit.WaitFor(t, sndWait, "two peer list reads", func() bool { return f.peers.readCount() >= 2 })
 	f.s.mu.Lock()
 	running := len(f.s.peers)
 	f.s.mu.Unlock()

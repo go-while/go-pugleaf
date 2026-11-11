@@ -18,6 +18,7 @@ import (
 	"github.com/go-while/go-pugleaf/internal/history"
 	"github.com/go-while/go-pugleaf/internal/models"
 	"github.com/go-while/go-pugleaf/internal/peerstats"
+	testkit "github.com/go-while/nntp-testkit"
 	"github.com/go-while/nntp-testkit/client"
 )
 
@@ -103,18 +104,6 @@ func (c *psCollector) closed() []psEvent {
 	return append([]psEvent(nil), c.closes...)
 }
 
-// psWaitFor polls cond until it holds or the hang guard expires.
-func psWaitFor(t *testing.T, what string, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(hDeadline)
-	for !cond() {
-		if time.Now().After(deadline) {
-			t.Fatalf("timeout waiting for %s", what)
-		}
-		time.Sleep(time.Millisecond)
-	}
-}
-
 // psStore is a PeerStore that also offers GetPeers, so the registry knows the disabled rows
 // (the Denied attribution of MatchAnyIP).
 type psStore struct {
@@ -160,33 +149,30 @@ func psServer(t *testing.T, proc ArticleProcessor, reg *PeerRegistry) (*hServer,
 	return hs, col
 }
 
-// psArticle is the wire form of one article (CRLF lines and the terminator).
-func psArticle(group, id string) string {
-	return "Path: peer.ps.invalid!not-for-mail\r\n" +
+// psArticleRaw is one article as the kit transfer commands take it: CRLF line ends, not
+// dot-stuffed, no terminator.
+func psArticleRaw(group, id string) []byte {
+	return []byte("Path: peer.ps.invalid!not-for-mail\r\n" +
 		"From: Tester <tester@test.invalid>\r\n" +
 		"Newsgroups: " + group + "\r\n" +
 		"Subject: ps\r\n" +
 		"Date: " + time.Now().UTC().Format(time.RFC1123Z) + "\r\n" +
 		"Message-ID: " + id + "\r\n" +
 		"\r\n" +
-		"a body line\r\n" +
-		".\r\n"
+		"a body line\r\n")
 }
 
-// psIHave sends IHAVE and, after a 335, the article; it returns the final status.
+// psArticle is psArticleRaw in the form a client sends after IHAVE or TAKETHIS: dot-stuffed
+// and with the terminating ".\r\n" (kit client.StuffBytes).
+func psArticle(group, id string) string {
+	return string(client.StuffBytes(psArticleRaw(group, id)))
+}
+
+// psIHave sends IHAVE and, after a 335, the article; it returns the final status (or the
+// first reply when the article was refused before the transfer).
 func psIHave(t *testing.T, c *client.Conn, group, id string) (int, string) {
 	t.Helper()
-	code, line := c.Cmd("IHAVE %s", id)
-	if code != 335 {
-		return code, line
-	}
-	if err := c.Send(psArticle(group, id)); err != nil {
-		t.Fatalf("send IHAVE article: %v", err)
-	}
-	code, line, err := c.ReadStatus()
-	if err != nil {
-		t.Fatalf("IHAVE reply: %v (%q)", err, line)
-	}
+	code, line, _ := c.Ihave(id, psArticleRaw(group, id))
 	return code, line
 }
 
@@ -227,7 +213,7 @@ func TestPeerStatsIHaveAccepted(t *testing.T) {
 
 	// The connection ends: exactly one Closed with the totals counted on it.
 	c.Close()
-	psWaitFor(t, "Closed after the connection ended", func() bool { return len(col.closed()) == 1 })
+	testkit.WaitFor(t, hDeadline, "Closed after the connection ended", func() bool { return len(col.closed()) == 1 })
 	cl := col.closed()[0]
 	if cl.Peer != ref || cl.Dir != peerstats.In {
 		t.Errorf("Closed = %+v, want the In event of %+v", cl, ref)
@@ -378,7 +364,7 @@ func TestPeerStatsDeniedDisabledRow(t *testing.T) {
 		t.Fatalf("Connected = %+v, want one event of the disabled row %+v", conns, ref)
 	}
 	c.Close()
-	psWaitFor(t, "Closed of the denied connection", func() bool { return len(col.closed()) == 1 })
+	testkit.WaitFor(t, hDeadline, "Closed of the denied connection", func() bool { return len(col.closed()) == 1 })
 	if cl := col.closed()[0]; cl.Peer != ref || cl.Conn.Denied != 3 {
 		t.Errorf("Closed = %+v, want the denied totals of %+v", cl, ref)
 	}

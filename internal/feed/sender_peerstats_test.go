@@ -16,6 +16,7 @@ import (
 
 	"github.com/go-while/go-pugleaf/internal/models"
 	"github.com/go-while/go-pugleaf/internal/peerstats"
+	testkit "github.com/go-while/nntp-testkit"
 	"github.com/go-while/nntp-testkit/fakeserver"
 )
 
@@ -134,7 +135,7 @@ func TestFeedPeerStatsOffered(t *testing.T) {
 	if err := f.s.Start(); err != nil {
 		t.Fatal(err)
 	}
-	sndWaitFor(t, "the queue to be drained", func() bool { return len(f.q.doneIDs()) == len(ids) })
+	testkit.WaitFor(t, sndWait, "the queue to be drained", func() bool { return len(f.q.doneIDs()) == len(ids) })
 	f.s.Stop()
 
 	want := peerstats.PeerRef{ID: row.ID, Name: row.Name}
@@ -212,8 +213,8 @@ func TestFeedPeerStatsDenied(t *testing.T) {
 	if err := f.s.Start(); err != nil {
 		t.Fatal(err)
 	}
-	sndWaitFor(t, "the article to be deferred", func() bool { return len(f.q.deferred()) > 0 })
-	sndWaitFor(t, "the refusal to be counted", func() bool {
+	testkit.WaitFor(t, sndWait, "the article to be deferred", func() bool { return len(f.q.deferred()) > 0 })
+	testkit.WaitFor(t, sndWait, "the refusal to be counted", func() bool {
 		got, _ := col.total(peerstats.Out)
 		return got.Denied > 0
 	})
@@ -267,7 +268,7 @@ func TestFeedPeerStatsTransferredBytes(t *testing.T) {
 	if err := f.s.Start(); err != nil {
 		t.Fatal(err)
 	}
-	sndWaitFor(t, "the batch to be acknowledged", func() bool { return len(f.q.doneIDs()) == 3 })
+	testkit.WaitFor(t, sndWait, "the batch to be acknowledged", func() bool { return len(f.q.doneIDs()) == 3 })
 	f.s.Stop()
 
 	got, _ := col.total(peerstats.Out)
@@ -304,8 +305,8 @@ func TestFeedPeerStatsMissing(t *testing.T) {
 	if err := f.s.Start(); err != nil {
 		t.Fatal(err)
 	}
-	sndWaitFor(t, "the missing article to be dropped", func() bool { return len(f.q.doneIDs()) == 1 })
-	sndWaitFor(t, "the missing article to be counted", func() bool {
+	testkit.WaitFor(t, sndWait, "the missing article to be dropped", func() bool { return len(f.q.doneIDs()) == 1 })
+	testkit.WaitFor(t, sndWait, "the missing article to be counted", func() bool {
 		got, _ := col.total(peerstats.Out)
 		return got.Missing > 0
 	})
@@ -337,7 +338,7 @@ func TestFeedPeerStatsNopDefault(t *testing.T) {
 	if err := f.s.Start(); err != nil {
 		t.Fatal(err)
 	}
-	sndWaitFor(t, "the article to be sent", func() bool { return len(f.q.doneIDs()) == 1 })
+	testkit.WaitFor(t, sndWait, "the article to be sent", func() bool { return len(f.q.doneIDs()) == 1 })
 }
 
 // TestFeedPeerStatsDeniedError: only a 480 or 502 answer marks an error as the peer refusing
