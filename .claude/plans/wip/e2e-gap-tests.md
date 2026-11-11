@@ -256,3 +256,13 @@ once at peer B, never at A, queue empty afterwards, peer stats show accepted 1 i
   an age refusal is NOT remembered (common.NotRemembered) so raising the limit brings the article back (the future
   limit still remembers); RelayHeaders relays a bare CR verbatim (only LF/NUL make a block unrelayable); one honest
   size (IntakeWireSize, un-stuffed, before feedPath / injectProtoArticle) for server, peer and group limits.
+- Inline (2026-11-11, ca8fd36): a date-in-the-future refusal is not remembered either (go-while, after checking
+  INN: innd remembers both date refusals but keeps them only /remember/ days from the article's own date).
+- Wave 3 (2026-11-11): slice helper-cleanup, worktree-agent-ab7b359c3fd539883 (fde4a96, 208024a, 8dd9d1a, fc70b79,
+  e413d04, 06ce771, 9630f2f, 8a44401) → merge b3333b4; 32 test files, -1504/+1022; review MERGE AFTER FIXES, fixed;
+  top-level test names identical (1401), t.Run 148 → 148; full list green; scripts/test-nntp-server.sh on scratch data
+  pass=38 fail=0 (N52 now expects Xref:full; conformance runs in its own group and a run that cannot start fails N50).
+  Kept local (not in kit v0.12.0): adfCronWait, adfTorSilentProxyConns, e2eWaitFor, rfcUpgradeOver/stlsUpgrade,
+  rfcHasLine, thin POST/IHAVE adapters, 381-then-281 login helpers, runIsolated, knownBug, RecordingConn,
+  ParseGroup211/ExpectID, fake SOCKS5. Five missing kit features sent to nntp-testkit-1 (next-batch-ideas.md),
+  incl. check-have/ihave-have re-offer until 438/435 so go-pugleaf can require them.
