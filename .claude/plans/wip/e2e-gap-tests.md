@@ -188,6 +188,22 @@ parity (DEL) with INN: `strict-del-passes` is deliberate.
   (d) the D3 pins in `nntp-intake-wire_test.go` (`// D3`: IHAVE `<x@[a<b]>` → 501,
   CHECK → 438) become 335/238.
 
+  Proposed from the fetcher-faults review (needs go-while's OK): (e) the fetch path (`HeaderBlockFetch`) uses the
+  relay rules too — accept a bare CR in a fetched header (stored verbatim, counted), reject NUL in header AND body
+  (today a bare CR drops the whole fetched article, a body NUL is not checked); pins marked `// W2-fetch`.
+
+### Follow-ups found in wave 1 (separate queued plan, not this plan)
+- FU-progress-cut: an ARTICLE reply cut by the provider is asked once, then `commitThenProgress` moves the
+  progress past it (proc_DLArt.go:403-425, :520-522) → permanent hole on a transient fault. Fix: progress = highest
+  number below which every number was stored / dup / 430 / deliberately refused (plumb `BatchItem.ArticleNum`), or
+  at least one retry on a transport error. Pin: TestDLArtUpArticleCutOff (`// FU-progress`).
+- FU-progress-empty: a wholly-gone range (provider low water ahead of what it serves) → XHDR 423 → error →
+  progress unchanged → same range forever; and a complete empty listing never moves the progress
+  (`gotQueued > 0 || dups > 0`). Fix: a complete XHDR listing without error moves the progress to `end`.
+  Pin: TestDLArtUpLowWater/emptied-group (`// FU-progress`).
+- Date brute-force fallback accepts out-of-range fields ("32 May", "25:01:32"); INN rejects them.
+- Client TLS: no per-provider extra root CA (`TLSRootCAFile`); never add InsecureSkipVerify.
+
 ### Wave 3 (after wave 1+2 merged; touches many test files, so alone)
 - slice `helper-cleanup`: survey section 4 rows — `e2eClient`, `sessDialRaw`, `hNewClient` → kit client;
   `xrefEnv.start/stop` → `proc.StartTCP`; `flPqFake` ×2 → fakeserver Script; `adfTorSilentProxy` → RawStall;
