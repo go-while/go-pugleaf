@@ -262,13 +262,15 @@ func checkIntakeDates(dateStr, injectionDate string, now time.Time, maxAge, maxF
 			measured = it
 		}
 	}
+	// Neither date refusal is remembered: both margins are settings and the clock moves, so an
+	// article refused for its date is judged again on the next offer (after the admin changed
+	// the limit, an archive transfer of old articles, or once a future date has arrived). INN
+	// remembers both, but keeps the entry only /remember/ days from the article's own date;
+	// go-pugleaf would keep it HistoryRejectDays from the refusal (go-while, 2026-11-11).
 	if maxFuture > 0 && measured.After(now.Add(maxFuture)) {
-		return time.Time{}, fmt.Errorf("%w: date in the future", common.ErrIntakeRejected)
+		return time.Time{}, common.NotRemembered(fmt.Errorf("%w: date in the future", common.ErrIntakeRejected))
 	}
 	if maxAge > 0 && measured.Before(now.Add(-maxAge)) {
-		// Not remembered (review item 2): the cutoff is a setting, so an article refused for
-		// its age must be judged again when the admin raises or disables the limit, or when
-		// an archive transfer of old articles starts.
 		return time.Time{}, common.NotRemembered(fmt.Errorf("%w: date too old", common.ErrIntakeRejected))
 	}
 	return t, nil

@@ -170,7 +170,7 @@
                             <strong>⏳ Peer article age limit:</strong>
                             <code>{{if .PeerDateMaxAgeHours}}{{.PeerDateMaxAgeHours}} hours{{else}}off{{end}}</code>
                             <br>
-                            <span class="text-muted">An article a peer feeds us (IHAVE/TAKETHIS) whose Date (or Injection-Date) is older is rejected, like INN's artcutoff (default 240 = 10 days, 0 = no cutoff, at most {{.PeerDateHoursLimit}} hours; the NNTP server picks a change up within 5 minutes). A node that receives archive transfers should set 0; an age refusal is never remembered, so raising the limit brings those articles back.</span>
+                            <span class="text-muted">An article a peer feeds us (IHAVE/TAKETHIS) whose Date (or Injection-Date) is older is rejected, like INN's artcutoff (default 240 = 10 days, 0 = no cutoff, at most {{.PeerDateHoursLimit}} hours; the NNTP server picks a change up within 5 minutes). A node that receives archive transfers should set 0; a date refusal (too old or in the future) is never remembered, so raising the limit brings those articles back.</span>
                         </td>
                         <td>
                             <form action="/admin/settings" method="post" class="d-flex gap-1">

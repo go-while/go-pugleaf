@@ -553,6 +553,22 @@ func TestIpolStaleRejectNotRemembered(t *testing.T) {
 	}
 	rejTestNotRemembered(t, proc.History, stale)
 
+	// a date in the future is not remembered either (go-while, 2026-11-11)
+	future := ipolMsgID("future")
+	futureHead := make([]string, 0, 6)
+	for _, l := range ipolHead(future) {
+		if strings.HasPrefix(l, "Date:") {
+			l = "Date: " + common.FormatNewsDate(time.Now().Add(72*time.Hour))
+		}
+		futureHead = append(futureHead, l)
+	}
+	code, err = ipolFeed(t, proc, future, futureHead, []string{"body"}, database.PeerHeaderCheckRelay, 0)
+	ipolWantRejected(t, "article dated 72 h ahead", code, err, "date in the future")
+	if !errors.Is(err, common.ErrIntakeNotRemembered) {
+		t.Errorf("the future refusal does not wrap ErrIntakeNotRemembered: %v", err)
+	}
+	rejTestNotRemembered(t, proc.History, future)
+
 	// a refusal of the article itself stays remembered
 	ctl := ipolMsgID("control")
 	ctlHead := append(ipolHead(ctl), "Control: cancel <victim@test.invalid>")
