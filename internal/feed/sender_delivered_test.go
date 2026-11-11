@@ -4,6 +4,8 @@ import (
 	"slices"
 	"sync"
 	"testing"
+
+	testkit "github.com/go-while/nntp-testkit"
 )
 
 // TestSenderDelivered: Config.Delivered gets the ids a peer took (239) or already had (438),
@@ -57,7 +59,7 @@ func TestSenderDelivered(t *testing.T) {
 	if err := f.s.Start(); err != nil {
 		t.Fatal(err)
 	}
-	sndWaitFor(t, "four items done", func() bool { return len(f.q.doneIDs()) == 4 })
+	testkit.WaitFor(t, sndWait, "four items done", func() bool { return len(f.q.doneIDs()) == 4 })
 	f.s.Stop()
 
 	mu.Lock()
