@@ -122,7 +122,9 @@ func (proc *Processor) ProcessArticle(article *models.Article, legacyNewsgroup s
 		msgIdItem.Mux.Unlock()
 
 		// D2: a NUL octet in the body refuses a fetched or imported article too
-		// (decision 2026-11-11: the fetch path follows the relay rules)
+		// (decision 2026-11-11: the fetch path follows the relay rules). rejectArticle
+		// remembers it on the bulk path, like the header-block reject below, so a re-import
+		// or a peer offering the same id does not read and refuse it again.
 		if intakeBodyHasNUL(article) {
 			log.Printf("[INTAKE] article '%s' (bulk) rejected: article contains NUL", article.MessageID)
 			proc.setCaseDupes(msgIdItem, bulkmode)
@@ -199,13 +201,14 @@ func (proc *Processor) ProcessArticle(article *models.Article, legacyNewsgroup s
 			proc.setCaseDupes(msgIdItem, bulkmode)
 			return history.CaseError, err
 		}
-		logHeaderDefects(article.MessageID, defects)
 		// D2: a NUL octet in the body refuses the article (POST 441, IHAVE 437, TAKETHIS 439)
 		if intakeBodyHasNUL(article) {
 			log.Printf("[INTAKE] article %s rejected: article contains NUL", article.MessageID)
 			proc.setCaseDupes(msgIdItem, bulkmode)
 			return history.CaseError, rejected("article contains NUL")
 		}
+		// only now is the article accepted far enough for "accepted but includes ..."
+		logHeaderDefects(article.MessageID, defects)
 		names, err := common.ParseNewsgroups(common.HeaderValue(lines, "Newsgroups"))
 		if err != nil {
 			log.Printf("[INTAKE] article %s rejected: %v", article.MessageID, err)
@@ -233,8 +236,10 @@ func (proc *Processor) ProcessArticle(article *models.Article, legacyNewsgroup s
 		// The size the group's max_art_size is compared against: the article as it arrived,
 		// carried in from the read (IntakeWireSize), so the group limit measures the same
 		// octets as the server limit and the peer's in_max_size and counts neither our Path
-		// identity nor the headers injectProtoArticle added to a POST. Only a caller that
-		// carries no size (the web post form) falls back to the stored block.
+		// identity nor the headers injectProtoArticle added to a POST. The NNTP server sets
+		// it for POST, IHAVE and TAKETHIS (setIntakePolicy); a caller that carries no size
+		// (tests, or a future non-NNTP producer on this path) falls back to the stored block.
+		// Web posts never reach this branch: the post queue files them through bulkmode.
 		wireSize := article.IntakeWireSize
 		if wireSize <= 0 {
 			body := article.NNTPbody

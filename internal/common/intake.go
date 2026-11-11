@@ -22,6 +22,30 @@ var ErrIntakeRejected = errors.New("article rejected")
 // sender may retry the article later. Producers wrap it like ErrIntakeRejected.
 var ErrIntakeTemporary = errors.New("temporary intake failure")
 
+// ErrIntakeNotRemembered marks a permanent rejection of this offer that must NOT be
+// remembered in the history index (INN remembertrash): the refusal depends on a setting, not
+// on the article, so the same article must be judged again when it is offered later. Today
+// only the peer age cutoff (PeerArticleMaxAgeHours) uses it: raising or disabling the setting
+// must bring the refused articles back. The reply is the same as for any other rejection.
+var ErrIntakeNotRemembered = errors.New("rejection not remembered")
+
+// NotRemembered marks err (a rejection wrapping ErrIntakeRejected) as one the history index
+// must not remember. The message is unchanged, so the NNTP reply keeps its reason, and
+// errors.Is reports both ErrIntakeRejected and ErrIntakeNotRemembered.
+func NotRemembered(err error) error {
+	if err == nil {
+		return nil
+	}
+	return notRememberedError{err: err}
+}
+
+// notRememberedError is the wrapper NotRemembered returns.
+type notRememberedError struct{ err error }
+
+func (e notRememberedError) Error() string        { return e.err.Error() }
+func (e notRememberedError) Unwrap() error        { return e.err }
+func (e notRememberedError) Is(target error) bool { return target == ErrIntakeNotRemembered }
+
 // maximum lengths used by the intake helpers
 const (
 	intakeMaxMessageIDLen = 250 // RFC 5536 §3.1.3
@@ -256,12 +280,21 @@ func CheckHeaderBlock(lines []string, mode HeaderBlockMode) ([]string, error) {
 //  4. a second copy (case-insensitive name) of Date, From, Message-ID, Newsgroups, Path,
 //     Subject rejects in every mode; strict and relay mode also reject a second References,
 //     Injection-Date, Injection-Info, Xref, Control, Supersedes or Approved.
-//  5. strict only: a line longer than 998 octets rejects.
+//  5. strict only: a line longer than 998 octets rejects, except the Path field line and its
+//     continuation lines. The server prepends its own Path identity (feedPath on the feed
+//     path, injectProtoArticle on POST) before intake sees the block, so that length is not
+//     the sender's doing.
 //
+// A mode value that is none of the three constants is treated as strict (the safe default).
 // Errors wrap ErrIntakeRejected with the reason "invalid header block". The input slice is
 // returned unchanged when nothing was dropped, otherwise a new slice; the input is never modified.
 func CheckHeaderBlockDefects(lines []string, mode HeaderBlockMode) ([]string, HeaderDefects, error) {
 	var defects HeaderDefects
+	switch mode {
+	case HeaderBlockFetch, HeaderBlockRelay:
+	default:
+		mode = HeaderBlockStrict // an unknown mode value is strict
+	}
 	strict := mode == HeaderBlockStrict
 	dropsBadLines := mode == HeaderBlockFetch
 	unique := intakeStrictUniqueHeaders
@@ -289,6 +322,7 @@ func CheckHeaderBlockDefects(lines []string, mode HeaderBlockMode) ([]string, He
 	}
 	seen := make(map[string]struct{})
 	havePrevField := false
+	inPathField := false // the current field is Path: rule 5 does not apply to it
 	for i, line := range lines {
 		// rule 1
 		cr, lf := 0, 0
@@ -313,12 +347,12 @@ func CheckHeaderBlockDefects(lines []string, mode HeaderBlockMode) ([]string, He
 				}
 			}
 		}
-		// rule 5
-		if strict && len(line) > intakeMaxHeaderLine {
-			return reject()
-		}
 		// rule 2
 		if line != "" && (line[0] == ' ' || line[0] == '\t') {
+			// rule 5 (a continuation of the Path field is exempt, see below)
+			if strict && !inPathField && len(line) > intakeMaxHeaderLine {
+				return reject()
+			}
 			if !havePrevField || strings.Trim(line, " \t") == "" {
 				if !dropsBadLines {
 					return reject()
@@ -332,15 +366,26 @@ func CheckHeaderBlockDefects(lines []string, mode HeaderBlockMode) ([]string, He
 		// rule 3
 		colon := strings.IndexByte(line, ':')
 		if colon <= 0 || !validFieldName(line[:colon]) || !validColonSpacing(line, colon, mode) {
+			// rule 5 for a line that is no field line at all
+			if strict && len(line) > intakeMaxHeaderLine {
+				return reject()
+			}
 			if !dropsBadLines {
 				return reject()
 			}
 			drop(i)
 			havePrevField = false
+			inPathField = false
 			continue
 		}
 		// rule 4
 		lname := strings.ToLower(line[:colon])
+		// rule 5: the Path line carries the identity this server prepended, so its length
+		// is never the sender's doing (plan e2e-gap-tests, review item 8)
+		inPathField = lname == "path"
+		if strict && !inPathField && len(line) > intakeMaxHeaderLine {
+			return reject()
+		}
 		if _, ok := unique[lname]; ok {
 			if _, dup := seen[lname]; dup {
 				return reject()
@@ -360,15 +405,17 @@ func CheckHeaderBlockDefects(lines []string, mode HeaderBlockMode) ([]string, He
 // the white space its mode requires (decision D4): strict needs exactly ": " and a value
 // that is not only white space (RFC 5536 §2.2, nnrpd IsValidHeaderField), relay needs SP or
 // HTAB and accepts an empty value (innd rejects "X:value" and "X:" as "No colon-space in
-// header"), fetch requires nothing (archives carry both forms).
+// header"), fetch requires nothing (archives carry both forms). An unknown mode value is
+// treated as strict.
 func validColonSpacing(line string, colon int, mode HeaderBlockMode) bool {
 	switch mode {
-	case HeaderBlockStrict:
-		return colon+1 < len(line) && line[colon+1] == ' ' && strings.Trim(line[colon+1:], " \t") != ""
 	case HeaderBlockRelay:
 		return colon+1 < len(line) && (line[colon+1] == ' ' || line[colon+1] == '\t')
+	case HeaderBlockFetch:
+		return true
+	default: // strict
+		return colon+1 < len(line) && line[colon+1] == ' ' && strings.Trim(line[colon+1:], " \t") != ""
 	}
-	return true
 }
 
 // validFieldName reports whether every octet of name is RFC 5322 ftext (%x21-39 / %x3B-7E).

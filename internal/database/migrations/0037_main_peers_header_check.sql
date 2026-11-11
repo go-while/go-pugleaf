@@ -8,7 +8,7 @@
 -- the field name and a non-empty value.
 ALTER TABLE peers ADD COLUMN header_check TEXT NOT NULL DEFAULT 'relay';
 
--- The Date limits of peer intake (IHAVE/TAKETHIS), in hours, like INN's artcutoff and
--- DATE_FUZZ; 0 = no limit. Editable on the admin settings page.
-INSERT OR IGNORE INTO config (key, value) VALUES ('PeerArticleMaxAgeHours', '72');
+-- The Date limits of peer intake (IHAVE/TAKETHIS), in hours, like INN's artcutoff (default
+-- 10 days) and DATE_FUZZ; 0 = no limit. Editable on the admin settings page.
+INSERT OR IGNORE INTO config (key, value) VALUES ('PeerArticleMaxAgeHours', '240');
 INSERT OR IGNORE INTO config (key, value) VALUES ('PeerArticleMaxFutureHours', '24');

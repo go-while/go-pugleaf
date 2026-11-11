@@ -472,10 +472,12 @@ func TestIpolPeerDateLimits(t *testing.T) {
 		offset      time.Duration
 		reason      string // "" = accepted
 	}{
-		{name: "old-beyond-default", offset: -100 * time.Hour, reason: "date too old"},
-		{name: "old-inside-default", offset: -70 * time.Hour},
-		{name: "old-cutoff-off", age: "0", offset: -100 * time.Hour},
-		{name: "old-cutoff-raised", age: "240", offset: -100 * time.Hour},
+		// the default past cutoff is 240 h (INN's artcutoff default of 10 days)
+		{name: "old-beyond-default", offset: -300 * time.Hour, reason: "date too old"},
+		{name: "old-inside-default", offset: -200 * time.Hour},
+		{name: "old-cutoff-off", age: "0", offset: -300 * time.Hour},
+		{name: "old-cutoff-raised", age: "480", offset: -300 * time.Hour},
+		{name: "old-cutoff-lowered", age: "72", offset: -100 * time.Hour, reason: "date too old"},
 		{name: "future-beyond-default", offset: 30 * time.Hour, reason: "date in the future"},
 		{name: "future-limit-off", future: "0", offset: 30 * time.Hour},
 		{name: "future-limit-lowered", future: "1", offset: 2 * time.Hour, reason: "date in the future"},
@@ -518,27 +520,105 @@ func TestIpolPeerDateLimits(t *testing.T) {
 		var head []string
 		for _, l := range ipolHead(msgid) {
 			if strings.HasPrefix(l, "Date:") {
-				l = "Date: " + common.FormatNewsDate(time.Now().Add(-200*time.Hour))
+				l = "Date: " + common.FormatNewsDate(time.Now().Add(-400*time.Hour))
 			}
 			head = append(head, l)
 		}
 		code, err := ipolPost(t, proc, msgid, head, []string{"body"}, "")
-		ipolWantAccepted(t, "POST with a 200 h old Date", code, err)
+		ipolWantAccepted(t, "POST with a 400 h old Date", code, err)
 	})
 }
 
-// TestIpolPeerDateDefaults: the defaults of the two settings are the seeded 72 h / 24 h.
+// TestIpolStaleRejectNotRemembered (review item 2): an article refused for its age must not
+// be remembered in the history index, because the cutoff is a setting: after the admin
+// disables PeerArticleMaxAgeHours (or an archive transfer starts) the same article is judged
+// again and accepted. A refusal that depends on the article itself (a control message) is
+// still remembered.
+func TestIpolStaleRejectNotRemembered(t *testing.T) {
+	proc := ipolSetup(t, 0)
+	proc.History = wiringTestHistory(t)
+
+	stale := ipolMsgID("stale")
+	staleHead := make([]string, 0, 6)
+	for _, l := range ipolHead(stale) {
+		if strings.HasPrefix(l, "Date:") {
+			l = "Date: " + common.FormatNewsDate(time.Now().Add(-300*time.Hour))
+		}
+		staleHead = append(staleHead, l)
+	}
+	code, err := ipolFeed(t, proc, stale, staleHead, []string{"body"}, database.PeerHeaderCheckRelay, 0)
+	ipolWantRejected(t, "300 h old article", code, err, "date too old")
+	if !errors.Is(err, common.ErrIntakeNotRemembered) {
+		t.Errorf("the age refusal does not wrap ErrIntakeNotRemembered: %v", err)
+	}
+	rejTestNotRemembered(t, proc.History, stale)
+
+	// a refusal of the article itself stays remembered
+	ctl := ipolMsgID("control")
+	ctlHead := append(ipolHead(ctl), "Control: cancel <victim@test.invalid>")
+	code, err = ipolFeed(t, proc, ctl, ctlHead, []string{"body"}, database.PeerHeaderCheckRelay, 0)
+	ipolWantRejected(t, "control message", code, err, "control messages not accepted")
+	if errors.Is(err, common.ErrIntakeNotRemembered) {
+		t.Errorf("the control refusal wraps ErrIntakeNotRemembered: %v", err)
+	}
+	rejTestWaitRemembered(t, proc.History, ctl)
+
+	// The admin turns the cutoff off and the peer offers the same article again. Every
+	// refusal also caches "duplicate" in the in-memory msgid cache for CachedEntryTTL
+	// (15 s), which a real re-offer simply waits out; clearing that one entry stands in for
+	// the wait (no wall-clock assertion).
+	if err := proc.DB.SetConfigValue(config.CFG_KEY_PEERDATEMAXAGE, "0"); err != nil {
+		t.Fatalf("SetConfigValue(%s): %v", config.CFG_KEY_PEERDATEMAXAGE, err)
+	}
+	wiringTestSetState(stale, 0) // 0: no cached answer, as a fresh item has
+	code, err = ipolFeed(t, proc, stale, staleHead, []string{"body"}, database.PeerHeaderCheckRelay, 0)
+	ipolWantAccepted(t, "the same article after the cutoff was disabled", code, err)
+}
+
+// TestIpolStrictPathNotCountedAgainst998 (review item 8): the Path identity the server
+// prepends before the processor sees the block (~55 octets) must not push the Path line over
+// the 998-octet limit of a strict peer, while another header line over 998 still rejects.
+func TestIpolStrictPathNotCountedAgainst998(t *testing.T) {
+	proc := ipolSetup(t, 0)
+	for _, tc := range []struct {
+		name, line, reason string
+	}{
+		{name: "long-path", line: "Path: news.local.invalid!" + strings.Repeat("a", 1000) + "!not-for-mail"},
+		{name: "long-other-header", line: "X-Long: " + strings.Repeat("a", 1000), reason: "invalid header block"},
+	} {
+		msgid := ipolMsgID(tc.name)
+		var head []string
+		for _, l := range ipolHead(msgid) {
+			if strings.HasPrefix(tc.line, "Path:") && strings.HasPrefix(l, "Path:") {
+				l = tc.line
+			}
+			head = append(head, l)
+		}
+		if !strings.HasPrefix(tc.line, "Path:") {
+			head = append(head, tc.line)
+		}
+		code, err := ipolFeed(t, proc, msgid, head, []string{"body"}, database.PeerHeaderCheckStrict, 0)
+		if tc.reason == "" {
+			ipolWantAccepted(t, tc.name, code, err)
+		} else {
+			ipolWantRejected(t, tc.name, code, err, tc.reason)
+		}
+	}
+}
+
+// TestIpolPeerDateDefaults: the defaults of the two settings are the seeded 240 h (INN's
+// artcutoff default of 10 days) and 24 h.
 func TestIpolPeerDateDefaults(t *testing.T) {
 	proc := ipolSetup(t, 0)
-	if got := proc.DB.PeerDateMaxAge(); got != 72*time.Hour {
-		t.Errorf("PeerDateMaxAge() = %v, want 72h", got)
+	if got := proc.DB.PeerDateMaxAge(); got != 240*time.Hour {
+		t.Errorf("PeerDateMaxAge() = %v, want 240h", got)
 	}
 	if got := proc.DB.PeerDateMaxFuture(); got != 24*time.Hour {
 		t.Errorf("PeerDateMaxFuture() = %v, want 24h", got)
 	}
 	maxAge, maxFuture := intakeDateLimits(proc.DB, false)
-	if maxAge != 72*time.Hour || maxFuture != 24*time.Hour {
-		t.Errorf("intakeDateLimits(peer) = %v, %v; want 72h, 24h", maxAge, maxFuture)
+	if maxAge != 240*time.Hour || maxFuture != 24*time.Hour {
+		t.Errorf("intakeDateLimits(peer) = %v, %v; want 240h, 24h", maxAge, maxFuture)
 	}
 	// POST: no past cutoff in the processor, the RFC 5537 future margin
 	if maxAge, maxFuture = intakeDateLimits(proc.DB, true); maxAge != 0 || maxFuture != MaxFutureDate {

@@ -153,7 +153,8 @@ func TestPeersHeaderCheck(t *testing.T) {
 	}
 }
 
-// TestPeersDateLimits: the two peer Date limits (migration 0037) default to 72 h / 24 h,
+// TestPeersDateLimits: the two peer Date limits (migration 0037) default to 240 h (INN's
+// artcutoff default of 10 days) and 24 h,
 // follow the config value and read 0 as "limit off"; invalid and out-of-range values read as
 // the default.
 func TestPeersDateLimits(t *testing.T) {
@@ -163,7 +164,7 @@ func TestPeersDateLimits(t *testing.T) {
 		def  time.Duration
 		read func() time.Duration
 	}{
-		{config.CFG_KEY_PEERDATEMAXAGE, 72 * time.Hour, db.PeerDateMaxAge},
+		{config.CFG_KEY_PEERDATEMAXAGE, 240 * time.Hour, db.PeerDateMaxAge},
 		{config.CFG_KEY_PEERDATEMAXFUTURE, 24 * time.Hour, db.PeerDateMaxFuture},
 	} {
 		old, err := db.GetConfigValue(c.key)
@@ -196,8 +197,8 @@ func TestPeersDateLimits(t *testing.T) {
 	}
 	// a nil database reads the defaults (tests without a main DB)
 	var none *Database
-	if got := none.PeerDateMaxAge(); got != 72*time.Hour {
-		t.Errorf("(*Database)(nil).PeerDateMaxAge() = %v, want 72h", got)
+	if got := none.PeerDateMaxAge(); got != 240*time.Hour {
+		t.Errorf("(*Database)(nil).PeerDateMaxAge() = %v, want 240h", got)
 	}
 	if got := none.PeerDateMaxFuture(); got != 24*time.Hour {
 		t.Errorf("(*Database)(nil).PeerDateMaxFuture() = %v, want 24h", got)

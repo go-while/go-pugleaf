@@ -266,7 +266,10 @@ func checkIntakeDates(dateStr, injectionDate string, now time.Time, maxAge, maxF
 		return time.Time{}, fmt.Errorf("%w: date in the future", common.ErrIntakeRejected)
 	}
 	if maxAge > 0 && measured.Before(now.Add(-maxAge)) {
-		return time.Time{}, fmt.Errorf("%w: date too old", common.ErrIntakeRejected)
+		// Not remembered (review item 2): the cutoff is a setting, so an article refused for
+		// its age must be judged again when the admin raises or disables the limit, or when
+		// an archive transfer of old articles starts.
+		return time.Time{}, common.NotRemembered(fmt.Errorf("%w: date too old", common.ErrIntakeRejected))
 	}
 	return t, nil
 }

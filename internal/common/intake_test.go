@@ -338,8 +338,27 @@ func TestIntakeCommonCheckHeaderBlock(t *testing.T) {
 		// for a relaying agent")
 		{name: "relay-999", mode: HeaderBlockRelay, in: with("X-Long: " + strings.Repeat("a", 991)), wantSame: true},
 		{name: "relay-very-long", mode: HeaderBlockRelay, in: with("X-Long: " + strings.Repeat("a", 20000)), wantSame: true},
-		// an unknown mode value never drops a line: a malformed line rejects (as in relay)
-		{name: "unknown-mode-rejects", mode: HeaderBlockMode(42), in: with("no colon"), wantErr: true},
+		// rule 5: the Path line carries the identity the server prepended, so it is exempt
+		// from the 998-octet limit (review item 8), its continuation lines too
+		{name: "strict-path-1200", mode: HeaderBlockStrict,
+			in: []string{"Path: " + strings.Repeat("a", 1200), "From: x@example.org", "Newsgroups: a.b",
+				"Subject: s", "Date: d", "Message-ID: <t@example.org>"}, wantSame: true},
+		{name: "strict-path-folded-1200", mode: HeaderBlockStrict,
+			in: []string{"Path: short!path", " " + strings.Repeat("a", 1200), "From: x@example.org",
+				"Newsgroups: a.b", "Subject: s", "Date: d", "Message-ID: <t@example.org>"}, wantSame: true},
+		{name: "strict-other-1200", mode: HeaderBlockStrict,
+			in: with("X-Long: " + strings.Repeat("a", 1200)), wantErr: true},
+		{name: "strict-fold-after-path-1200", mode: HeaderBlockStrict,
+			in: with("X-Other: v", " "+strings.Repeat("a", 1200)), wantErr: true},
+		{name: "relay-path-1200", mode: HeaderBlockRelay,
+			in: with("X-Long: " + strings.Repeat("a", 1200)), wantSame: true},
+		// an unknown mode value is strict (the safe default)
+		{name: "unknown-mode-colonless", mode: HeaderBlockMode(42), in: with("no colon"), wantErr: true},
+		{name: "unknown-mode-999", mode: HeaderBlockMode(42),
+			in: with("X-Long: " + strings.Repeat("a", 991)), wantErr: true},
+		{name: "unknown-mode-cr", mode: HeaderBlockMode(42), in: with("X-A: a\rb"), wantErr: true},
+		{name: "unknown-mode-no-colon-space", mode: HeaderBlockMode(42), in: with("X-A:value"), wantErr: true},
+		{name: "unknown-mode-valid", mode: HeaderBlockMode(42), in: base, wantSame: true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

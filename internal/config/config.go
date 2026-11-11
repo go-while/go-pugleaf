@@ -95,8 +95,9 @@ const CFG_KEY_PEERDATEMAXAGE string = "PeerArticleMaxAgeHours"
 const CFG_KEY_PEERDATEMAXFUTURE string = "PeerArticleMaxFutureHours"
 
 // Defaults of the two peer Date limits (hours), used when the key is missing or invalid.
+// The past cutoff is INN's artcutoff default of 10 days (go-while, 2026-11-11).
 const (
-	DefaultPeerDateMaxAgeHours    = 72
+	DefaultPeerDateMaxAgeHours    = 240
 	DefaultPeerDateMaxFutureHours = 24
 )
 
