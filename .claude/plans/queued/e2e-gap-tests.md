@@ -39,6 +39,17 @@ of the kit in go.mod.
 
 ## Decisions (go-while) — needed before wave 2
 
+Answers 2026-11-11: **D2 reject everywhere** and **D3 allow `<` only inside `[..]`** are decided.
+D1 and D4: go-while asked to mirror INN after checking with inn-1 (room `inn-`). INN source reading
+(innd/art.c ARTparseheader/ARTcheckheader, nnrpd/post.c, lib/headers.c IsValidHeaderField):
+- innd (IHAVE/TAKETHIS): no header line length limit (artparse-t.c: "Not an error for a relaying agent");
+  bare CR / bare LF accepted and only logged ("Article accepted but includes CR without LF(n)", art.c:2656);
+  NUL in header or body → 437; colon must be followed by SP or HTAB (`X:` + CRLF → 437 "No colon-space",
+  `X: ` empty passes the parse); whitespace inside a non-system field name → 437 "Space before colon".
+- nnrpd (POST): header line > 998 → "Header line too long"; `IsValidHeaderField` needs exactly `": "` and a
+  valid non-empty body.
+So INN = strict POST, relay-lax peers, but colon + whitespace required for peers too. Pending inn-1's confirm.
+
 | # | Question | Today | Recommendation |
 |---|---|---|---|
 | D1 | Peer intake (IHAVE/TAKETHIS) strictness | `validateIntakeHeaders` uses `HeaderBlockStrict` for POST and peers (`internal/processor/intake.go:177`): header line > 998 octets or a bare CR in a header → 437, and the reject is remembered, so peers lose those articles for good. INN accepts both as a relay. | Peers get a relay mode: accept > 998 and bare CR in header values (stored verbatim), keep NUL/LF and duplicate core headers as rejects. POST stays strict. |
