@@ -20,18 +20,7 @@ import (
 
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
-	"github.com/go-while/nntp-testkit/client"
 )
-
-// grvExpect runs one command and fails unless it answers want.
-func grvExpect(t *testing.T, c *client.Conn, want int, format string, args ...interface{}) string {
-	t.Helper()
-	code, line := c.Cmd(format, args...)
-	if code != want {
-		t.Fatalf("%s: got %q, want %d", fmt.Sprintf(format, args...), line, want)
-	}
-	return line
-}
 
 // grvDeleteGroup removes the newsgroups row of group (its group database file stays on
 // disk, as after a web admin delete that only drops the row).
@@ -71,20 +60,20 @@ func TestGrvMsgIDCurrentGroupDeleted(t *testing.T) {
 	msgid := hMessageID(g, 2)
 	c := hs.dial(t)
 
-	grvExpect(t, c, 211, "GROUP %s", g)
-	if line := grvExpect(t, c, 223, "STAT %s", msgid); line != "223 2 "+msgid+" Article exists" {
+	c.ExpectCmd(211, "GROUP %s", g)
+	if line := c.ExpectCmd(223, "STAT %s", msgid); line != "223 2 "+msgid+" Article exists" {
 		t.Fatalf("STAT %s in the selected group: %q", msgid, line)
 	}
 
 	grvDeleteGroup(t, g)
-	grvExpect(t, c, 430, "STAT %s", msgid)
-	grvExpect(t, c, 430, "HEAD %s", msgid)
-	grvExpect(t, c, 430, "OVER %s", msgid)
-	grvExpect(t, c, 430, "HDR Subject %s", msgid)
-	grvExpect(t, c, 430, "XHDR Subject %s", msgid)
+	c.ExpectCmd(430, "STAT %s", msgid)
+	c.ExpectCmd(430, "HEAD %s", msgid)
+	c.ExpectCmd(430, "OVER %s", msgid)
+	c.ExpectCmd(430, "HDR Subject %s", msgid)
+	c.ExpectCmd(430, "XHDR Subject %s", msgid)
 	// the selection is gone, as if no group had been selected
-	grvExpect(t, c, 412, "STAT 2")
-	grvExpect(t, c, 411, "GROUP %s", g)
+	c.ExpectCmd(412, "STAT 2")
+	c.ExpectCmd(411, "GROUP %s", g)
 }
 
 // TestGrvMsgIDCurrentGroupDeactivated: the same for a group an admin deactivated; after it
@@ -96,21 +85,21 @@ func TestGrvMsgIDCurrentGroupDeactivated(t *testing.T) {
 	msgid := hMessageID(g, 1)
 	c := hs.dial(t)
 
-	grvExpect(t, c, 211, "GROUP %s", g)
-	grvExpect(t, c, 223, "STAT %s", msgid)
+	c.ExpectCmd(211, "GROUP %s", g)
+	c.ExpectCmd(223, "STAT %s", msgid)
 
 	if err := db.UpdateNewsgroupActive(g, false); err != nil {
 		t.Fatalf("UpdateNewsgroupActive(%s, false): %v", g, err)
 	}
-	grvExpect(t, c, 430, "STAT %s", msgid)
-	grvExpect(t, c, 430, "XHDR Subject %s", msgid)
-	grvExpect(t, c, 412, "XOVER 1-2")
+	c.ExpectCmd(430, "STAT %s", msgid)
+	c.ExpectCmd(430, "XHDR Subject %s", msgid)
+	c.ExpectCmd(412, "XOVER 1-2")
 
 	if err := db.UpdateNewsgroupActive(g, true); err != nil {
 		t.Fatalf("UpdateNewsgroupActive(%s, true): %v", g, err)
 	}
-	grvExpect(t, c, 211, "GROUP %s", g)
-	grvExpect(t, c, 223, "STAT %s", msgid)
+	c.ExpectCmd(211, "GROUP %s", g)
+	c.ExpectCmd(223, "STAT %s", msgid)
 }
 
 // TestGrvHistoryGroupGoneNoFile: a history entry naming a group the server does not carry is
@@ -132,7 +121,7 @@ func TestGrvHistoryGroupGoneNoFile(t *testing.T) {
 
 	before := grvDBEntriesOf(t)
 	for _, cmd := range []string{"STAT %s", "HEAD %s", "ARTICLE %s", "BODY %s", "OVER %s", "HDR Subject %s", "XHDR Subject %s"} {
-		grvExpect(t, c, 430, cmd, msgid)
+		c.ExpectCmd(430, cmd, msgid)
 	}
 	after := grvDBEntriesOf(t)
 
@@ -183,22 +172,22 @@ func TestGrvHistoryGroupDeactivatedNotServed(t *testing.T) {
 	c := hs.dial(t)
 
 	// no group selected: the article is served through the history index
-	grvExpect(t, c, 223, "STAT %s", msgid)
+	c.ExpectCmd(223, "STAT %s", msgid)
 
 	if err := db.UpdateNewsgroupActive(g, false); err != nil {
 		t.Fatalf("UpdateNewsgroupActive(%s, false): %v", g, err)
 	}
-	grvExpect(t, c, 430, "STAT %s", msgid)
-	grvExpect(t, c, 430, "HEAD %s", msgid)
-	grvExpect(t, c, 430, "XHDR Subject %s", msgid)
+	c.ExpectCmd(430, "STAT %s", msgid)
+	c.ExpectCmd(430, "HEAD %s", msgid)
+	c.ExpectCmd(430, "XHDR Subject %s", msgid)
 
 	// deleting the row behaves the same
 	if err := db.UpdateNewsgroupActive(g, true); err != nil {
 		t.Fatalf("UpdateNewsgroupActive(%s, true): %v", g, err)
 	}
-	grvExpect(t, c, 223, "STAT %s", msgid)
+	c.ExpectCmd(223, "STAT %s", msgid)
 	grvDeleteGroup(t, g)
-	grvExpect(t, c, 430, "STAT %s", msgid)
+	c.ExpectCmd(430, "STAT %s", msgid)
 }
 
 // TestGrvGroupRelativeDeletedGroup: every group-relative command answers 412 once the
@@ -208,8 +197,8 @@ func TestGrvGroupRelativeDeletedGroup(t *testing.T) {
 	g := hGroup(t, "grv.grouprel", 3, nil)
 	c := hs.dial(t)
 
-	grvExpect(t, c, 211, "GROUP %s", g)
-	grvExpect(t, c, 223, "STAT 2")
+	c.ExpectCmd(211, "GROUP %s", g)
+	c.ExpectCmd(223, "STAT 2")
 	grvDeleteGroup(t, g)
 
 	before := grvDBEntriesOf(t)
@@ -217,7 +206,7 @@ func TestGrvGroupRelativeDeletedGroup(t *testing.T) {
 		"ARTICLE 1", "HEAD 1", "BODY 1", "STAT 1", "ARTICLE", "STAT",
 		"NEXT", "LAST", "XOVER 1-3", "OVER 1-3", "XHDR Subject 1-3", "HDR Subject 1-3", "LISTGROUP",
 	} {
-		grvExpect(t, c, 412, "%s", cmd)
+		c.ExpectCmd(412, "%s", cmd)
 	}
 	after := grvDBEntriesOf(t)
 
@@ -225,5 +214,5 @@ func TestGrvGroupRelativeDeletedGroup(t *testing.T) {
 	if created := grvNewEntries(t, before, after, g); len(created) > 0 {
 		t.Errorf("the group-relative commands created %v after %s was deleted", created, g)
 	}
-	grvExpect(t, c, 411, "GROUP %s", g)
+	c.ExpectCmd(411, "GROUP %s", g)
 }

@@ -183,16 +183,6 @@ func stlsUpgrade(t *testing.T, c *client.Conn) []byte {
 	return certs[0].Raw
 }
 
-// stlsExpect fails the test unless the command answers with want.
-func stlsExpect(t *testing.T, c *client.Conn, want int, format string, args ...interface{}) string {
-	t.Helper()
-	code, line := c.Cmd(format, args...)
-	if err := client.ExpectCode(code, line, want); err != nil {
-		t.Fatalf("%q: %v", format, err)
-	}
-	return line
-}
-
 func TestStlsStartTLS(t *testing.T) {
 	certFile, keyFile, der := stlsWriteCert(t)
 	hs := stlsNewServer(t, certFile, keyFile, nil)
@@ -200,24 +190,24 @@ func TestStlsStartTLS(t *testing.T) {
 	user, pass := hUser(t, true, true)
 	c := stlsSession(t, hs, stlsExtra)
 
-	stlsExpect(t, c, 211, "GROUP %s", g)
-	stlsExpect(t, c, 382, "STARTTLS")
+	c.ExpectCmd(211, "GROUP %s", g)
+	c.ExpectCmd(382, "STARTTLS")
 	if got := stlsUpgrade(t, c); !bytes.Equal(got, der) {
 		t.Fatal("peer certificate differs from the configured one")
 	}
 	// RFC 4642 §2.2.2: no greeting, the current group is forgotten.
-	stlsExpect(t, c, 412, "STAT")
-	stlsExpect(t, c, 502, "STARTTLS")
-	stlsExpect(t, c, 381, "AUTHINFO USER %s", user)
-	stlsExpect(t, c, 281, "AUTHINFO PASS %s", pass)
-	stlsExpect(t, c, 205, "QUIT")
+	c.ExpectCmd(412, "STAT")
+	c.ExpectCmd(502, "STARTTLS")
+	c.ExpectCmd(381, "AUTHINFO USER %s", user)
+	c.ExpectCmd(281, "AUTHINFO PASS %s", pass)
+	c.ExpectCmd(205, "QUIT")
 }
 
 func TestStlsRefusals(t *testing.T) {
 	t.Run("no-cert", func(t *testing.T) {
 		hs := newTestServer(t, hServerOpts{})
 		c := stlsSession(t, hs, stlsExtra)
-		line := stlsExpect(t, c, 502, "STARTTLS")
+		line := c.ExpectCmd(502, "STARTTLS")
 		if !strings.Contains(line, "not available") {
 			t.Fatalf("got %q, want \"not available\"", line)
 		}
@@ -227,9 +217,9 @@ func TestStlsRefusals(t *testing.T) {
 		hs := stlsNewServer(t, certFile, keyFile, &hFakeProcessor{})
 		user, pass := hUser(t, true, true)
 		c := stlsSession(t, hs, stlsExtra)
-		stlsExpect(t, c, 381, "AUTHINFO USER %s", user)
-		stlsExpect(t, c, 281, "AUTHINFO PASS %s", pass)
-		line := stlsExpect(t, c, 502, "STARTTLS")
+		c.ExpectCmd(381, "AUTHINFO USER %s", user)
+		c.ExpectCmd(281, "AUTHINFO PASS %s", pass)
+		line := c.ExpectCmd(502, "STARTTLS")
 		if !strings.Contains(line, "after authentication") {
 			t.Fatalf("got %q, want \"after authentication\"", line)
 		}
@@ -238,9 +228,9 @@ func TestStlsRefusals(t *testing.T) {
 		certFile, keyFile, _ := stlsWriteCert(t)
 		hs := stlsNewServer(t, certFile, keyFile, nil)
 		c := stlsSession(t, hs, stlsExtra)
-		stlsExpect(t, c, 501, "STARTTLS x")
+		c.ExpectCmd(501, "STARTTLS x")
 		// the session is still plaintext and STARTTLS still works
-		stlsExpect(t, c, 382, "STARTTLS")
+		c.ExpectCmd(382, "STARTTLS")
 		stlsUpgrade(t, c)
 	})
 	t.Run("cert-missing", func(t *testing.T) {
@@ -248,9 +238,9 @@ func TestStlsRefusals(t *testing.T) {
 		hs := stlsNewServer(t, filepath.Join(dir, "missing.pem"), filepath.Join(dir, "missing.key"), nil)
 		g := hGroup(t, "rc5.refuse", 1, nil)
 		c := stlsSession(t, hs, stlsExtra)
-		stlsExpect(t, c, 580, "STARTTLS")
-		stlsExpect(t, c, 211, "GROUP %s", g) // same connection, still plaintext
-		stlsExpect(t, c, 580, "STARTTLS")    // the load error is cached
+		c.ExpectCmd(580, "STARTTLS")
+		c.ExpectCmd(211, "GROUP %s", g) // same connection, still plaintext
+		c.ExpectCmd(580, "STARTTLS")    // the load error is cached
 	})
 	t.Run("error-delay", func(t *testing.T) {
 		hs := newTestServer(t, hServerOpts{ErrorDelay: 300 * time.Millisecond})
@@ -259,12 +249,12 @@ func TestStlsRefusals(t *testing.T) {
 		// must not move for the 502 and must move once for the 501. The 501 also
 		// keeps its lower bound against the configured delay.
 		delays := hs.S.ErrorDelayCount()
-		stlsExpect(t, c, 502, "STARTTLS")
+		c.ExpectCmd(502, "STARTTLS")
 		if got := hs.S.ErrorDelayCount() - delays; got != 0 {
 			t.Fatalf("502 reached the error delay %d times, want 0 (no error delay)", got)
 		}
 		start := time.Now()
-		stlsExpect(t, c, 501, "STARTTLS x")
+		c.ExpectCmd(501, "STARTTLS x")
 		if d := time.Since(start); d < 300*time.Millisecond {
 			t.Fatalf("501 took %v, want the error delay (>= 300ms)", d)
 		}
@@ -292,9 +282,9 @@ func TestStlsPipelinedDiscarded(t *testing.T) {
 	}
 	stlsUpgrade(t, c)
 	// The pipelined GROUP must not have run: the first reply over TLS is 101.
-	stlsExpect(t, c, 101, "CAPABILITIES")
+	c.ExpectCmd(101, "CAPABILITIES")
 	_ = c.ReadDotLines()
-	stlsExpect(t, c, 412, "STAT") // and no group was selected
+	c.ExpectCmd(412, "STAT") // and no group was selected
 }
 
 func TestStlsHandshakeFailure(t *testing.T) {
@@ -302,7 +292,7 @@ func TestStlsHandshakeFailure(t *testing.T) {
 	hs := stlsNewServer(t, certFile, keyFile, nil)
 	c := stlsSession(t, hs, stlsExtra)
 
-	stlsExpect(t, c, 382, "STARTTLS")
+	c.ExpectCmd(382, "STARTTLS")
 	if err := c.Send("GARBAGE\r\n"); err != nil {
 		t.Fatal(err)
 	}

@@ -113,27 +113,6 @@ func sessAuth(t *testing.T, c *client.Conn, user, pass string) {
 	}
 }
 
-// sessCaps runs CAPABILITIES and returns the capability lines (RFC 3977 §5.2.2: 101 + list).
-func sessCaps(t *testing.T, c *client.Conn) []string {
-	t.Helper()
-	code, line := c.Cmd("CAPABILITIES")
-	if err := client.ExpectCode(code, line, 101); err != nil {
-		t.Fatalf("CAPABILITIES: %v", err)
-	}
-	return c.ReadDotLines()
-}
-
-// sessHasCap reports whether a capability line starts with label (case-insensitive).
-func sessHasCap(caps []string, label string) bool {
-	for _, l := range caps {
-		f := strings.Fields(l)
-		if len(f) > 0 && strings.EqualFold(f[0], label) {
-			return true
-		}
-	}
-	return false
-}
-
 // sessSelfSignedTLS builds an in-memory self-signed ECDSA P-256 server config.
 func sessSelfSignedTLS(t *testing.T) (*tls.Config, []byte) {
 	t.Helper()
@@ -200,23 +179,25 @@ func TestSessGreeting(t *testing.T) {
 func TestSessCapabilities(t *testing.T) {
 	t.Run("version-first", func(t *testing.T) {
 		hs := newTestServer(t, hServerOpts{})
-		caps := sessCaps(t, hs.dial(t))
+		capsM, caps := hs.dial(t).Capabilities()
 		// RFC 3977 §3.3.2/§5.2.2: VERSION is mandatory and the first line; "VERSION 2" for RFC 3977.
 		if len(caps) == 0 || caps[0] != "VERSION 2" {
 			t.Fatalf("capabilities %q: first line must be VERSION 2", caps)
 		}
 		// RFC 3977 §3.3.2: a reading server advertises READER.
-		if !sessHasCap(caps, "READER") {
+		if _, listed := capsM["READER"]; !listed {
 			t.Fatalf("capabilities %q: READER missing", caps)
 		}
 	})
 	t.Run("reader-without-mode-reader", func(t *testing.T) {
 		hs := newTestServer(t, hServerOpts{})
-		caps := sessCaps(t, hs.dial(t))
+		capsM, caps := hs.dial(t).Capabilities()
 		// RFC 3977 §3.4.2/§5.3: MODE-READER is advertised only by a mode-switching
 		// server that is not in reader mode yet; never together with READER.
 		var err error
-		if sessHasCap(caps, "READER") && sessHasCap(caps, "MODE-READER") {
+		_, reader := capsM["READER"]
+		_, modeReader := capsM["MODE-READER"]
+		if reader && modeReader {
 			err = fmt.Errorf("READER and MODE-READER both advertised: %q", caps)
 		}
 		if err != nil {
@@ -225,18 +206,18 @@ func TestSessCapabilities(t *testing.T) {
 	})
 	t.Run("no-nonstandard-labels", func(t *testing.T) {
 		hs := newTestServer(t, hServerOpts{Proc: &hFakeProcessor{}})
-		caps := sessCaps(t, hs.dial(t))
+		capsM, caps := hs.dial(t).Capabilities()
 		// RFC 3977 §3.3.3: labels beginning with "X" are reserved for private
 		// extensions, so XOVER/XHDR are legal (only logged as a policy note; the
 		// standard capabilities are OVER/HDR, §8). Any other label must be
 		// registered; TAKETHIS is not one: RFC 4644 §2.1 advertises it via STREAMING.
 		for _, l := range []string{"XOVER", "XHDR"} {
-			if sessHasCap(caps, l) {
+			if _, listed := capsM[l]; listed {
 				t.Logf("policy: private label %s advertised", l)
 			}
 		}
 		var err error
-		if sessHasCap(caps, "TAKETHIS") {
+		if _, listed := capsM["TAKETHIS"]; listed {
 			err = fmt.Errorf("unregistered label TAKETHIS (no X prefix) in %q", caps)
 		}
 		if err != nil {
@@ -245,22 +226,22 @@ func TestSessCapabilities(t *testing.T) {
 	})
 	t.Run("read-only-no-post-ihave", func(t *testing.T) {
 		hs := newTestServer(t, hServerOpts{})
-		caps := sessCaps(t, hs.dial(t))
+		capsM, caps := hs.dial(t).Capabilities()
 		// RFC 3977 §3.3.2: POST and IHAVE are advertised only when the server
 		// accepts them; RFC 4644 §2.1 likewise for STREAMING.
 		for _, l := range []string{"POST", "IHAVE", "STREAMING"} {
-			if sessHasCap(caps, l) {
+			if _, listed := capsM[l]; listed {
 				t.Errorf("read-only server advertises %s: %q", l, caps)
 			}
 		}
 	})
 	t.Run("processor-without-peers-no-ihave", func(t *testing.T) {
 		hs := newTestServer(t, hServerOpts{Proc: &hFakeProcessor{}})
-		caps := sessCaps(t, hs.dial(t))
+		capsM, caps := hs.dial(t).Capabilities()
 		// RFC 3977 §3.3.2: IHAVE is advertised when the server accepts it. Since plan
 		// nntp-peering only a peer may feed, so a server without peers never offers it.
 		for _, l := range []string{"IHAVE", "STREAMING"} {
-			if sessHasCap(caps, l) {
+			if _, listed := capsM[l]; listed {
 				t.Errorf("server without peers advertises %s: %q", l, caps)
 			}
 		}
@@ -268,9 +249,9 @@ func TestSessCapabilities(t *testing.T) {
 	t.Run("peer-ihave", func(t *testing.T) {
 		peers, _ := hPeerIP("")
 		hs := newTestServer(t, hServerOpts{Proc: &hFakeProcessor{}, Peers: peers})
-		caps := sessCaps(t, hs.dial(t))
+		capsM, caps := hs.dial(t).Capabilities()
 		// RFC 3977 §3.3.2: IHAVE is advertised when the server supports IHAVE.
-		if !sessHasCap(caps, "IHAVE") {
+		if _, listed := capsM["IHAVE"]; !listed {
 			t.Fatalf("peer connection lacks IHAVE: %q", caps)
 		}
 	})
@@ -281,11 +262,11 @@ func TestSessCapabilities(t *testing.T) {
 				opts.Peers, _ = hPeerIP("")
 			}
 			c := newTestServer(t, opts).dial(t)
-			caps := sessCaps(t, c)
+			capsM, _ := c.Capabilities()
 			code, line := c.Cmd("MODE STREAM")
 			// RFC 4644 §2.2: STREAMING may be advertised only when MODE STREAM, CHECK
 			// and TAKETHIS are implemented: STREAMING is listed iff MODE STREAM gives 203.
-			if has := sessHasCap(caps, "STREAMING"); has != (code == 203) {
+			if _, has := capsM["STREAMING"]; has != (code == 203) {
 				t.Fatalf("peer=%v: STREAMING advertised=%v but MODE STREAM answered %q", withPeer, has, line)
 			}
 		}
@@ -309,9 +290,9 @@ func TestSessCapabilities(t *testing.T) {
 		hs := newTestServer(t, hServerOpts{Proc: &hFakeProcessor{}})
 		c := hs.dial(t)
 		sessAuth(t, c, user, pass)
-		caps := sessCaps(t, c)
+		capsM, caps := c.Capabilities()
 		// RFC 3977 §3.3.2: POST is advertised when posting is permitted.
-		if !sessHasCap(caps, "POST") {
+		if _, listed := capsM["POST"]; !listed {
 			t.Fatalf("posting user: POST missing from %q", caps)
 		}
 	})
@@ -320,11 +301,11 @@ func TestSessCapabilities(t *testing.T) {
 		hs := newTestServer(t, hServerOpts{Proc: &hFakeProcessor{}})
 		c := hs.dial(t)
 		sessAuth(t, c, user, pass)
-		caps := sessCaps(t, c)
+		capsM, caps := c.Capabilities()
 		// RFC 3977 §3.3.1: a capability is listed only in the state where it
 		// applies; this user may not post, so POST is not listed.
 		var err error
-		if sessHasCap(caps, "POST") {
+		if _, listed := capsM["POST"]; listed {
 			err = fmt.Errorf("user without posting permission sees POST: %q", caps)
 		}
 		if err != nil {
@@ -336,11 +317,11 @@ func TestSessCapabilities(t *testing.T) {
 		hs := newTestServer(t, hServerOpts{Proc: &hFakeProcessor{}})
 		c := hs.dial(t)
 		sessAuth(t, c, user, pass)
-		caps := sessCaps(t, c)
+		capsM, caps := c.Capabilities()
 		// RFC 4643 §2.2: after successful authentication the server MUST NOT
 		// advertise the AUTHINFO capability any more.
 		var err error
-		if sessHasCap(caps, "AUTHINFO") {
+		if _, listed := capsM["AUTHINFO"]; listed {
 			err = fmt.Errorf("AUTHINFO still advertised after 281: %q", caps)
 		}
 		if err != nil {
@@ -881,7 +862,7 @@ func TestSessTLS(t *testing.T) {
 	if err := client.ExpectCode(code, c.Greeting, 200, 201); err != nil {
 		t.Fatal(err)
 	}
-	caps := sessCaps(t, c)
+	_, caps := c.Capabilities()
 	if len(caps) == 0 || caps[0] != "VERSION 2" {
 		t.Fatalf("CAPABILITIES over TLS: %q", caps)
 	}
@@ -1084,7 +1065,7 @@ func TestSessServerStats(t *testing.T) {
 		if got := hs.S.Stats.GetActiveConnections(); got != 1 {
 			t.Errorf("active connections %d with one client, want 1", got)
 		}
-		sessCaps(t, c)
+		c.Capabilities()
 		if got := hs.S.Stats.GetCommandCount("CAPABILITIES"); got != 1 {
 			t.Errorf("CAPABILITIES count %d, want 1", got)
 		}
@@ -1613,7 +1594,7 @@ func TestSessReadRequiresAuth(t *testing.T) {
 		}
 	}
 	// Session commands stay available.
-	sessCaps(t, c)
+	c.Capabilities()
 	if code, reply := c.Cmd("MODE READER"); code != 201 {
 		t.Errorf("MODE READER before AUTHINFO: %q", reply)
 	}
@@ -1628,7 +1609,8 @@ func TestSessPlaintextPolicy(t *testing.T) {
 	t.Run("refuse", func(t *testing.T) {
 		hs := sessOwnServer(t, nil, nil, func(s *NNTPServer) { s.PlaintextAuth = PlaintextAuthRefuse })
 		c := hs.dial(t)
-		if caps := sessCaps(t, c); sessHasCap(caps, "AUTHINFO") {
+		capsM, caps := c.Capabilities()
+		if _, listed := capsM["AUTHINFO"]; listed {
 			t.Errorf("refuse: AUTHINFO advertised on plaintext: %q", caps)
 		}
 		// RFC 4643 §2.3.1 / RFC 3977 §3.2.1: 483 encryption required.
@@ -1640,7 +1622,8 @@ func TestSessPlaintextPolicy(t *testing.T) {
 	t.Run("accept", func(t *testing.T) {
 		hs := sessOwnServer(t, nil, nil, nil)
 		c := hs.dial(t)
-		if caps := sessCaps(t, c); sessHasCap(caps, "AUTHINFO") {
+		capsM, caps := c.Capabilities()
+		if _, listed := capsM["AUTHINFO"]; listed {
 			t.Errorf("accept: AUTHINFO advertised on plaintext: %q", caps)
 		}
 		code, line := c.Cmd("AUTHINFO USER t1user-accept")
@@ -1650,7 +1633,8 @@ func TestSessPlaintextPolicy(t *testing.T) {
 	})
 	t.Run("advertise", func(t *testing.T) {
 		hs := sessOwnServer(t, nil, nil, func(s *NNTPServer) { s.PlaintextAuth = PlaintextAuthAdvertise })
-		if caps := sessCaps(t, hs.dial(t)); !sessHasCap(caps, "AUTHINFO") {
+		capsM, caps := hs.dial(t).Capabilities()
+		if _, listed := capsM["AUTHINFO"]; !listed {
 			t.Errorf("advertise: AUTHINFO missing on plaintext: %q", caps)
 		}
 	})
@@ -1659,12 +1643,14 @@ func TestSessPlaintextPolicy(t *testing.T) {
 		cfg, _ := sessSelfSignedTLS(t)
 		hs := sessOwnServer(t, nil, cfg, func(s *NNTPServer) { s.PlaintextAuth = PlaintextAuthRefuse })
 		c := hs.dial(t)
-		if caps := sessCaps(t, c); !sessHasCap(caps, "AUTHINFO") {
+		capsM, caps := c.Capabilities()
+		if _, listed := capsM["AUTHINFO"]; !listed {
 			t.Errorf("TLS: AUTHINFO missing before login: %q", caps)
 		}
 		sessAuth(t, c, user, pass)
 		// RFC 4643 §2.2: not advertised after a successful login.
-		if caps := sessCaps(t, c); sessHasCap(caps, "AUTHINFO") {
+		capsM, caps = c.Capabilities()
+		if _, listed := capsM["AUTHINFO"]; listed {
 			t.Errorf("TLS: AUTHINFO still advertised after 281: %q", caps)
 		}
 	})

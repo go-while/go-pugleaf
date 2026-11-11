@@ -387,13 +387,13 @@ func TestAuthPostingGates(t *testing.T) {
 		}
 		// CAPABILITIES must not offer what this connection may not use (RFC 3977 §3.3.2,
 		// RFC 4644 §2.1).
-		caps := authCaps(t, c)
+		capsM, caps := c.Capabilities()
 		for _, l := range []string{"IHAVE", "STREAMING"} {
-			if authHasCap(caps, l) {
+			if _, listed := capsM[l]; listed {
 				t.Errorf("posting user: %s advertised in %q", l, caps)
 			}
 		}
-		if !authHasCap(caps, "POST") {
+		if _, listed := capsM["POST"]; !listed {
 			t.Errorf("posting user: POST missing from %q", caps)
 		}
 	})
@@ -421,9 +421,9 @@ func TestAuthPostingGates(t *testing.T) {
 		if err := client.ExpectCode(code, line, 480); err != nil {
 			t.Errorf("POST on a peer connection: %v", err)
 		}
-		caps := authCaps(t, c)
+		capsM, caps := c.Capabilities()
 		for _, l := range []string{"IHAVE", "STREAMING"} {
-			if !authHasCap(caps, l) {
+			if _, listed := capsM[l]; !listed {
 				t.Errorf("peer connection: %s missing from %q", l, caps)
 			}
 		}
@@ -466,26 +466,6 @@ func TestAuthPostingGates(t *testing.T) {
 			t.Errorf("second AUTHINFO after the peer login: %v", err)
 		}
 	})
-}
-
-// authCaps reads the CAPABILITIES block of c.
-func authCaps(t *testing.T, c *client.Conn) []string {
-	t.Helper()
-	code, line := c.Cmd("CAPABILITIES")
-	if err := client.ExpectCode(code, line, 101); err != nil {
-		t.Fatalf("CAPABILITIES: %v", err)
-	}
-	return c.ReadDotLines()
-}
-
-// authHasCap reports whether caps holds a line with the given first word.
-func authHasCap(caps []string, label string) bool {
-	for _, l := range caps {
-		if f := strings.Fields(l); len(f) > 0 && strings.EqualFold(f[0], label) {
-			return true
-		}
-	}
-	return false
 }
 
 // authCached reports whether the auth cache holds user with pass.

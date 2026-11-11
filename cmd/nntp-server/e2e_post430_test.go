@@ -36,6 +36,7 @@ import (
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/database"
+	"github.com/go-while/nntp-testkit/client"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -67,8 +68,8 @@ func p430Build(t *testing.T, goTool, dir string) {
 }
 
 // p430Stat sends STAT <id> and returns the status code and line.
-func p430Stat(c *e2eClient, id string) (int, string, error) {
-	code, line, err := c.tryCmd("STAT %s", id)
+func p430Stat(c *client.Conn, id string) (int, string, error) {
+	code, line, err := c.TryCmd("STAT %s", id)
 	if err != nil {
 		return code, line, fmt.Errorf("STAT %s: %v (line %q)", id, err, line)
 	}
@@ -76,7 +77,7 @@ func p430Stat(c *e2eClient, id string) (int, string, error) {
 }
 
 // p430Stat223 requires STAT <id> → "223 0 <id>" (no group selected).
-func p430Stat223(c *e2eClient, id string) error {
+func p430Stat223(c *client.Conn, id string) error {
 	code, line, err := p430Stat(c, id)
 	if err != nil {
 		return err
@@ -90,7 +91,7 @@ func p430Stat223(c *e2eClient, id string) error {
 // p430PollStat polls STAT <id> on c every p430Poll until it answers 223 (bounded by testWait),
 // then polls p430Stay more times and requires 223 each time: a miss before the commit must
 // not be cached. It returns the number of non-223 answers before the first 223.
-func p430PollStat(c *e2eClient, id string) (int, error) {
+func p430PollStat(c *client.Conn, id string) (int, error) {
 	deadline := time.Now().Add(testWait)
 	misses := 0
 	var last string
@@ -123,16 +124,16 @@ func p430PollStat(c *e2eClient, id string) (int, error) {
 
 // p430Post runs POST with wire on c and requires 240. It returns the time between sending
 // the article (with its terminating dot) and reading the reply.
-func p430Post(c *e2eClient, wire string) (time.Duration, error) {
-	code, line, err := c.tryCmd("POST")
+func p430Post(c *client.Conn, wire string) (time.Duration, error) {
+	code, line, err := c.TryCmd("POST")
 	if err != nil || code != 340 {
 		return 0, fmt.Errorf("POST: code=%d line=%q err=%v, want 340", code, line, err)
 	}
 	start := time.Now()
-	if err := c.send(wire); err != nil {
+	if err := c.Send(wire); err != nil {
 		return 0, err
 	}
-	code, line, err = c.readStatus()
+	code, line, err = c.ReadStatus()
 	took := time.Since(start)
 	if err != nil || code != 240 {
 		return took, fmt.Errorf("POST article: code=%d line=%q err=%v, want 240", code, line, err)
@@ -159,10 +160,10 @@ func p430GroupDBFiles(dir string, prefixes ...string) ([]string, error) {
 }
 
 // p430Auth opens a new connection to srv and authenticates the posting user.
-func p430Auth(t *testing.T, srv *xrefServer) *e2eClient {
+func p430Auth(t *testing.T, srv *xrefServer) *client.Conn {
 	t.Helper()
 	c := srv.dial(t)
-	if code, line, err := c.tryAuth(p430User, p430Pass); err != nil || code != 281 {
+	if code, line, err := c.TryLogin(p430User, p430Pass); err != nil || code != 281 {
 		t.Fatalf("AUTHINFO: code=%d line=%q err=%v\n%s", code, line, err, xrefOutput(srv.out, 30))
 	}
 	return c
@@ -301,20 +302,20 @@ func TestE2EPost430Binary(t *testing.T) {
 	}())
 	r.check("P08", "new connection without GROUP: STAT <id> 223 at once", func() error {
 		c0 := srv.dial(t)
-		defer c0.close()
+		defer c0.Close()
 		return p430Stat223(c0, idPost)
 	}())
 
 	// IHAVE does not wait for the commit: the reader may see uncached 430s first
 	r.check("P10", "IHAVE to "+gb+": 335 then 235", func() error {
-		code, line, err := c.tryCmd("IHAVE %s", idIHave)
+		code, line, err := c.TryCmd("IHAVE %s", idIHave)
 		if err != nil || code != 335 {
 			return fmt.Errorf("IHAVE: code=%d line=%q err=%v, want 335", code, line, err)
 		}
-		if err := c.send(e2eWire(e2eHead(idIHave, gb, "Post430 e2e ihave", e2eNow()), []string{"post430 ihave"})); err != nil {
+		if err := c.Send(e2eWire(e2eHead(idIHave, gb, "Post430 e2e ihave", e2eNow()), []string{"post430 ihave"})); err != nil {
 			return err
 		}
-		code, line, err = c.readStatus()
+		code, line, err = c.ReadStatus()
 		if err != nil || code != 235 {
 			return fmt.Errorf("IHAVE article: code=%d line=%q err=%v, want 235", code, line, err)
 		}
@@ -376,8 +377,8 @@ func TestE2EPost430Binary(t *testing.T) {
 		fmt.Printf("INFO P14 [nntp] IHAVE: %d more uncached 430 before the first 223, polled %s\n", misses, time.Since(start).Round(time.Millisecond))
 		return nil
 	}())
-	c1.close()
-	c.close()
+	c1.Close()
+	c.Close()
 	r.check("P15", "default run: SIGINT, exit 0", srv.stop())
 
 	// ---------------------------------------------------------------- -post-commit-wait 0
@@ -406,7 +407,7 @@ func TestE2EPost430Binary(t *testing.T) {
 	}())
 	r.check("P22", fmt.Sprintf("-post-commit-wait 0, new connection: STAT <id> reaches 223 and stays 223 (%d more polls)", p430Stay), func() error {
 		c0 := srv.dial(t)
-		defer c0.close()
+		defer c0.Close()
 		start := time.Now()
 		misses, err := p430PollStat(c0, idNoWait)
 		if err != nil {
@@ -415,7 +416,7 @@ func TestE2EPost430Binary(t *testing.T) {
 		fmt.Printf("INFO P22 [nntp] no wait: %d uncached 430 before the first 223, polled %s\n", misses, time.Since(start).Round(time.Millisecond))
 		return nil
 	}())
-	c.close()
+	c.Close()
 	r.check("P23", "-post-commit-wait 0: SIGINT, exit 0", srv.stop())
 
 	// ---------------------------------------------------------------- negative wait

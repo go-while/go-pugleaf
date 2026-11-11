@@ -42,6 +42,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-while/nntp-testkit/client"
 	"github.com/go-while/nntp-testkit/proc"
 )
 
@@ -89,7 +90,7 @@ type ulGreet struct {
 // cannot accept it — a new accept-error line appears in its output — it returns the connection
 // as blocked and no client: the connection stays open on purpose, so the accept queue keeps the
 // pending entry and the accept loop keeps failing while the test looks at the log.
-func ulDial(p *proc.Process, addr string) (c *e2eClient, blocked net.Conn, err error) {
+func ulDial(p *proc.Process, addr string) (c *client.Conn, blocked net.Conn, err error) {
 	base := ulAcceptErrs(p)
 	conn, err := net.DialTimeout("tcp", addr, testWait)
 	if err != nil {
@@ -120,7 +121,7 @@ func ulDial(p *proc.Process, addr string) (c *e2eClient, blocked net.Conn, err e
 				return nil, nil, fmt.Errorf("greeting: %w", g.err)
 			}
 			ok = true
-			return &e2eClient{Conn: conn, R: r, Greeting: g.line, Deadline: testWait}, nil, nil
+			return &client.Conn{Conn: conn, R: r, Greeting: g.line, Deadline: testWait, Strict: true}, nil, nil
 		case <-time.After(ulPoll):
 		}
 		if ulAcceptErrs(p) > base {
@@ -134,12 +135,12 @@ func ulDial(p *proc.Process, addr string) (c *e2eClient, blocked net.Conn, err e
 }
 
 // ulCaps runs CAPABILITIES on c and requires 101 plus a capability list starting with VERSION 2.
-func ulCaps(c *e2eClient) error {
-	code, line, err := c.tryCmd("CAPABILITIES")
+func ulCaps(c *client.Conn) error {
+	code, line, err := c.TryCmd("CAPABILITIES")
 	if err != nil || code != 101 {
 		return fmt.Errorf("CAPABILITIES: code=%d line=%q err=%v", code, line, err)
 	}
-	caps, err := c.tryDotLines()
+	caps, err := c.TryReadDotLines()
 	if err != nil {
 		return fmt.Errorf("CAPABILITIES list: %w", err)
 	}
@@ -150,8 +151,8 @@ func ulCaps(c *e2eClient) error {
 }
 
 // ulQuit runs QUIT on c and requires 205.
-func ulQuit(c *e2eClient) error {
-	code, line, err := c.tryCmd("QUIT")
+func ulQuit(c *client.Conn) error {
+	code, line, err := c.TryCmd("QUIT")
 	if err != nil || code != 205 {
 		return fmt.Errorf("QUIT: code=%d line=%q err=%v", code, line, err)
 	}
@@ -230,7 +231,7 @@ func TestE2EUlimitBinary(t *testing.T) {
 	}, addr)
 
 	// 1. Measure the fd budget: open connections until the server's accept hits the limit.
-	var held []*e2eClient
+	var held []*client.Conn
 	var blocked net.Conn
 	for i := 0; i < ulMaxDial && blocked == nil; i++ {
 		c, b, err := ulDial(p, addr)
@@ -245,7 +246,7 @@ func TestE2EUlimitBinary(t *testing.T) {
 			t.Fatalf("connection %d greeting %q", len(held), c.Greeting)
 		}
 		held = append(held, c)
-		t.Cleanup(c.close) // also on a Fatalf inside this loop: no sockets left open in the package
+		t.Cleanup(c.Close) // also on a Fatalf inside this loop: no sockets left open in the package
 	}
 	if blocked == nil {
 		t.Fatalf("the fd limit of %d never stopped accept: %d connections served", ulFDLimit, len(held))
@@ -291,10 +292,10 @@ func TestE2EUlimitBinary(t *testing.T) {
 		half = 1
 	}
 	for _, c := range held[:half] {
-		c.close()
+		c.Close()
 	}
 	held = held[half:]
-	var fresh *e2eClient
+	var fresh *client.Conn
 	if err := e2eWaitFor(testWait, func() error {
 		c, b, err := ulDial(p, addr)
 		if err != nil {
@@ -310,7 +311,7 @@ func TestE2EUlimitBinary(t *testing.T) {
 		t.Fatalf("no connection accepted after closing %d of the held ones: %v\n%s",
 			half, err, e2eTail(p.Stderr(), 20))
 	}
-	defer fresh.close()
+	defer fresh.Close()
 	if err := ulCaps(fresh); err != nil {
 		t.Errorf("connection after the limit eased: %v", err)
 	}

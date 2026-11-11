@@ -34,6 +34,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-while/nntp-testkit/client"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -205,7 +206,7 @@ func (e *xrefEnv) start(mode string, extra ...string) *xrefServer {
 		if err != nil {
 			return err
 		}
-		c.close()
+		c.Close()
 		return nil
 	})
 	select {
@@ -238,27 +239,27 @@ func (s *xrefServer) stop() error {
 }
 
 // dial connects a reader to s (no GROUP selected).
-func (s *xrefServer) dial(t *testing.T) *e2eClient {
+func (s *xrefServer) dial(t *testing.T) *client.Conn {
 	t.Helper()
 	c, err := e2eDialAddr(s.addr, testWait)
 	if err != nil {
 		t.Fatalf("dial %s: %v", s.addr, err)
 	}
-	t.Cleanup(c.close)
+	t.Cleanup(c.Close)
 	return c
 }
 
 // xrefBlock sends cmd, requires the status want and returns the data block.
-func xrefBlock(c *e2eClient, want int, format string, args ...interface{}) ([]string, error) {
+func xrefBlock(c *client.Conn, want int, format string, args ...interface{}) ([]string, error) {
 	cmd := fmt.Sprintf(format, args...)
-	code, line, err := c.tryCmd("%s", cmd)
+	code, line, err := c.TryCmd("%s", cmd)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %v (line %q)", cmd, err, line)
 	}
 	if code != want {
 		return nil, fmt.Errorf("%s: got %q, want %d", cmd, line, want)
 	}
-	lines, err := c.tryDotLines()
+	lines, err := c.TryReadDotLines()
 	if err != nil {
 		return nil, fmt.Errorf("%s: %v", cmd, err)
 	}
@@ -266,8 +267,8 @@ func xrefBlock(c *e2eClient, want int, format string, args ...interface{}) ([]st
 }
 
 // xrefSelect selects group (211).
-func xrefSelect(c *e2eClient, group string) error {
-	code, line, err := c.tryCmd("GROUP %s", group)
+func xrefSelect(c *client.Conn, group string) error {
+	code, line, err := c.TryCmd("GROUP %s", group)
 	if err != nil || code != 211 {
 		return fmt.Errorf("GROUP %s: code=%d line=%q err=%v", group, code, line, err)
 	}
@@ -305,12 +306,12 @@ func xrefNoHeader(hdrs []string) error {
 }
 
 // xrefHead runs HEAD arg (221) in the selected group (or without one) and returns the headers.
-func xrefHead(c *e2eClient, arg string) ([]string, error) {
+func xrefHead(c *client.Conn, arg string) ([]string, error) {
 	return xrefBlock(c, 221, "HEAD %s", arg)
 }
 
 // xrefArticleHead runs ARTICLE arg (220) and returns the header part.
-func xrefArticleHead(c *e2eClient, arg string) ([]string, error) {
+func xrefArticleHead(c *client.Conn, arg string) ([]string, error) {
 	lines, err := xrefBlock(c, 220, "ARTICLE %s", arg)
 	if err != nil {
 		return nil, err
@@ -323,7 +324,7 @@ func xrefArticleHead(c *e2eClient, arg string) ([]string, error) {
 }
 
 // xrefOver runs OVER 1 in the selected group and returns the TAB fields of the one line.
-func xrefOver(c *e2eClient) ([]string, error) {
+func xrefOver(c *client.Conn) ([]string, error) {
 	lines, err := xrefBlock(c, 224, "OVER 1")
 	if err != nil {
 		return nil, err
@@ -335,7 +336,7 @@ func xrefOver(c *e2eClient) ([]string, error) {
 }
 
 // xrefHdr runs HDR Xref 1 in the selected group and returns the one line.
-func xrefHdr(c *e2eClient) (string, error) {
+func xrefHdr(c *client.Conn) (string, error) {
 	lines, err := xrefBlock(c, 225, "HDR Xref 1")
 	if err != nil {
 		return "", err
@@ -348,7 +349,7 @@ func xrefHdr(c *e2eClient) (string, error) {
 
 // xrefRanges runs the range forms OVER 1-, XOVER 1-, HDR Xref 1- and XHDR Xref 1- in each of
 // groups and returns every reply line, prefixed with the group and the command.
-func xrefRanges(c *e2eClient, groups ...string) ([]string, error) {
+func xrefRanges(c *client.Conn, groups ...string) ([]string, error) {
 	var out []string
 	for _, g := range groups {
 		if err := xrefSelect(c, g); err != nil {
@@ -378,7 +379,7 @@ func xrefLogHas(b *e2eLogBuffer, s string) bool {
 }
 
 // xrefFmt runs LIST OVERVIEW.FMT.
-func xrefFmt(c *e2eClient) ([]string, error) {
+func xrefFmt(c *client.Conn) ([]string, error) {
 	return xrefBlock(c, 215, "LIST OVERVIEW.FMT")
 }
 
@@ -443,11 +444,11 @@ func TestE2EXrefBinary(t *testing.T) {
 	// ---------------------------------------------------------------- -xref full
 	srv := e.start("full")
 	c := srv.dial(t)
-	if code, line, err := c.tryAuth(xrefUser, xrefPass); err != nil || code != 281 {
+	if code, line, err := c.TryLogin(xrefUser, xrefPass); err != nil || code != 281 {
 		t.Fatalf("AUTHINFO: code=%d line=%q err=%v\n%s", code, line, err, xrefOutput(srv.out, 30))
 	}
 	if !r.check("X01", "POST crosspost "+ga+","+gb+" 240", func() error {
-		code, line, err := c.tryPost(e2eWire(e2eHead(id, ga+","+gb, "Xref e2e crosspost", e2eNow()), []string{"xref crosspost body"}))
+		code, line, err := e2ePost(c, e2eArticle(e2eHead(id, ga+","+gb, "Xref e2e crosspost", e2eNow()), []string{"xref crosspost body"}))
 		if err != nil || code != 240 {
 			return fmt.Errorf("code=%d line=%q err=%v", code, line, err)
 		}
@@ -504,12 +505,12 @@ func TestE2EXrefBinary(t *testing.T) {
 
 	r.check("X04", "full: HEAD <id> without GROUP lists both groups", func() error {
 		c0 := srv.dial(t)
-		defer c0.close()
-		code, line, err := c0.tryCmd("HEAD %s", id)
+		defer c0.Close()
+		code, line, err := c0.TryCmd("HEAD %s", id)
 		if err != nil || code != 221 || !strings.HasPrefix(line, "221 0 "+id) {
 			return fmt.Errorf("code=%d line=%q err=%v", code, line, err)
 		}
-		hdrs, err := c0.tryDotLines()
+		hdrs, err := c0.TryReadDotLines()
 		if err != nil {
 			return err
 		}
@@ -601,7 +602,7 @@ func TestE2EXrefBinary(t *testing.T) {
 		batchedRanges = lines
 		return nil
 	}())
-	c.close()
+	c.Close()
 	r.check("X08", "full: SIGINT, exit 0", srv.stop())
 
 	// ---------------------------------------------------------------- -xref full -xref-batched-lookup=false
@@ -628,7 +629,7 @@ func TestE2EXrefBinary(t *testing.T) {
 		}
 		return nil
 	}())
-	c.close()
+	c.Close()
 	r.check("X15", "full -xref-batched-lookup=false: SIGINT, exit 0", srv.stop())
 
 	// ---------------------------------------------------------------- -xref partial
@@ -656,7 +657,7 @@ func TestE2EXrefBinary(t *testing.T) {
 
 	r.check("X11", "partial: HEAD <id> without GROUP has no Xref line", func() error {
 		c0 := srv.dial(t)
-		defer c0.close()
+		defer c0.Close()
 		hdrs, err := xrefHead(c0, id)
 		if err != nil {
 			return err
@@ -691,7 +692,7 @@ func TestE2EXrefBinary(t *testing.T) {
 		}
 		return nil
 	}())
-	c.close()
+	c.Close()
 	r.check("X13", "partial: SIGINT, exit 0", srv.stop())
 
 	// ---------------------------------------------------------------- -xref off -nntpbind 127.0.0.1
@@ -711,7 +712,7 @@ func TestE2EXrefBinary(t *testing.T) {
 	}())
 	r.check("X20", "off: HEAD 1, ARTICLE 1 in "+ga+" and HEAD <id> without GROUP have no Xref line", func() error {
 		c0 := srv.dial(t)
-		defer c0.close()
+		defer c0.Close()
 		hdrs, err := xrefHead(c0, id)
 		if err != nil {
 			return err
@@ -769,7 +770,7 @@ func TestE2EXrefBinary(t *testing.T) {
 		}
 		return nil
 	}())
-	c.close()
+	c.Close()
 	r.check("X23", "off: SIGINT, exit 0", srv.stop())
 
 	// ---------------------------------------------------------------- invalid mode

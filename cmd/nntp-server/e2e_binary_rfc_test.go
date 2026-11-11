@@ -26,6 +26,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/go-while/nntp-testkit/client"
 )
 
 // e2eRfcReport prints the step lines with the [rfc] tag and fails t on FAIL.
@@ -61,12 +63,12 @@ func e2eRfcStatus(code int, line string, err error, want int) error {
 }
 
 // e2eRfcBlock sends cmd, requires the status want and returns the data block.
-func e2eRfcBlock(c *e2eClient, want int, cmd string) ([]string, error) {
-	code, line, err := c.tryCmd("%s", cmd)
+func e2eRfcBlock(c *client.Conn, want int, cmd string) ([]string, error) {
+	code, line, err := c.TryCmd("%s", cmd)
 	if e := e2eRfcStatus(code, line, err, want); e != nil {
 		return nil, fmt.Errorf("%s: %v", cmd, e)
 	}
-	lines, err := c.tryDotLines()
+	lines, err := c.TryReadDotLines()
 	if err != nil {
 		return lines, fmt.Errorf("%s: %v", cmd, err)
 	}
@@ -74,7 +76,7 @@ func e2eRfcBlock(c *e2eClient, want int, cmd string) ([]string, error) {
 }
 
 // e2eRfcCaps runs CAPABILITIES and returns the capability lines.
-func e2eRfcCaps(c *e2eClient) ([]string, error) {
+func e2eRfcCaps(c *client.Conn) ([]string, error) {
 	return e2eRfcBlock(c, 101, "CAPABILITIES")
 }
 
@@ -90,7 +92,7 @@ func e2eRfcHasLabel(caps []string, label string) bool {
 
 // e2eRfcUpgrade runs the client side of the TLS handshake after a 382 and
 // switches c to the TLS connection.
-func e2eRfcUpgrade(c *e2eClient) error {
+func e2eRfcUpgrade(c *client.Conn) error {
 	if n := c.R.Buffered(); n != 0 {
 		return fmt.Errorf("%d unread bytes before the handshake", n)
 	}
@@ -121,11 +123,11 @@ func TestE2EBinaryRFC(t *testing.T) {
 		r.fail("N50", "connect", err.Error())
 		t.FailNow()
 	}
-	defer c.close()
+	defer c.Close()
 
 	// N50: DATE → 111 yyyymmddhhmmss within 5 minutes of UTC now (RFC 3977 §7.1)
 	r.check("N50", "DATE 111 within 5 min of UTC", func() error {
-		code, line, err := c.tryCmd("DATE")
+		code, line, err := c.TryCmd("DATE")
 		if e := e2eRfcStatus(code, line, err, 111); e != nil {
 			return e
 		}
@@ -152,7 +154,7 @@ func TestE2EBinaryRFC(t *testing.T) {
 		var count, low, high int64
 		var last string
 		perr := e2eWaitFor(n51SoftWait, func() error {
-			code, line, err := c.tryCmd("GROUP %s", group)
+			code, line, err := c.TryCmd("GROUP %s", group)
 			if err != nil {
 				return err
 			}
@@ -175,14 +177,14 @@ func TestE2EBinaryRFC(t *testing.T) {
 		if perr != nil {
 			r.info("N51", fmt.Sprintf("count stayed %d after %v (%q): walking one article", count, n51SoftWait, last))
 		}
-		code, line, err := c.tryCmd("LAST")
+		code, line, err := c.TryCmd("LAST")
 		if e := e2eRfcStatus(code, line, err, 422); e != nil {
 			return fmt.Errorf("LAST at the first article: %v", e)
 		}
 		prev := low
 		got := int64(0)
 		for i := int64(0); i <= count+1; i++ {
-			code, line, err := c.tryCmd("NEXT")
+			code, line, err := c.TryCmd("NEXT")
 			if err != nil {
 				return fmt.Errorf("NEXT: %v", err)
 			}
@@ -210,7 +212,7 @@ func TestE2EBinaryRFC(t *testing.T) {
 		if count >= 2 {
 			want = 223
 		}
-		code, line, err = c.tryCmd("LAST")
+		code, line, err = c.TryCmd("LAST")
 		if e := e2eRfcStatus(code, line, err, want); e != nil {
 			return fmt.Errorf("LAST at the last article: %v", e)
 		}
@@ -241,7 +243,7 @@ func TestE2EBinaryRFC(t *testing.T) {
 				return fmt.Errorf("OVER 1-: line %q does not start with a number and TAB", l)
 			}
 		}
-		code, line, err := c.tryCmd("OVER 999999999-")
+		code, line, err := c.TryCmd("OVER 999999999-")
 		return e2eRfcStatus(code, line, err, 423)
 	}())
 
@@ -268,15 +270,15 @@ func TestE2EBinaryRFC(t *testing.T) {
 
 	// N55: MODE STREAM 203, CHECK fresh id 238, CHECK stored id 438 (RFC 4644 §2.3, §2.4)
 	r.check("N55", "MODE STREAM 203, CHECK 238/438", func() error {
-		code, line, err := c.tryCmd("MODE STREAM")
+		code, line, err := c.TryCmd("MODE STREAM")
 		if e := e2eRfcStatus(code, line, err, 203); e != nil {
 			return fmt.Errorf("MODE STREAM: %v", e)
 		}
-		code, line, err = c.tryAuth(user, pass)
+		code, line, err = c.TryLogin(user, pass)
 		if e := e2eRfcStatus(code, line, err, 281); e != nil {
 			return fmt.Errorf("AUTHINFO: %v", e)
 		}
-		code, line, err = c.tryCmd("CHECK %s", freshID)
+		code, line, err = c.TryCmd("CHECK %s", freshID)
 		if e := e2eRfcStatus(code, line, err, 238); e != nil {
 			return fmt.Errorf("CHECK fresh id: %v", e)
 		}
@@ -295,7 +297,7 @@ func TestE2EBinaryRFC(t *testing.T) {
 			return fmt.Errorf("HDR Message-ID 1: lines %q", lines)
 		}
 		stored := f[1]
-		code, line, err = c.tryCmd("CHECK %s", stored)
+		code, line, err = c.TryCmd("CHECK %s", stored)
 		if e := e2eRfcStatus(code, line, err, 438); e != nil {
 			return fmt.Errorf("CHECK stored id: %v", e)
 		}
@@ -344,10 +346,10 @@ func TestE2EBinaryRFC(t *testing.T) {
 	}())
 
 	// The main connection ends here; N57 needs a fresh, unauthenticated one.
-	if code, line, err := c.tryCmd("QUIT"); err != nil || code != 205 {
+	if code, line, err := c.TryCmd("QUIT"); err != nil || code != 205 {
 		r.info("N56", fmt.Sprintf("QUIT after the main steps: code=%d line=%q err=%v", code, line, err))
 	}
-	c.close()
+	c.Close()
 
 	// N57: STARTTLS (RFC 4642 §2.2)
 	if withTLS {
@@ -356,7 +358,7 @@ func TestE2EBinaryRFC(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			defer s.close()
+			defer s.Close()
 			caps, err := e2eRfcCaps(s)
 			if err != nil {
 				return err
@@ -364,7 +366,7 @@ func TestE2EBinaryRFC(t *testing.T) {
 			if !e2eRfcHasLabel(caps, "STARTTLS") {
 				return fmt.Errorf("STARTTLS not listed before TLS: %q", caps)
 			}
-			code, line, err := s.tryCmd("STARTTLS")
+			code, line, err := s.TryCmd("STARTTLS")
 			if e := e2eRfcStatus(code, line, err, 382); e != nil {
 				return fmt.Errorf("STARTTLS: %v", e)
 			}
@@ -378,11 +380,11 @@ func TestE2EBinaryRFC(t *testing.T) {
 			if e2eRfcHasLabel(caps, "STARTTLS") {
 				return fmt.Errorf("STARTTLS still listed over TLS: %q", caps)
 			}
-			code, line, err = s.tryCmd("STARTTLS")
+			code, line, err = s.TryCmd("STARTTLS")
 			if e := e2eRfcStatus(code, line, err, 502); e != nil {
 				return fmt.Errorf("second STARTTLS: %v", e)
 			}
-			code, line, err = s.tryCmd("QUIT")
+			code, line, err = s.TryCmd("QUIT")
 			return e2eRfcStatus(code, line, err, 205)
 		}())
 	} else {
@@ -391,7 +393,7 @@ func TestE2EBinaryRFC(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			defer s.close()
+			defer s.Close()
 			caps, err := e2eRfcCaps(s)
 			if err != nil {
 				return err
@@ -399,11 +401,11 @@ func TestE2EBinaryRFC(t *testing.T) {
 			if e2eRfcHasLabel(caps, "STARTTLS") {
 				return fmt.Errorf("STARTTLS listed without a certificate: %q", caps)
 			}
-			code, line, err := s.tryCmd("STARTTLS")
+			code, line, err := s.TryCmd("STARTTLS")
 			if e := e2eRfcStatus(code, line, err, 502); e != nil {
 				return fmt.Errorf("STARTTLS: %v", e)
 			}
-			code, line, err = s.tryCmd("QUIT")
+			code, line, err = s.TryCmd("QUIT")
 			return e2eRfcStatus(code, line, err, 205)
 		}())
 		r.info("N57", "no certificate configured")

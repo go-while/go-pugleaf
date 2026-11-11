@@ -108,20 +108,10 @@ func ovhSelect(t *testing.T, c *client.Conn, g string) {
 	}
 }
 
-// ovhExpect sends a command and fails unless the reply code is want.
-func ovhExpect(t *testing.T, c *client.Conn, want int, format string, args ...interface{}) string {
-	t.Helper()
-	code, line := c.Cmd(format, args...)
-	if err := client.ExpectCode(code, line, want); err != nil {
-		t.Fatalf("%s: %v", fmt.Sprintf(format, args...), err)
-	}
-	return line
-}
-
 // ovhBlock sends a command, expects the multi-line status want and returns the block.
 func ovhBlock(t *testing.T, c *client.Conn, want int, format string, args ...interface{}) []string {
 	t.Helper()
-	ovhExpect(t, c, want, format, args...)
+	c.ExpectCmd(want, format, args...)
 	return c.ReadDotLines()
 }
 
@@ -230,13 +220,13 @@ func TestOvhOver(t *testing.T) {
 	c := ovhDial(t, hs)
 
 	// RFC 3977 §8.3.2: 412 without a selected group, for the range and the current form.
-	ovhExpect(t, c, 412, "OVER 1-5")
-	ovhExpect(t, c, 412, "OVER")
+	c.ExpectCmd(412, "OVER 1-5")
+	c.ExpectCmd(412, "OVER")
 
 	// An empty group leaves the current article invalid: 420.
 	ovhSelect(t, c, empty)
-	ovhExpect(t, c, 420, "OVER")
-	ovhExpect(t, c, 423, "OVER 1-5")
+	c.ExpectCmd(420, "OVER")
+	c.ExpectCmd(423, "OVER 1-5")
 
 	ovhSelect(t, c, g)
 	ovhExpectNums(t, "OVER (current)", ovhOverNums(t, ovhBlock(t, c, 224, "OVER")), 1)
@@ -248,12 +238,12 @@ func TestOvhOver(t *testing.T) {
 	ovhExpectNums(t, "OVER 3-", ovhOverNums(t, ovhBlock(t, c, 224, "OVER 3-")), 3, 4, 5)
 	ovhExpectNums(t, "OVER 4", ovhOverNums(t, ovhBlock(t, c, 224, "OVER 4")), 4)
 
-	ovhExpect(t, c, 423, "OVER 2")
-	ovhExpect(t, c, 423, "OVER 5-3")
-	ovhExpect(t, c, 423, "OVER 50-60")
-	ovhExpect(t, c, 501, "OVER x")
-	ovhExpect(t, c, 501, "OVER 1-x")
-	ovhExpect(t, c, 501, "OVER 1 2") // the handler's own count check (no table row yet)
+	c.ExpectCmd(423, "OVER 2")
+	c.ExpectCmd(423, "OVER 5-3")
+	c.ExpectCmd(423, "OVER 50-60")
+	c.ExpectCmd(501, "OVER x")
+	c.ExpectCmd(501, "OVER 1-x")
+	c.ExpectCmd(501, "OVER 1 2") // the handler's own count check (no table row yet)
 
 	// The session is still usable after all of the above.
 	ovhExpectNums(t, "OVER 5", ovhOverNums(t, ovhBlock(t, c, 224, "OVER 5")), 5)
@@ -289,9 +279,9 @@ func TestOvhOverMsgID(t *testing.T) {
 
 	t.Run("unknown", func(t *testing.T) {
 		c := ovhDial(t, hs)
-		ovhExpect(t, c, 430, "OVER <ovh-unknown-%d@test.invalid>", hSeq.Add(1))
+		c.ExpectCmd(430, "OVER <ovh-unknown-%d@test.invalid>", hSeq.Add(1))
 		ovhSelect(t, c, g)
-		ovhExpect(t, c, 430, "OVER <ovh-unknown-%d@test.invalid>", hSeq.Add(1))
+		c.ExpectCmd(430, "OVER <ovh-unknown-%d@test.invalid>", hSeq.Add(1))
 	})
 }
 
@@ -305,10 +295,10 @@ func TestOvhHdr(t *testing.T) {
 	hs := newTestServer(t, hServerOpts{Proc: ovhFindIn(g, id4)})
 	c := ovhDial(t, hs)
 
-	ovhExpect(t, c, 501, "HDR")
-	ovhExpect(t, c, 501, "HDR Subject 1 2")
-	ovhExpect(t, c, 412, "HDR Subject 1-5")
-	ovhExpect(t, c, 503, "HDR :foo 3") // metadata check comes first
+	c.ExpectCmd(501, "HDR")
+	c.ExpectCmd(501, "HDR Subject 1 2")
+	c.ExpectCmd(412, "HDR Subject 1-5")
+	c.ExpectCmd(503, "HDR :foo 3") // metadata check comes first
 
 	// No group: the message-id form goes through the history lookup (number 0).
 	if err := client.ExpectLines(ovhBlock(t, c, 225, "HDR Subject %s", id4), []string{"0 Test article 4"}); err != nil {
@@ -316,7 +306,7 @@ func TestOvhHdr(t *testing.T) {
 	}
 
 	ovhSelect(t, c, empty)
-	ovhExpect(t, c, 420, "HDR Subject")
+	c.ExpectCmd(420, "HDR Subject")
 
 	ovhSelect(t, c, g)
 	if err := client.ExpectLines(ovhBlock(t, c, 225, "HDR Subject 1-5"),
@@ -333,18 +323,18 @@ func TestOvhHdr(t *testing.T) {
 	if err := client.ExpectLines(ovhBlock(t, c, 225, "HDR :BYTES 3-3"), []string{"3 26"}); err != nil {
 		t.Fatal(err)
 	}
-	ovhExpect(t, c, 503, "HDR :foo 3")
-	ovhExpect(t, c, 503, "HDR :foo")
-	ovhExpect(t, c, 423, "HDR Subject 50-60")
-	ovhExpect(t, c, 423, "HDR Subject 2")
-	ovhExpect(t, c, 501, "HDR Subject x")
+	c.ExpectCmd(503, "HDR :foo 3")
+	c.ExpectCmd(503, "HDR :foo")
+	c.ExpectCmd(423, "HDR Subject 50-60")
+	c.ExpectCmd(423, "HDR Subject 2")
+	c.ExpectCmd(501, "HDR Subject x")
 	if err := client.ExpectLines(ovhBlock(t, c, 225, "HDR Subject %s", id4), []string{"4 Test article 4"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := client.ExpectLines(ovhBlock(t, c, 225, "HDR :lines %s", id4), []string{"4 2"}); err != nil {
 		t.Fatal(err)
 	}
-	ovhExpect(t, c, 430, "HDR Subject <ovh-unknown-%d@test.invalid>", hSeq.Add(1))
+	c.ExpectCmd(430, "HDR Subject <ovh-unknown-%d@test.invalid>", hSeq.Add(1))
 }
 
 func TestOvhHdrAnyHeader(t *testing.T) {
@@ -410,7 +400,7 @@ func TestOvhOverviewFmt(t *testing.T) {
 	if err := client.ExpectLines(ovhBlock(t, c, 215, "list overview.fmt"), want); err != nil {
 		t.Fatal(err)
 	}
-	ovhExpect(t, c, 501, "LIST OVERVIEW.FMT x")
+	c.ExpectCmd(501, "LIST OVERVIEW.FMT x")
 	// Other keywords still reach the hardened handleList.
 	ovhBlock(t, c, 215, "LIST ACTIVE")
 }
@@ -433,8 +423,8 @@ func TestOvhListHeaders(t *testing.T) {
 			t.Fatalf("%s: %s", cmd, msg)
 		}
 	}
-	ovhExpect(t, c, 501, "LIST HEADERS FOO")
-	ovhExpect(t, c, 501, "LIST HEADERS MSGID RANGE") // too many words (LIST max 2)
+	c.ExpectCmd(501, "LIST HEADERS FOO")
+	c.ExpectCmd(501, "LIST HEADERS MSGID RANGE") // too many words (LIST max 2)
 }
 
 // ---------------------------------------------------------------------------
@@ -488,5 +478,5 @@ func TestOvhLargeRange(t *testing.T) {
 	if err := client.ExpectLines(ovhBlock(t, c, 225, "HDR Subject 2500-"), []string{"2500 Test article 2500"}); err != nil {
 		t.Fatal(err)
 	}
-	ovhExpect(t, c, 423, "OVER 2501-9223372036854775807")
+	c.ExpectCmd(423, "OVER 2501-9223372036854775807")
 }
