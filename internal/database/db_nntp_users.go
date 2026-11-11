@@ -247,12 +247,17 @@ func (db *Database) CreateNNTPUserForWebUser(webUserID int64) error {
 		nntpUsername = generateRandomString(16)
 	}
 
-	// Create NNTP user with read-only permissions
+	// The NNTP account may post when its web user may post (users.no_posting = 0); a web
+	// user that cannot be read keeps the account read-only.
+	posting := false
+	if u, err := db.GetUserByID(webUserID); err == nil && u.NoPosting == 0 {
+		posting = true
+	}
 	nntpUser := &models.NNTPUser{
 		Username:  nntpUsername,
 		Password:  nntpPassword,
 		MaxConns:  DefaultNNTPUserMaxConns,
-		Posting:   false, // Read-only by default
+		Posting:   posting,
 		WebUserID: webUserID,
 		IsActive:  true,
 	}
