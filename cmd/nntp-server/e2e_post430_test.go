@@ -23,7 +23,6 @@ package main
 // usable -nntphostname.
 
 import (
-	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -50,22 +49,6 @@ const (
 	// p430Poll is the pause between STAT polls
 	p430Poll = 100 * time.Millisecond
 )
-
-// p430Build builds nntp-server and nntpmgr into dir.
-func p430Build(t *testing.T, goTool, dir string) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*testWait) // cold cgo builds are slow
-	defer cancel()
-	// the binaries refuse to start with the default appVersion "-unset-"
-	cmd := exec.CommandContext(ctx, goTool, "build", "-o", dir+string(filepath.Separator), "-ldflags", "-X main.appVersion=e2e-test",
-		"github.com/go-while/go-pugleaf/cmd/nntp-server",
-		"github.com/go-while/go-pugleaf/cmd/nntpmgr")
-	cmd.WaitDelay = 2 * time.Second
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("go build: %v\n%s", err, out)
-	}
-}
 
 // p430Stat sends STAT <id> and returns the status code and line.
 func p430Stat(c *client.Conn, id string) (int, string, error) {
@@ -164,7 +147,7 @@ func p430Auth(t *testing.T, srv *xrefServer) *client.Conn {
 	t.Helper()
 	c := srv.dial(t)
 	if code, line, err := c.TryLogin(p430User, p430Pass); err != nil || code != 281 {
-		t.Fatalf("AUTHINFO: code=%d line=%q err=%v\n%s", code, line, err, xrefOutput(srv.out, 30))
+		t.Fatalf("AUTHINFO: code=%d line=%q err=%v\n%s", code, line, err, srv.out(30))
 	}
 	return c
 }
@@ -179,8 +162,7 @@ func TestE2EPost430Binary(t *testing.T) {
 	if os.Geteuid() < 1000 {
 		t.Skip("running as root/system user (uid < 1000): the binaries refuse to open a database")
 	}
-	goTool, err := exec.LookPath("go")
-	if err != nil {
+	if _, err := exec.LookPath("go"); err != nil {
 		t.Skipf("go tool not found: %v", err)
 	}
 	host, err := xrefHostname()
@@ -191,19 +173,18 @@ func TestE2EPost430Binary(t *testing.T) {
 	root := t.TempDir()
 	e := &xrefEnv{
 		t: t, host: host,
-		server: filepath.Join(root, "bin", "nntp-server"),
-		mgr:    filepath.Join(root, "bin", "nntpmgr"),
+		server: e2eBuild(t, "github.com/go-while/go-pugleaf/cmd/nntp-server"),
+		mgr:    e2eBuild(t, "github.com/go-while/go-pugleaf/cmd/nntpmgr"),
 		data:   filepath.Join(root, "data"),
 		run:    filepath.Join(root, "run"),
 	}
 	if err := os.MkdirAll(e.run, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	p430Build(t, goTool, filepath.Join(root, "bin"))
 
 	// seed: nntpmgr creates the schema and the posting user, then the two groups by SQL
-	if out, err := e.tool(e.mgr, "-data", e.data, "-create", "-username", p430User, "-password", p430Pass, "-posting", "-maxconns", "4"); err != nil {
-		t.Fatalf("nntpmgr -create: %v\n%s", err, e2eTail(out, 20))
+	if out, code, err := e.tool(e.mgr, "-data", e.data, "-create", "-username", p430User, "-password", p430Pass, "-posting", "-maxconns", "4"); err != nil || code != 0 {
+		t.Fatalf("nntpmgr -create: code=%d err=%v\n%s", code, err, e2eTail(out, 20))
 	}
 	mainDB, err := sql.Open("sqlite3", filepath.Join(e.data, "cfg", "pugleaf.sq3"))
 	if err != nil {
@@ -239,8 +220,8 @@ func TestE2EPost430Binary(t *testing.T) {
 	srv := e.start("partial", "-local430ttl", "60s")
 	r.check("P01", "default run: startup log has post-commit-wait=5s and local430ttl=1m0s", func() error {
 		for _, want := range []string{"post-commit-wait=5s", "local430ttl=1m0s"} {
-			if !xrefLogHas(srv.out, want) {
-				return fmt.Errorf("startup log has no %q:\n%s", want, xrefOutput(srv.out, 20))
+			if !srv.logHas(want) {
+				return fmt.Errorf("startup log has no %q:\n%s", want, srv.out(20))
 			}
 		}
 		return nil
@@ -255,7 +236,7 @@ func TestE2EPost430Binary(t *testing.T) {
 		fmt.Printf("INFO P02 [nntp] POST dot to 240: %s (-post-commit-wait 5s)\n", took.Round(time.Millisecond))
 		return nil
 	}()) {
-		t.Fatalf("server output:\n%s", xrefOutput(srv.out, 40))
+		t.Fatalf("server output:\n%s", srv.out(40))
 	}
 
 	// same connection, no GROUP, no polling: the 240 means the group DB has the row
@@ -384,8 +365,8 @@ func TestE2EPost430Binary(t *testing.T) {
 	// ---------------------------------------------------------------- -post-commit-wait 0
 	srv = e.start("partial", "-local430ttl", "60s", "-post-commit-wait", "0")
 	r.check("P20", "-post-commit-wait 0: startup log has post-commit-wait=0s", func() error {
-		if !xrefLogHas(srv.out, "post-commit-wait=0s") {
-			return fmt.Errorf("startup log has no %q:\n%s", "post-commit-wait=0s", xrefOutput(srv.out, 20))
+		if !srv.logHas("post-commit-wait=0s") {
+			return fmt.Errorf("startup log has no %q:\n%s", "post-commit-wait=0s", srv.out(20))
 		}
 		return nil
 	}())
@@ -421,10 +402,9 @@ func TestE2EPost430Binary(t *testing.T) {
 
 	// ---------------------------------------------------------------- negative wait
 	r.check("P30", "-post-commit-wait -1s exits 1", func() error {
-		out, err := e.tool(e.server, "-data", e.data, "-nntphostname", host, "-nntptcpport", "0", "-post-commit-wait", "-1s")
-		var ee *exec.ExitError
-		if !errors.As(err, &ee) || ee.ExitCode() != 1 {
-			return fmt.Errorf("err=%v, want exit 1; output:\n%s", err, e2eTail(out, 10))
+		out, code, err := e.tool(e.server, "-data", e.data, "-nntphostname", host, "-nntptcpport", "0", "-post-commit-wait", "-1s")
+		if err != nil || code != 1 {
+			return fmt.Errorf("code=%d err=%v, want exit 1; output:\n%s", code, err, e2eTail(out, 10))
 		}
 		if !strings.Contains(out, "-post-commit-wait must not be negative") {
 			return fmt.Errorf("output has no usage error:\n%s", e2eTail(out, 10))

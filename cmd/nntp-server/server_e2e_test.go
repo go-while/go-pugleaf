@@ -48,6 +48,7 @@ import (
 	"github.com/go-while/go-pugleaf/internal/nntp"
 	"github.com/go-while/go-pugleaf/internal/processor"
 	"github.com/go-while/nntp-testkit/client"
+	"github.com/go-while/nntp-testkit/proc"
 )
 
 // e2eHostname is processor.LocalNNTPHostname in the in-process tests.
@@ -270,6 +271,11 @@ func e2eTeardown(code int, keep bool, srv *nntp.NNTPServer, srvWG *sync.WaitGrou
 	if err := db.Shutdown(); err != nil {
 		fail("Shutdown: " + err.Error())
 	}
+	if e2eBinDir != "" {
+		if err := os.RemoveAll(e2eBinDir); err != nil {
+			fail("removing the build directory: " + err.Error())
+		}
+	}
 	if !keep {
 		// kept only on request: every PUGLEAF_KNOWN_BUGS=1 run exits non-zero
 		if os.Getenv("PUGLEAF_TEST_KEEP") == "1" {
@@ -279,6 +285,27 @@ func e2eTeardown(code int, keep bool, srv *nntp.NNTPServer, srvWG *sync.WaitGrou
 		}
 	}
 	return code
+}
+
+// e2eBinDir is the one output directory of e2eBuild in this test binary: proc.GoBuild caches
+// a build per (output path, package, ldflags), so every test that needs the same binary shares
+// one build. It is removed in e2eTeardown.
+var (
+	e2eBinOnce sync.Once
+	e2eBinDir  string
+	e2eBinErr  error
+)
+
+// e2eBuild builds a main package of this repository with the appVersion the binaries need (the
+// default "-unset-" makes them refuse to start) and returns the binary's path (kit
+// proc.GoBuild: one "go build" under a timeout of at least five minutes, cached per process).
+func e2eBuild(t *testing.T, pkg string) string {
+	t.Helper()
+	e2eBinOnce.Do(func() { e2eBinDir, e2eBinErr = os.MkdirTemp("", "pugleaf-e2ebin-") })
+	if e2eBinErr != nil {
+		t.Fatalf("MkdirTemp: %v", e2eBinErr)
+	}
+	return proc.GoBuild(t, e2eBinDir, pkg, "-X main.appVersion=e2e-test")
 }
 
 // e2eWaitTimeout runs fn in a goroutine and reports whether it returned within d.

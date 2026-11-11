@@ -30,7 +30,6 @@ package main
 
 import (
 	"bufio"
-	"context"
 	"fmt"
 	"net"
 	"os"
@@ -42,6 +41,7 @@ import (
 	"testing"
 	"time"
 
+	testkit "github.com/go-while/nntp-testkit"
 	"github.com/go-while/nntp-testkit/client"
 	"github.com/go-while/nntp-testkit/proc"
 )
@@ -159,23 +159,6 @@ func ulQuit(c *client.Conn) error {
 	return nil
 }
 
-// ulBuild builds the server binary into dir and returns its path.
-func ulBuild(t *testing.T, goTool, dir string) string {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*testWait) // cold cgo builds are slow
-	defer cancel()
-	bin := filepath.Join(dir, "pugleaf-nntp-server")
-	// the binary refuses to start with the default appVersion "-unset-"
-	cmd := exec.CommandContext(ctx, goTool, "build", "-o", bin, "-ldflags", "-X main.appVersion=e2e-test",
-		"github.com/go-while/go-pugleaf/cmd/nntp-server")
-	cmd.WaitDelay = 2 * time.Second
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("go build: %v\n%s", err, out)
-	}
-	return bin
-}
-
 func TestE2EUlimitBinary(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: builds and runs the server binary")
@@ -192,8 +175,7 @@ func TestE2EUlimitBinary(t *testing.T) {
 	if os.Geteuid() < 1000 {
 		t.Skip("running as root/system user (uid < 1000): the binary refuses to open a database")
 	}
-	goTool, err := exec.LookPath("go")
-	if err != nil {
+	if _, err := exec.LookPath("go"); err != nil {
 		t.Skipf("go tool not found: %v", err)
 	}
 	host, err := xrefHostname()
@@ -202,7 +184,7 @@ func TestE2EUlimitBinary(t *testing.T) {
 	}
 
 	tmp := t.TempDir()
-	bin := ulBuild(t, goTool, tmp)
+	bin := e2eBuild(t, "github.com/go-while/go-pugleaf/cmd/nntp-server")
 	data := filepath.Join(tmp, "data-test-ulimit")
 	run := filepath.Join(tmp, "run")
 	for _, d := range []string{data, run} {
@@ -210,10 +192,7 @@ func TestE2EUlimitBinary(t *testing.T) {
 			t.Fatalf("mkdir %s: %v", d, err)
 		}
 	}
-	port, err := xrefFreePort()
-	if err != nil {
-		t.Fatalf("free port: %v", err)
-	}
+	port := testkit.FreePort(t)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 
 	p := proc.StartTCP(t, proc.Options{
