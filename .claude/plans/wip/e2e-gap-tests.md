@@ -180,7 +180,12 @@ parity (DEL) with INN: `strict-del-passes` is deliberate.
   (`readArticleBlock`) counts dot-stuffing while `common.WireArticleSize` does not — make all three limits
   (server, peer `in_max_size`, group) measure the same thing (un-stuffed article as received, before
   `feedPath`; INN's Bytes also excludes the stuffing dots) and update TestIwProcessorWireSize /
-  TestIwSizeLimitDotStuffing; (d) the D3 pins in `nntp-intake-wire_test.go` (`// D3`: IHAVE `<x@[a<b]>` → 501,
+  TestIwSizeLimitDotStuffing (marked `// W2-size`). Review notes: the honest size is only known at read time,
+  so carry it into the processor (a `models.Article` field or parameter) instead of recomputing it from the
+  mutated header block; on POST `injectProtoArticle` adds Injection-Info/Message-ID/Date/Path (100+ octets) —
+  the group limit must not count those either; `readArticleBlock` subtracts the stuffing dots it strips when
+  comparing against `maxBytes`, but `maxArticleDrainBytes` keeps counting raw wire bytes (it caps wire volume);
+  (d) the D3 pins in `nntp-intake-wire_test.go` (`// D3`: IHAVE `<x@[a<b]>` → 501,
   CHECK → 438) become 335/238.
 
 ### Wave 3 (after wave 1+2 merged; touches many test files, so alone)
