@@ -3,9 +3,15 @@ package nntp
 // Bogus newsgroup names (plan e2e-gap-tests, slice intake-wire, G12; source: INN
 // tests/data/overview/bogus). Names like "..foo..", "../.." and "/" are not newsgroup
 // names (RFC 5536 §3.1.4): the server must answer 411 for them, must never create a group
-// database for such a name (SEC-2: database.GetGroupDB would create a file for any name,
-// and SanitizeGroupName maps "../.." and "/" to the same "junk"), and must refuse an
-// article whose Newsgroups header carries one.
+// database for such a name (SEC-2: database.GetGroupDB creates one for any name), and must
+// refuse an article whose Newsgroups header carries one.
+//
+// A group database lives at <DataDir>/db/<MD5Hash(name)>/<SanitizeGroupName(name)>.db
+// (db_groupdbs.go): the directory comes from the raw name, the file name from the
+// sanitized one, and SanitizeGroupName maps "../..", "/", "." and ".." all to "junk".
+// The checks below therefore look at the directory GetGroupDB would create for the bogus
+// name and at that sanitized basename under any directory, instead of diffing the whole
+// shared data directory (which other tests write to, and which -shuffle reorders).
 //
 // Identifiers use the gn / TestGn prefix (contract K2).
 
@@ -14,7 +20,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/go-while/go-pugleaf/internal/database"
@@ -27,34 +32,67 @@ func gnBogusNames() []string {
 	return []string{"..foo..", "../..", "/", ".", ".."}
 }
 
-// gnSnapshot lists what the data directory holds now: every entry under <DataDir>/db
-// (grpDBEntries) plus the database files directly in <DataDir>, so a group database
-// created outside db/ is seen as well.
-func gnSnapshot(t *testing.T) map[string]bool {
+// gnGroupDBDir is the directory GetGroupDB would create for name:
+// <DataDir>/db/<MD5Hash(name)>, hashed from the raw name
+// (database.GroupHashMap.GroupToHash is MD5Hash).
+func gnGroupDBDir(t *testing.T, name string) string {
 	t.Helper()
-	out := grpDBEntries(t)
-	m, err := filepath.Glob(filepath.Join(hDataDir(t), "*.sq3*"))
-	if err != nil {
-		t.Fatalf("glob: %v", err)
-	}
-	for _, p := range m {
-		out[p] = true
-	}
-	return out
+	return filepath.Join(hDataDir(t), "db", database.MD5Hash(name))
 }
 
-// gnNoNewFiles fails when anything was created under <DataDir>/db or <DataDir> since
-// before, and when any of names got a newsgroups row.
-func gnNoNewFiles(t *testing.T, before map[string]bool, what string, names []string) {
+// gnLayoutPremise checks what the negative tests below rely on: for a group that really
+// has a database, gnGroupDBDir names the directory it lives in and the file inside is
+// <SanitizeGroupName(name)>.db. Without this a wrong path would make every "no group
+// database was created" check pass for the wrong reason.
+func gnLayoutPremise(t *testing.T) {
+	t.Helper()
+	g := hGroup(t, "t11.layout", 1, nil) // one article, so the group DB exists
+	dir := gnGroupDBDir(t, g)
+	want := filepath.Join(dir, database.SanitizeGroupName(g)+".db")
+	if _, err := os.Stat(want); err != nil {
+		entries, _ := os.ReadDir(dir)
+		held := make([]string, 0, len(entries))
+		for _, e := range entries {
+			held = append(held, e.Name())
+		}
+		t.Fatalf("group %s has no database at %s (%v): the layout of gnGroupDBDir is wrong, so the checks below prove nothing", g, want, held)
+	}
+	if m, err := filepath.Glob(filepath.Join(hDataDir(t), "db", "*", database.SanitizeGroupName(g)+".db*")); err != nil || len(m) == 0 {
+		t.Fatalf("glob for %s found nothing (%v): the basename glob of the checks below never matches", g, err)
+	}
+}
+
+// gnNoGroupDB fails when a group database exists for any of names: neither the directory
+// GetGroupDB would create for it, nor a file named after its sanitized form under any
+// directory of <DataDir>/db (the sanitized names of the bogus names are "foo" and "junk",
+// which no group of the harness, always "<prefix>.<seq>", can produce). It also fails when
+// the name got a newsgroups row. what names the command under test.
+func gnNoGroupDB(t *testing.T, what string, names []string) {
 	t.Helper()
 	db := hTestDB(t)
 	var errs []error
-	for p := range gnSnapshot(t) {
-		if !before[p] {
-			errs = append(errs, fmt.Errorf("%s created %s", what, p))
-		}
-	}
 	for _, name := range names {
+		dir := gnGroupDBDir(t, name)
+		switch entries, err := os.ReadDir(dir); {
+		case err == nil:
+			held := make([]string, 0, len(entries))
+			for _, e := range entries {
+				held = append(held, e.Name())
+			}
+			errs = append(errs, fmt.Errorf("%s created %s (holding %v) for name %q", what, dir, held, name))
+		case !os.IsNotExist(err):
+			t.Fatalf("read %s: %v", dir, err)
+		}
+		// The same file under another hash directory (the SanitizeGroupName collision),
+		// including its -wal and -shm companions.
+		pat := filepath.Join(hDataDir(t), "db", "*", database.SanitizeGroupName(name)+".db*")
+		m, err := filepath.Glob(pat)
+		if err != nil {
+			t.Fatalf("glob %s: %v", pat, err)
+		}
+		for _, p := range m {
+			errs = append(errs, fmt.Errorf("%s created %s for name %q", what, p, name))
+		}
 		if _, err := db.MainDBGetNewsgroup(name); err == nil {
 			errs = append(errs, fmt.Errorf("%s created a newsgroups row for %q", what, name))
 		}
@@ -68,8 +106,8 @@ func gnNoNewFiles(t *testing.T, before map[string]bool, what string, names []str
 // §6.1.1.2, §6.1.2.2), create no group database and leave the session without a selection,
 // so a group-relative command such as XHDR answers 412 and not data of another group.
 func TestGnSelectBogusGroup(t *testing.T) {
+	gnLayoutPremise(t)
 	names := gnBogusNames()
-	before := gnSnapshot(t)
 	hs := newTestServer(t, hServerOpts{})
 
 	for _, name := range names {
@@ -98,36 +136,34 @@ func TestGnSelectBogusGroup(t *testing.T) {
 			}
 		})
 	}
-	gnNoNewFiles(t, before, "GROUP/LISTGROUP of a bogus name", names)
+	gnNoGroupDB(t, "GROUP/LISTGROUP of a bogus name", names)
 }
 
 // TestGnBogusNewsgroupsHeader: an article whose Newsgroups header holds a bogus name is
 // refused (437 for IHAVE, 439 for TAKETHIS, 441 for POST: common.ParseNewsgroups refuses
 // the header, so the article is invalid), nothing is stored and no group database appears.
 // Pinned: one bogus name in a crosspost refuses the whole article, it is not dropped from
-// the list.
+// the list. Every probe uses a fresh message-id, so a refusal one probe remembers can never
+// decide the answer to a later one.
 func TestGnBogusNewsgroupsHeader(t *testing.T) {
 	good := hGroup(t, "t11.bogushdr", 0, nil)
 	names := gnBogusNames()
-	before := gnSnapshot(t)
 
 	t.Run("feed", func(t *testing.T) {
 		proc := iwPass()
 		hs := iwPeerServer(t, proc, 0, 0)
 		c := hs.dial(t)
-		for i, name := range names {
+		for _, name := range names {
 			for _, groups := range []string{name, good + "," + name} {
-				id := hMessageID("t11.bogushdr", int64(i+1))
-				head := iwHead(id, groups, "bogus newsgroups")
-				code, line, _ := c.Ihave(id, iwWire(head, []string{"body"}))
+				id := iwID("t11.bogushdr")
+				code, line, _ := c.Ihave(id, iwWire(iwHead(id, groups, "bogus newsgroups"), []string{"body"}))
 				if err := client.ExpectCode(code, line, 437); err != nil {
-					t.Errorf("IHAVE with Newsgroups: %q: %v", groups, err)
+					t.Errorf("IHAVE %s with Newsgroups: %q: %v", id, groups, err)
 				}
-				id = hMessageID("t11.bogushdr", int64(i+1))
-				head = iwHead(id, groups, "bogus newsgroups")
-				code, line, _ = c.Takethis(id, iwWire(head, []string{"body"}))
+				id = iwID("t11.bogushdr")
+				code, line, _ = c.Takethis(id, iwWire(iwHead(id, groups, "bogus newsgroups"), []string{"body"}))
 				if err := client.ExpectCode(code, line, 439); err != nil {
-					t.Errorf("TAKETHIS with Newsgroups: %q: %v", groups, err)
+					t.Errorf("TAKETHIS %s with Newsgroups: %q: %v", id, groups, err)
 				}
 			}
 		}
@@ -140,47 +176,50 @@ func TestGnBogusNewsgroupsHeader(t *testing.T) {
 		user, pass := hUser(t, true, true)
 		c := hs.dial(t)
 		authMustLogin(t, c, user, pass)
-		for i, name := range names {
+		for _, name := range names {
 			for _, groups := range []string{name, good + "," + name} {
-				id := hMessageID("t11.bogushdr-post", int64(i+1))
-				head := iwHead(id, groups, "bogus newsgroups")
-				code, line, sent := c.Post(iwWire(head, []string{"body"}))
+				id := iwID("t11.bogushdr-post")
+				code, line, sent := c.Post(iwWire(iwHead(id, groups, "bogus newsgroups"), []string{"body"}))
 				if err := client.ExpectCode(code, line, 441); err != nil || !sent {
-					t.Errorf("POST with Newsgroups: %q: %v (sent=%v, %q)", groups, err, sent, line)
+					t.Errorf("POST %s with Newsgroups: %q: %v (sent=%v, %q)", id, groups, err, sent, line)
 				}
 			}
 		}
 		iwWantProcessed(t, proc)
 	})
 
-	gnNoNewFiles(t, before, "an article with a bogus Newsgroups header", names)
+	gnNoGroupDB(t, "an article with a bogus Newsgroups header", names)
 }
 
-// TestGnSanitizeCollision: the names "../.." and "/" both sanitize to "junk", so a server
-// that opened a group database for an unknown name would make them share one file. The
-// group database directory must hold no "junk" entry after both were tried.
+// TestGnSanitizeCollision: "../..", "/", "." and ".." all sanitize to "junk", so a server
+// that opened a group database for an unknown name would make them share one file (their
+// hash directories differ, the file name does not). After all of them were tried there
+// must be no group database for any of them at all: no "junk" file anywhere under
+// <DataDir>/db and none of the hash directories GetGroupDB would have created.
 func TestGnSanitizeCollision(t *testing.T) {
-	for _, name := range []string{"../..", "/"} {
+	names := []string{"../..", "/", ".", ".."}
+	for _, name := range names {
 		if got := database.SanitizeGroupName(name); got != "junk" {
 			t.Fatalf("SanitizeGroupName(%q) = %q, want junk (the test's premise)", name, got)
 		}
 	}
 	hs := newTestServer(t, hServerOpts{})
 	c := hs.dial(t)
-	for _, name := range []string{"../..", "/"} {
+	for _, name := range names {
 		code, line := c.Cmd("GROUP %s", name)
 		if err := client.ExpectCode(code, line, 411); err != nil {
 			t.Errorf("GROUP %q: %v", name, err)
 		}
 	}
-	root := filepath.Join(hDataDir(t), "db")
-	entries, err := os.ReadDir(root)
-	if err != nil && !os.IsNotExist(err) {
-		t.Fatalf("read %s: %v", root, err)
+	// Explicit here (gnNoGroupDB checks the same glob per name): no junk* under any
+	// directory of <DataDir>/db.
+	pat := filepath.Join(hDataDir(t), "db", "*", "junk*")
+	m, err := filepath.Glob(pat)
+	if err != nil {
+		t.Fatalf("glob %s: %v", pat, err)
 	}
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), "junk") {
-			t.Errorf("GROUP of a bogus name created %s", filepath.Join(root, e.Name()))
-		}
+	for _, p := range m {
+		t.Errorf("GROUP of a bogus name created %s", p)
 	}
+	gnNoGroupDB(t, "GROUP of a name that sanitizes to junk", names)
 }

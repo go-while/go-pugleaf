@@ -51,6 +51,13 @@ func iwPeerServer(t *testing.T, proc ArticleProcessor, maxArtSize int, inMaxSize
 	return newTestServer(t, hServerOpts{Proc: proc, Peers: hPeers(p), Hostname: peerFeedHost, MaxArtSize: maxArtSize})
 }
 
+// iwID returns a message-id for group that no other probe uses (hSeq). Every offer gets a
+// fresh one, so a refusal the server remembers for one probe (RememberReject) can never
+// decide the answer to a later probe of the same test.
+func iwID(group string) string {
+	return hMessageID(group, hSeq.Add(1))
+}
+
 // iwHead returns the mandatory header lines (RFC 5536 §3) of a valid article.
 func iwHead(id, group, subject string) []string {
 	return []string{
@@ -138,7 +145,7 @@ func TestIwBareTakethis(t *testing.T) {
 	hs := iwPeerServer(t, proc, 0, 0)
 	c := hs.dial(t)
 
-	idDrained, idNext := hMessageID(g, 1), hMessageID(g, 2)
+	idDrained, idNext := iwID(g), iwID(g)
 	drained := client.StuffBytes(iwWire(iwHead(idDrained, g, "bare takethis"), []string{"body"}))
 	next := client.StuffBytes(iwWire(iwHead(idNext, g, "after the bare takethis"), []string{"body"}))
 
@@ -176,13 +183,13 @@ func TestIwBareIhave(t *testing.T) {
 	hs := iwPeerServer(t, proc, 0, 0)
 	c := hs.dial(t)
 
-	for _, cmd := range []string{"IHAVE", "IHAVE " + hMessageID(g, 1) + " " + hMessageID(g, 2)} {
+	for _, cmd := range []string{"IHAVE", "IHAVE " + iwID(g) + " " + iwID(g)} {
 		code, line := c.Cmd("%s", cmd)
 		if err := client.ExpectCode(code, line, 501); err != nil {
 			t.Errorf("%q: %v", cmd, err)
 		}
 	}
-	id := hMessageID(g, 3)
+	id := iwID(g)
 	code, line, sent := c.Ihave(id, iwWire(iwHead(id, g, "after the bare ihave"), []string{"body"}))
 	if err := client.ExpectCode(code, line, 235); err != nil || !sent {
 		t.Fatalf("IHAVE %s after the syntax errors: %v (sent=%v, %q)", id, err, sent, line)
@@ -213,7 +220,7 @@ func TestIwManyHeaderLines(t *testing.T) {
 			proc := iwPass()
 			hs := iwPeerServer(t, proc, 0, 0)
 			c := hs.dial(t)
-			idBig, idNormal := hMessageID(g, 1), hMessageID(g, 2)
+			idBig, idNormal := iwID(g), iwID(g)
 
 			head := iwHead(idBig, g, "many header lines")
 			for i := 0; i < nHead; i++ {
@@ -290,7 +297,7 @@ func TestIwServerSizeLimitExact(t *testing.T) {
 		c := hs.dial(t)
 		authMustLogin(t, c, user, pass)
 
-		idOK, idOver := hMessageID(g, 1), hMessageID(g, 2)
+		idOK, idOver := iwID(g), iwID(g)
 		code, line := iwLimitProbe(t, c, "POST", idOK, g, limit)
 		if err := client.ExpectCode(code, line, 240); err != nil {
 			t.Errorf("POST of exactly %d octets: %v", limit, err)
@@ -315,7 +322,7 @@ func TestIwServerSizeLimitExact(t *testing.T) {
 			proc := iwPass()
 			hs := iwPeerServer(t, proc, limit, 0)
 			c := hs.dial(t)
-			idOK, idOver := hMessageID(g, 3), hMessageID(g, 4)
+			idOK, idOver := iwID(g), iwID(g)
 			code, line := iwLimitProbe(t, c, cmd.name, idOK, g, limit)
 			if err := client.ExpectCode(code, line, cmd.ok); err != nil {
 				t.Errorf("%s of exactly %d octets: %v", cmd.name, limit, err)
@@ -348,7 +355,7 @@ func TestIwPeerSizeLimitExact(t *testing.T) {
 			proc := iwPass()
 			hs := iwPeerServer(t, proc, 8192, peerLimit)
 			c := hs.dial(t)
-			idOK, idOver := hMessageID(g, 1), hMessageID(g, 2)
+			idOK, idOver := iwID(g), iwID(g)
 			code, line := iwLimitProbe(t, c, cmd.name, idOK, g, peerLimit)
 			if err := client.ExpectCode(code, line, cmd.ok); err != nil {
 				t.Errorf("%s of exactly in_max_size (%d) octets: %v", cmd.name, peerLimit, err)
@@ -365,9 +372,10 @@ func TestIwPeerSizeLimitExact(t *testing.T) {
 // TestIwSizeLimitDotStuffing: the limit counts the octets that cross the wire, so the
 // second dot of a dot-stuffed line counts too: an article whose un-stuffed size is exactly
 // the limit but that holds one "." body line is refused, because N+1 octets arrive.
-// Note (pinned, not an RFC rule): a newsgroup's max_art_size is compared against
+// W2-size (pinned, not an RFC rule): a newsgroup's max_art_size is compared against
 // common.WireArticleSize (internal/processor/intake.go), which does NOT count the stuffing
-// dot, so the two limits differ by one octet per dot-stuffed line.
+// dot, so the two limits differ by one octet per dot-stuffed line. A wave-2 change that
+// makes the two counts agree must update this assertion.
 func TestIwSizeLimitDotStuffing(t *testing.T) {
 	const limit = 1024
 	g := hGroup(t, "t10.sizestuff", 0, nil)
@@ -375,7 +383,7 @@ func TestIwSizeLimitDotStuffing(t *testing.T) {
 	hs := iwPeerServer(t, proc, limit, 0)
 	c := hs.dial(t)
 
-	id := hMessageID(g, 1)
+	id := iwID(g)
 	head := iwHead(id, g, "dot stuffed")
 	fixed := len(iwWire(head, nil)) + 2 + 3 // headers, separator, the "." line, the pad line's CRLF
 	body := []string{strings.Repeat("x", limit-fixed), "."}
@@ -401,9 +409,10 @@ const iwOfferedPath = "upstream.invalid!not-for-mail"
 // common.WireArticleSize of them is the size a newsgroup's max_art_size is compared against
 // (internal/processor/intake.go:74 drops a group when wireSize > max_art_size), so that
 // limit is measured against the transferred octets plus exactly the octets the server added
-// to the Path header and nothing else. Pinned behaviour: the group limit therefore sees a
-// slightly larger article than the peer sent (the peer statistics use the transferred size,
-// taken before feedPath).
+// to the Path header and nothing else. W2-size (pinned behaviour): the group limit
+// therefore sees a slightly larger article than the peer sent (the peer statistics use the
+// transferred size, taken before feedPath); a wave-2 change that measures the transferred
+// size instead must update this assertion.
 func TestIwProcessorWireSize(t *testing.T) {
 	const size = 700
 	g := hGroup(t, "t10.procwiresize", 0, nil)
@@ -413,8 +422,8 @@ func TestIwProcessorWireSize(t *testing.T) {
 			proc := iwPass()
 			hs := iwPeerServer(t, proc, 0, 0)
 			c := hs.dial(t)
-			for i, n := range []int{size, size + 1} {
-				id := hMessageID(g, int64(i+1))
+			for _, n := range []int{size, size + 1} {
+				id := iwID(g)
 				code, line := iwLimitProbe(t, c, cmd, id, g, n)
 				if code != 235 && code != 239 {
 					t.Fatalf("%s of %d octets: %q", cmd, n, line)
@@ -456,7 +465,7 @@ func TestIwDripIhave(t *testing.T) {
 	hs := iwPeerServer(t, proc, 0, 0)
 	c := hs.dial(t)
 
-	id := hMessageID(g, 1)
+	id := iwID(g)
 	head := append(iwHead(id, g, "dripped"), iwDotHead)
 	body := []string{"first", ".", "last"}
 	code, line := c.Cmd("IHAVE %s", id)
@@ -498,7 +507,7 @@ func TestIwDripPipelined(t *testing.T) {
 	hs := iwPeerServer(t, proc, 0, 0)
 	c := hs.dial(t)
 
-	id := hMessageID(g, 1)
+	id := iwID(g)
 	head := append(iwHead(id, g, "dripped pipeline"), iwDotHead)
 	raw := "CHECK " + id + "\r\nTAKETHIS " + id + "\r\n" + string(client.StuffBytes(iwWire(head, []string{"."})))
 	if err := c.SendDrip([]byte(raw), iwDripPause); err != nil {
@@ -523,15 +532,18 @@ func TestIwDripPipelined(t *testing.T) {
 // G10: unusual valid message-ids
 
 // iwUnusualIDs are message-ids real articles carry that are unusual but valid under
-// RFC 5536 §3.1.3 / RFC 5322 §3.6.4 (source: NewsCache TestHistoryUnusualMessageIDs).
-func iwUnusualIDs() []string {
-	const domain = "iw.test.invalid"
+// RFC 5536 §3.1.3 / RFC 5322 §3.6.4 (source: NewsCache TestHistoryUnusualMessageIDs):
+// a quoted local part, specials, a domain literal, mixed case and one of exactly 250
+// octets. tag goes into every id, so two calls give two disjoint sets (the POST leg must
+// not offer an id the IHAVE leg already stored).
+func iwUnusualIDs(tag string) []string {
+	domain := tag + ".iw.test.invalid"
 	long := "<" + strings.Repeat("x", 250-3-len(domain)) + "@" + domain + ">" // exactly 250 octets
 	return []string{
-		`<"quoted.local"@iw.test.invalid>`,
-		`<a/b=c?d{e}%f!g@iw.test.invalid>`,
-		`<id@[127.0.0.1]>`,
-		`<UPPER.lower@IW.Test.INVALID>`,
+		`<"quoted.local"@` + domain + `>`,
+		`<a/b=c?d{e}%f!g@` + domain + `>`,
+		`<` + tag + `@[127.0.0.1]>`,
+		`<UPPER.lower@` + strings.ToUpper(tag) + `.IW.Test.INVALID>`,
 		long,
 	}
 }
@@ -556,9 +568,9 @@ func iwStoreArticle(db *database.Database, group string, num int64, a *models.Ar
 }
 
 // TestIwUnusualMessageIDs: an article whose Message-ID is unusual but valid is accepted by
-// IHAVE, stored under that id and found again by "ARTICLE <id>" / "STAT <id>", in the
-// selected group and through the processor lookup. Source: NewsCache
-// TestHistoryUnusualMessageIDs.
+// IHAVE and by POST (both check it with common.ValidMessageID), stored under that id and
+// found again by "ARTICLE <id>" / "STAT <id>", in the selected group and through the
+// processor lookup. Source: NewsCache TestHistoryUnusualMessageIDs.
 func TestIwUnusualMessageIDs(t *testing.T) {
 	db := hTestDB(t)
 	g := hGroup(t, "t10.unusualids", 0, nil)
@@ -588,13 +600,28 @@ func TestIwUnusualMessageIDs(t *testing.T) {
 	hs.S.SetXrefMode(XrefOff) // stored-header passthrough (Xref: lines: nntp-xref_test.go)
 	feed := hs.dial(t)
 
-	ids := iwUnusualIDs()
+	ids := iwUnusualIDs("ihave")
 	for _, id := range ids {
 		code, line, sent := feed.Ihave(id, iwWire(iwHead(id, g, "unusual id"), []string{"body"}))
 		if err := client.ExpectCode(code, line, 235); err != nil || !sent {
 			t.Fatalf("IHAVE %s (%d octets): %v (sent=%v, %q)", id, len(id), err, sent, line)
 		}
 	}
+
+	// The POST leg: the same ids, offered by a posting user (injectProtoArticle runs the
+	// same common.ValidMessageID check on the Message-ID header). The connection is a peer
+	// connection as well, which does not take the POST right away: POST needs the login.
+	postIDs := iwUnusualIDs("post")
+	user, pass := hUser(t, true, true)
+	poster := hs.dial(t)
+	authMustLogin(t, poster, user, pass)
+	for _, id := range postIDs {
+		code, line, sent := poster.Post(iwWire(iwHead(id, g, "unusual id"), []string{"body"}))
+		if err := client.ExpectCode(code, line, 240); err != nil || !sent {
+			t.Fatalf("POST %s (%d octets): %v (sent=%v, %q)", id, len(id), err, sent, line)
+		}
+	}
+	ids = append(ids, postIDs...)
 
 	// (a) the id is found in the selected group (RFC 3977 §6.2.1.3 step 1)
 	t.Run("in-group", func(t *testing.T) {
@@ -641,15 +668,16 @@ func TestIwUnusualMessageIDs(t *testing.T) {
 
 	// D3: "<" inside a no-fold-literal id-right (RFC 5536 mdtext) is valid, but today
 	// ValidMessageID refuses "<" anywhere, so the offer is a syntax error. Wave 2 (D3)
-	// turns these into 335/238.
+	// turns the 501 into 335 and the 438 into 238; each command gets its own connection,
+	// so a 335 then only makes its own case fail and never lets the server read the next
+	// command as article data.
 	t.Run("angle-in-domain-literal", func(t *testing.T) {
-		c := hs.dial(t)
 		const id = `<x@[a<b]>`
-		code, line := c.Cmd("IHAVE %s", id)
+		code, line := hs.dial(t).Cmd("IHAVE %s", id)
 		if err := client.ExpectCode(code, line, 501); err != nil { // D3
 			t.Errorf("IHAVE %s: %v", id, err)
 		}
-		code, line = c.Cmd("CHECK %s", id)
+		code, line = hs.dial(t).Cmd("CHECK %s", id)
 		if err := client.ExpectCode(code, line, 438); err != nil { // D3
 			t.Errorf("CHECK %s: %v", id, err)
 		}
@@ -660,6 +688,14 @@ func TestIwUnusualMessageIDs(t *testing.T) {
 // G13: a re-offer of an article that is gone
 
 // iwHistory returns an enabled history index in a temp dir, closed at cleanup.
+//
+// history.ENABLE_HISTORY is a package global that NewHistory reads once (history.go:189),
+// so it has to be true across that call and is restored afterwards. Writing another
+// package's global from here is only safe because: no test of internal/nntp calls
+// t.Parallel, so no other test runs while this one does; nothing outside internal/history
+// reads ENABLE_HISTORY (the running instance uses its own copy, h.enabled); and this is
+// the only test in the package that builds a history index. A second history-using test,
+// or a t.Parallel anywhere in this package, must move the flip into TestMain instead.
 func iwHistory(t *testing.T) *history.History {
 	t.Helper()
 	old := history.ENABLE_HISTORY
