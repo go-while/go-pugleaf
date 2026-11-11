@@ -581,6 +581,11 @@ func TestCliCmdOverviewMalformed(t *testing.T) {
 			"."}},
 		{Expect: "GROUP .*", Reply: []string{"211 5 1 5 g"}},
 		{Expect: "XHDR .*", Reply: []string{"221 headers follow", "0 x", "2 y", "."}},
+		// The usable record (2) is below the end of the range, so XHdrStreamed continues
+		// after it (plan e2e-gap-tests G15): the 423 ends the batch (every server answers
+		// the continuation, a script has to be told to).
+		{Expect: "GROUP .*", Reply: []string{"211 5 1 5 g"}},
+		{Expect: "XHDR .*", Reply: []string{"423 No articles in that range"}},
 	}})
 	c := cliCmdDial(t, s, nil)
 	var ov []OverviewLine

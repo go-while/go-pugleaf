@@ -304,8 +304,8 @@ func TestDLArtUpXHdrCutOff(t *testing.T) {
 // partial may be stored, the rest of the range is fetched on a fresh connection and the
 // article is asked for once (no retry loop).
 //
-// Pinned, and a finding of the slice: the progress moves past the article whose reply was
-// cut, so that one article is never fetched again. It is the same trade-off as the poisoned
+// FU-progress: pinned, and a finding of the slice: the progress moves past the article whose
+// reply was cut, so that one article is never fetched again. It is the same trade-off as the poisoned
 // article of TestDLArtFakePoisonedArticle - the commit barrier only holds the progress back
 // for articles that were queued for storage - and changing it would let one unreadable
 // article block a group for good.
@@ -435,7 +435,11 @@ func TestDLArtUpLowWater(t *testing.T) {
 		if got := e.stored(); len(got) != 0 {
 			t.Errorf("%d articles stored from an emptied group: %v", len(got), got)
 		}
-		e.wantProgress(0) // nothing was fetched: no progress to record
+		// FU-progress: nothing was fetched, so no progress is recorded - and the next run
+		// asks for the same range again. A range that stays empty for good (the provider
+		// answers the first ask with 423, or lists it completely with no record) therefore
+		// never advances: the livelock to decide on in a follow-up, pinned here.
+		e.wantProgress(0)
 		if n := f.articles.Load(); n != 0 {
 			t.Errorf("%d ARTICLE commands for an emptied group, want 0", n)
 		}
@@ -477,6 +481,10 @@ func TestDLArtUpModeReaderRefused(t *testing.T) {
 	}
 }
 
+// W2-fetch: if wave 2 gives the fetch path relay rules (accept a bare CR, reject NUL in the
+// header and in the body), this test and TestCliUpArticleNULAndCR in internal/nntp are the
+// pins to update.
+//
 // G19: a fetched article whose header block holds a bare CR or a NUL octet.
 //
 // Pinned behaviour: the fetch-mode header check refuses the whole article (common.

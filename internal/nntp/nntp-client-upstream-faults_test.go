@@ -389,10 +389,10 @@ func TestCliUpXHdrRecordCap(t *testing.T) {
 		}
 	})
 
-	// A reply with gaps is a range whose articles are gone, not a capped reply: the client
-	// must not ask again (that would cost a round trip per run and find nothing). Pinned
-	// because it is what keeps the re-asking from firing on every ordinary hole.
-	t.Run("gaps-are-not-a-cap", func(t *testing.T) {
+	// A capped reply over a region that also has gaps is still a capped reply, so the rule
+	// is "re-ask whenever a record ended below the end of the request", gaps included: the
+	// numbers after the last record are asked for once more and the 423 ends the batch.
+	t.Run("gaps-do-not-stop-the-re-ask", func(t *testing.T) {
 		const high = int64(20)
 		st := cliFakeNewStore()
 		cliQuirkFill(st, group, 1, high)
@@ -420,8 +420,70 @@ func TestCliUpXHdrRecordCap(t *testing.T) {
 				t.Fatalf("XHDR streamed %v, want %v", got, want)
 			}
 		}
-		if n := s.Count("XHDR"); n != 1 {
-			t.Errorf("%d XHDR commands, want 1 (a hole is not a record cap)", n)
+		if n := s.Count("XHDR"); n != 2 {
+			t.Errorf("%d XHDR commands, want 2 (one re-ask after the last record, 13)", n)
+		}
+	})
+
+	// A 423 to the first XHDR of a range is an error (the range was not listed, so the
+	// fetcher must not move its progress) but the status line was read completely: the
+	// session is in sync and the pool keeps the connection, as Pool.XOver does after a 423.
+	t.Run("423-keeps-the-connection", func(t *testing.T) {
+		st := cliFakeNewStore()
+		cliQuirkFill(st, group, 1, 5)
+		nums := cliFakeGroupNums(func(conn int, g cliFakeGroup) cliFakeGroup {
+			g.High = 20
+			return g
+		})
+		s := cliStoreServer(t, st, cliFakeStoreOpts{GroupNumbers: nums}, cliFakeFaults{})
+		pool := cliQuirkPool(t, s)
+		ch := make(chan HeaderLine, 8)
+		drained := make(chan struct{})
+		go func() {
+			defer close(drained)
+			for range ch {
+			}
+		}()
+		err := cliQuirkRun(t, "XHdrStreamedWait 10-20", func() error {
+			return pool.XHdrStreamedWait(group, "message-id", 10, 20, ch, nil)
+		})
+		<-drained
+		if !errors.Is(err, ErrNoArticlesInRange) {
+			t.Fatalf("XHdrStreamedWait over an empty range: err = %v, want ErrNoArticlesInRange", err)
+		}
+		if idle := pool.Stats().IdleConnections; idle != 1 {
+			t.Errorf("IdleConnections = %d, want 1 (a 423 leaves the session in sync)", idle)
+		}
+		if n := s.Accepted(); n != 1 {
+			t.Errorf("server accepted %d connections, want 1", n)
+		}
+	})
+
+	// The continuations of one batch are bounded: a provider that serves one record per
+	// request must not turn one range into hundreds of round trips. Past MaxXHdrReasks the
+	// batch ends where it would have ended without them (the rest of the range is skipped,
+	// logged once).
+	t.Run("re-asks-are-bounded", func(t *testing.T) {
+		const high = int64(200)
+		st := cliFakeNewStore()
+		st.AddGenerated(group, "one record per request", cliFakeGenerator{Low: 1, High: high})
+		so := cliFakeStoreOpts{HdrLines: func(conn int, g, field string, lines []string) []string {
+			if len(lines) > 1 {
+				return lines[:1]
+			}
+			return lines
+		}}
+		s := cliStoreServer(t, st, so, cliFakeFaults{})
+		c, err := cliDial(t, s, upFaultBackend)
+		if err != nil {
+			t.Fatalf("Connect: %v", err)
+		}
+		// 1 + MaxXHdrReasks requests, one record each, then the batch (and with it the
+		// whole range) ends
+		want := int64(MaxXHdrReasks) + 1
+		upFaultWantRun(t, upFaultStream(t, c, group, 1, high), 1, want)
+		if n := int64(s.Count("XHDR")); n != want {
+			t.Errorf("%d XHDR commands, want %d (MaxXHdrReasks=%d continuations)", n, want, MaxXHdrReasks)
 		}
 	})
 }
@@ -554,6 +616,10 @@ func TestCliUpTLSHostile(t *testing.T) {
 	}
 }
 
+// W2-fetch: if wave 2 gives the fetch path relay rules (accept a bare CR, reject NUL in the
+// header and in the body), this test and TestDLArtUpArticleNULAndCR in internal/processor
+// are the pins to update.
+//
 // G19: a fetched article whose header block holds a bare CR and a NUL octet. The client
 // stores both verbatim (nothing is turned into a space or dropped); the fetch-mode header
 // check is what refuses such an article (common.CheckHeaderBlock rule 1, in both modes),
