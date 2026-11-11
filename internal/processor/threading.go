@@ -121,15 +121,25 @@ func (proc *Processor) ProcessArticle(article *models.Article, legacyNewsgroup s
 		msgIdItem.Response = history.CaseLock
 		msgIdItem.Mux.Unlock()
 
-		// D12: fetch-mode header block check; malformed lines are dropped from the stored block
+		// D2: a NUL octet in the body refuses a fetched or imported article too
+		// (decision 2026-11-11: the fetch path follows the relay rules)
+		if intakeBodyHasNUL(article) {
+			log.Printf("[INTAKE] article '%s' (bulk) rejected: article contains NUL", article.MessageID)
+			proc.setCaseDupes(msgIdItem, bulkmode)
+			return history.CaseError, rejectArticle("article contains NUL")
+		}
+
+		// D12: fetch-mode header block check; malformed lines are dropped from the stored
+		// block, a bare CR or LF is kept verbatim and logged (relay rules)
 		if article.HeadersJSON != "" {
-			normalized, err := common.CheckHeaderBlock(strings.Split(article.HeadersJSON, "\n"), common.HeaderBlockFetch)
+			normalized, defects, err := common.CheckHeaderBlockDefects(strings.Split(article.HeadersJSON, "\n"), common.HeaderBlockFetch)
 			if err != nil {
 				log.Printf("[INTAKE] article '%s' (bulk) rejected: %v", article.MessageID, err)
 				proc.rememberBulkReject(article)
 				proc.setCaseDupes(msgIdItem, bulkmode)
 				return history.CaseError, err
 			}
+			logHeaderDefects(article.MessageID, defects)
 			// A-intake-3: the fetched Message-ID header must be the requested id
 			if mid := common.HeaderValue(normalized, "Message-ID"); mid != "" && mid != article.MessageID {
 				log.Printf("[INTAKE] article '%s' (bulk) rejected: Message-ID header %q differs", article.MessageID, mid)
@@ -174,18 +184,27 @@ func (proc *Processor) ProcessArticle(article *models.Article, legacyNewsgroup s
 		newsgroups = append(newsgroups, legacyNewsgroup)
 
 	} else if !RunRSLIGHTImport {
-		// non-bulk intake (POST/IHAVE/TAKETHIS): strict article-layer checks
+		// non-bulk intake (POST/IHAVE/TAKETHIS): article-layer checks in the mode of this
+		// path (POST strict, a peer feed per its header_check: D1/D4)
 		lines = article.NNTPhead
 		if lines == nil && article.HeadersJSON != "" {
 			lines = strings.Split(article.HeadersJSON, "\n")
 		}
 		var approved bool
+		var defects common.HeaderDefects
 		var err error
-		lines, approved, err = validateIntakeHeaders(lines, article.MessageID)
+		lines, approved, defects, err = validateIntakeHeaders(lines, article.MessageID, intakeHeaderMode(article))
 		if err != nil {
 			log.Printf("[INTAKE] article %q rejected: %v", article.MessageID, err)
 			proc.setCaseDupes(msgIdItem, bulkmode)
 			return history.CaseError, err
+		}
+		logHeaderDefects(article.MessageID, defects)
+		// D2: a NUL octet in the body refuses the article (POST 441, IHAVE 437, TAKETHIS 439)
+		if intakeBodyHasNUL(article) {
+			log.Printf("[INTAKE] article %s rejected: article contains NUL", article.MessageID)
+			proc.setCaseDupes(msgIdItem, bulkmode)
+			return history.CaseError, rejected("article contains NUL")
 		}
 		names, err := common.ParseNewsgroups(common.HeaderValue(lines, "Newsgroups"))
 		if err != nil {
@@ -203,18 +222,28 @@ func (proc *Processor) ProcessArticle(article *models.Article, legacyNewsgroup s
 		if dateStr == "" {
 			dateStr = common.HeaderValue(lines, "Date")
 		}
-		dateSent, err := checkIntakeDates(dateStr, common.HeaderValue(lines, "Injection-Date"), time.Now())
+		maxAge, maxFuture := intakeDateLimits(proc.DB, article.Posted)
+		dateSent, err := checkIntakeDates(dateStr, common.HeaderValue(lines, "Injection-Date"), time.Now(), maxAge, maxFuture)
 		if err != nil {
 			log.Printf("[INTAKE] article %s rejected: %v (Date %q)", article.MessageID, err, dateStr)
 			proc.setCaseDupes(msgIdItem, bulkmode)
 			return history.CaseError, err
 		}
 		article.DateSent = dateSent
-		body := article.NNTPbody
-		if body == nil && article.BodyText != "" {
-			body = strings.Split(article.BodyText, "\n")
+		// The size the group's max_art_size is compared against: the article as it arrived,
+		// carried in from the read (IntakeWireSize), so the group limit measures the same
+		// octets as the server limit and the peer's in_max_size and counts neither our Path
+		// identity nor the headers injectProtoArticle added to a POST. Only a caller that
+		// carries no size (the web post form) falls back to the stored block.
+		wireSize := article.IntakeWireSize
+		if wireSize <= 0 {
+			body := article.NNTPbody
+			if body == nil && article.BodyText != "" {
+				body = strings.Split(article.BodyText, "\n")
+			}
+			wireSize = common.WireArticleSize(lines, body)
 		}
-		groups, err := proc.resolveIntakeGroups(names, article.Posted, approved, common.WireArticleSize(lines, body))
+		groups, err := proc.resolveIntakeGroups(names, article.Posted, approved, wireSize)
 		if err != nil {
 			log.Printf("[INTAKE] article %s refused: %v", article.MessageID, err)
 			if errors.Is(err, common.ErrIntakeTemporary) {

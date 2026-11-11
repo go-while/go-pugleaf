@@ -369,13 +369,12 @@ func TestIwPeerSizeLimitExact(t *testing.T) {
 	}
 }
 
-// TestIwSizeLimitDotStuffing: the limit counts the octets that cross the wire, so the
-// second dot of a dot-stuffed line counts too: an article whose un-stuffed size is exactly
-// the limit but that holds one "." body line is refused, because N+1 octets arrive.
-// W2-size (pinned, not an RFC rule): a newsgroup's max_art_size is compared against
-// common.WireArticleSize (internal/processor/intake.go), which does NOT count the stuffing
-// dot, so the two limits differ by one octet per dot-stuffed line. A wave-2 change that
-// makes the two counts agree must update this assertion.
+// TestIwSizeLimitDotStuffing (W2-size, wave 2): the server limit measures the article as it
+// is stored and fed on, so the stuffing dots readArticleBlock strips do NOT count. An
+// article whose un-stuffed size is exactly the limit is accepted although one "." body line
+// makes N+1 octets cross the wire, and the same article one octet larger is refused. This is
+// the count a newsgroup's max_art_size and a peer's in_max_size use as well
+// (common.WireArticleSize, INN's Bytes).
 func TestIwSizeLimitDotStuffing(t *testing.T) {
 	const limit = 1024
 	g := hGroup(t, "t10.sizestuff", 0, nil)
@@ -383,36 +382,43 @@ func TestIwSizeLimitDotStuffing(t *testing.T) {
 	hs := iwPeerServer(t, proc, limit, 0)
 	c := hs.dial(t)
 
-	id := iwID(g)
-	head := iwHead(id, g, "dot stuffed")
-	fixed := len(iwWire(head, nil)) + 2 + 3 // headers, separator, the "." line, the pad line's CRLF
-	body := []string{strings.Repeat("x", limit-fixed), "."}
-	raw := iwWire(head, body)
-	if len(raw) != limit {
-		t.Fatalf("built %d un-stuffed octets, want exactly the limit %d", len(raw), limit)
+	// stuffed builds a valid article for group g of exactly size un-stuffed octets with one
+	// "." body line (one stuffing dot on the wire).
+	stuffed := func(id string, size int) []byte {
+		head := iwHead(id, g, "dot stuffed")
+		fixed := len(iwWire(head, nil)) + 2 + 3 // headers, separator, the "." line, the pad line's CRLF
+		body := []string{strings.Repeat("x", size-fixed), "."}
+		raw := iwWire(head, body)
+		if len(raw) != size {
+			t.Fatalf("built %d un-stuffed octets, want exactly %d", len(raw), size)
+		}
+		if len(client.StuffBytes(raw)) != size+1+3 { // one stuffing dot plus the ".\r\n" terminator
+			t.Fatalf("stuffed form has %d octets, want %d", len(client.StuffBytes(raw)), size+4)
+		}
+		return raw
 	}
-	if len(client.StuffBytes(raw)) != limit+1+3 { // one stuffing dot plus the ".\r\n" terminator
-		t.Fatalf("stuffed form has %d octets, want %d", len(client.StuffBytes(raw)), limit+4)
+
+	idOK, idOver := iwID(g), iwID(g)
+	code, line, _ := c.Ihave(idOK, stuffed(idOK, limit))
+	if err := client.ExpectCode(code, line, 235); err != nil {
+		t.Errorf("IHAVE of exactly %d un-stuffed octets with one dot-stuffed line: %v", limit, err)
 	}
-	code, line, _ := c.Ihave(id, raw)
+	code, line, _ = c.Ihave(idOver, stuffed(idOver, limit+1))
 	if err := client.ExpectCode(code, line, 437); err != nil {
-		t.Errorf("IHAVE of %d un-stuffed octets with one dot-stuffed line: %v", limit, err)
+		t.Errorf("IHAVE of %d un-stuffed octets with one dot-stuffed line: %v", limit+1, err)
 	}
-	iwWantProcessed(t, proc)
+	iwWantProcessed(t, proc, idOK)
 }
 
 // iwOfferedPath is the Path value of every article these tests offer.
 const iwOfferedPath = "upstream.invalid!not-for-mail"
 
-// TestIwProcessorWireSize: the lines the server hands to the processor are the lines that
-// arrived (dot-stuffing undone), with one change: feedPath prepended our Path identity.
-// common.WireArticleSize of them is the size a newsgroup's max_art_size is compared against
-// (internal/processor/intake.go:74 drops a group when wireSize > max_art_size), so that
-// limit is measured against the transferred octets plus exactly the octets the server added
-// to the Path header and nothing else. W2-size (pinned behaviour): the group limit
-// therefore sees a slightly larger article than the peer sent (the peer statistics use the
-// transferred size, taken before feedPath); a wave-2 change that measures the transferred
-// size instead must update this assertion.
+// TestIwProcessorWireSize (W2-size, wave 2): the lines the server hands to the processor are
+// the lines that arrived (dot-stuffing undone), with one change: feedPath prepended our Path
+// identity, so common.WireArticleSize of the handed-over block is larger than what the peer
+// transferred. The honest size travels in models.Article.IntakeWireSize instead, taken
+// before feedPath, and that is the number a newsgroup's max_art_size is compared against
+// (internal/processor/intake.go resolveIntakeGroups).
 func TestIwProcessorWireSize(t *testing.T) {
 	const size = 700
 	g := hGroup(t, "t10.procwiresize", 0, nil)
@@ -438,8 +444,95 @@ func TestIwProcessorWireSize(t *testing.T) {
 					t.Errorf("%s of %d octets: the processor sees WireArticleSize %d, want %d (%d + %d Path octets)",
 						cmd, n, got, n+grew, n, grew)
 				}
+				if a.IntakeWireSize != n {
+					t.Errorf("%s of %d octets: IntakeWireSize = %d, want %d (the transferred size, before feedPath)",
+						cmd, n, a.IntakeWireSize, n)
+				}
+				if a.IntakeHeaderCheck != "relay" {
+					t.Errorf("%s: IntakeHeaderCheck = %q, want the peer's header_check %q", cmd, a.IntakeHeaderCheck, "relay")
+				}
 			}
 		})
+	}
+}
+
+// TestIwPeerHeaderCheckCarried (D1/D4, wave 2): the header_check of the peer that fed the
+// article reaches the processor on the article (setIntakePolicy), for IHAVE and TAKETHIS, and
+// a POST on the same connection is marked Posted (always strict). The rules themselves are
+// tested against the real intake path in internal/processor (intake_policy_test.go): the
+// fake processor of this harness never runs validateIntakeHeaders.
+func TestIwPeerHeaderCheckCarried(t *testing.T) {
+	g := hGroup(t, "t10.headercheck", 0, nil)
+	for _, mode := range []string{database.PeerHeaderCheckRelay, database.PeerHeaderCheckStrict} {
+		t.Run(mode, func(t *testing.T) {
+			proc := iwPass()
+			p := hPeerSpec("127.0.0.1", "*")
+			p.HeaderCheck = mode
+			hs := newTestServer(t, hServerOpts{Proc: proc, Peers: hPeers(p), Hostname: peerFeedHost})
+			c := hs.dial(t)
+			for _, cmd := range []string{"IHAVE", "TAKETHIS"} {
+				id := iwID(g)
+				raw := iwWire(iwHead(id, g, "header check"), []string{"body"})
+				var code int
+				var line string
+				if cmd == "IHAVE" {
+					code, line, _ = c.Ihave(id, raw)
+				} else {
+					code, line, _ = c.Takethis(id, raw)
+				}
+				if code != 235 && code != 239 {
+					t.Fatalf("%s %s: %q", cmd, id, line)
+				}
+				arts := proc.processedArticles()
+				a := arts[len(arts)-1]
+				if a.IntakeHeaderCheck != mode {
+					t.Errorf("%s: IntakeHeaderCheck = %q, want the peer's %q", cmd, a.IntakeHeaderCheck, mode)
+				}
+				if a.Posted {
+					t.Errorf("%s: a fed article must not be marked Posted", cmd)
+				}
+			}
+			// POST on the same (peer) connection: Posted, so the processor checks strictly
+			user, pass := hUser(t, true, true)
+			poster := hs.dial(t)
+			authMustLogin(t, poster, user, pass)
+			id := iwID(g)
+			code, line, _ := poster.Post(iwWire(iwHead(id, g, "posted"), []string{"body"}))
+			if err := client.ExpectCode(code, line, 240); err != nil {
+				t.Fatalf("POST %s: %v", id, err)
+			}
+			arts := proc.processedArticles()
+			if a := arts[len(arts)-1]; !a.Posted {
+				t.Errorf("the POSTed article is not marked Posted (IntakeHeaderCheck %q)", a.IntakeHeaderCheck)
+			}
+		})
+	}
+}
+
+// TestIwPostWireSize (W2-size, wave 2): a POST carries the size of what the poster sent, not
+// of the proto-article after injectProtoArticle added Message-ID/Date/Injection-* and the
+// Path identity, so a newsgroup's max_art_size counts no header this server injected.
+func TestIwPostWireSize(t *testing.T) {
+	const size = 700
+	g := hGroup(t, "t10.postwiresize", 0, nil)
+	proc := iwPass()
+	hs := iwPeerServer(t, proc, 0, 0)
+	user, pass := hUser(t, true, true)
+	c := hs.dial(t)
+	authMustLogin(t, c, user, pass)
+
+	id := iwID(g)
+	code, line := iwLimitProbe(t, c, "POST", id, g, size)
+	if err := client.ExpectCode(code, line, 240); err != nil {
+		t.Fatalf("POST of %d octets: %v", size, err)
+	}
+	arts := proc.processedArticles()
+	a := arts[len(arts)-1]
+	if a.IntakeWireSize != size {
+		t.Errorf("IntakeWireSize = %d, want %d (what the poster sent)", a.IntakeWireSize, size)
+	}
+	if got := common.WireArticleSize(a.NNTPhead, a.NNTPbody); got <= size {
+		t.Errorf("the injected block has WireArticleSize %d, want more than the %d transferred octets", got, size)
 	}
 }
 
@@ -666,19 +759,23 @@ func TestIwUnusualMessageIDs(t *testing.T) {
 		}
 	})
 
-	// D3: "<" inside a no-fold-literal id-right (RFC 5536 mdtext) is valid, but today
-	// ValidMessageID refuses "<" anywhere, so the offer is a syntax error. Wave 2 (D3)
-	// turns the 501 into 335 and the 438 into 238; each command gets its own connection,
-	// so a 335 then only makes its own case fail and never lets the server read the next
-	// command as article data.
+	// D3 (wave 2): "<" inside a no-fold-literal id-right (RFC 5536 mdtext) is valid, so
+	// such an id is offered like any other: IHAVE answers 335 and takes the article, CHECK
+	// answers 238. Each command gets its own connection, so the article the IHAVE leg sends
+	// cannot be read as a command by the CHECK leg.
 	t.Run("angle-in-domain-literal", func(t *testing.T) {
 		const id = `<x@[a<b]>`
-		code, line := hs.dial(t).Cmd("IHAVE %s", id)
-		if err := client.ExpectCode(code, line, 501); err != nil { // D3
-			t.Errorf("IHAVE %s: %v", id, err)
+		// Ihave sends the article after the 335 and returns the final reply; sent false
+		// means the offer itself was refused (today's 501).
+		code, line, sent := hs.dial(t).Ihave(id, iwWire(iwHead(id, g, "angle in literal"), []string{"body"}))
+		if !sent {
+			t.Fatalf("IHAVE %s: %q, want 335 and the article taken", id, line) // D3
+		}
+		if err := client.ExpectCode(code, line, 235); err != nil { // D3
+			t.Errorf("IHAVE %s article: %v", id, err)
 		}
 		code, line = hs.dial(t).Cmd("CHECK %s", id)
-		if err := client.ExpectCode(code, line, 438); err != nil { // D3
+		if err := client.ExpectCode(code, line, 238); err != nil { // D3
 			t.Errorf("CHECK %s: %v", id, err)
 		}
 	})

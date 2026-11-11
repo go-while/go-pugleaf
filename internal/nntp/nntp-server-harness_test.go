@@ -502,6 +502,8 @@ func hPeerSpec(hosts, patterns string) *models.Peer {
 	return &models.Peer{
 		ID: n, Name: fmt.Sprintf("hpeer%04d", n), PathToken: fmt.Sprintf("hpeer%04d.test.invalid", n),
 		Hosts: hosts, InPatterns: patterns, MaxConns: 4, Enabled: true,
+		// the column default of migration 0037, as an inserted row would carry it
+		HeaderCheck: database.PeerHeaderCheckRelay,
 	}
 }
 
