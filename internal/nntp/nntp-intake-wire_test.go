@@ -11,9 +11,11 @@ package nntp
 //	G10 unusual valid message-ids round trip (source: NewsCache TestHistoryUnusualMessageIDs)
 //	G13 a re-offer of a hidden, deleted or expired article (source: INN tests/lib/hissqlite-t.c)
 //
-// Identifiers use the iw / TestIw prefix (contract K2). Where a decision of the plan
-// (D1-D4) will change the behaviour, the assertion pins TODAY's behaviour and carries a
-// "// D1" .. "// D4" comment, so wave 2 updates exactly those lines.
+// Identifiers use the iw / TestIw prefix (contract K2). The decisions D1-D4 of the plan are
+// implemented (wave 2, slice intake-policy), so the assertions that carried a "// D1" ..
+// "// D4" or "W2-size" pin now assert the decided behaviour; the header rules themselves are
+// tested against the real intake path in internal/processor/intake_policy_test.go, because
+// the fake processor of this harness never runs validateIntakeHeaders.
 //
 // Waits are hang guards only (hDeadline, PUGLEAF_TEST_DEADLINE): no wall-clock assertion.
 
