@@ -75,6 +75,9 @@ Server:
   -username string     NNTP username (default empty: no AUTHINFO)
   -password string     NNTP password (used with -username)
   -timeout int         Connect timeout in seconds (default 30), in every mode
+  -compress            Send COMPRESS DEFLATE (RFC 8054) after login (default true); a server
+                       that refuses it is read uncompressed. The run ends with an
+                       "NNTP traffic:" line (received, on the wire, saved share)
 
 Analysis:
   -force-refresh       Ignore the overview cache and fetch from the server again
