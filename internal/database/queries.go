@@ -1766,8 +1766,11 @@ func (db *Database) SearchNewsgroupsWithOptions(searchTerm string, limit, offset
 	var query string
 	var args []interface{}
 
-	// Use prefix matching (term%) instead of substring (%term%); % and _ in the term are literal
-	searchPattern := escapeLike(searchTerm) + "%"
+	// prefix matching (term%) unless the term has '*'/'%' wildcards (newsgroupSearchPattern)
+	searchPattern, err := newsgroupSearchPattern(searchTerm)
+	if err != nil {
+		return nil, err
+	}
 
 	if searchDescription {
 		// Search both name and description
@@ -1846,6 +1849,47 @@ const query_CountSearchNewsgroupsAdminNameOnly = `
 		WHERE name LIKE ? ESCAPE '\'
 	`
 
+// MaxNewsgroupSearchWildcards bounds the wildcards of one newsgroup search term (a LIKE
+// pattern with many % can get slow in SQLite).
+const MaxNewsgroupSearchWildcards = 10
+
+// ErrTooManyWildcards is returned by the newsgroup searches for a term with more than
+// MaxNewsgroupSearchWildcards wildcards.
+var ErrTooManyWildcards = fmt.Errorf("search term has more than %d wildcards", MaxNewsgroupSearchWildcards)
+
+// newsgroupSearchPattern turns a search term into a LIKE pattern for ESCAPE '\': '*' and '%'
+// are wildcards (any run of them counts as one, at most MaxNewsgroupSearchWildcards), '_' and
+// '\' are literal (newsgroup names contain '_'). A term without a wildcard is a prefix search
+// (term%), as before; a term with one is matched as written ("%.test", "comp.*", "*lang*").
+func newsgroupSearchPattern(term string) (string, error) {
+	if !strings.ContainsAny(term, "*%") {
+		return escapeLike(term) + "%", nil
+	}
+	var b strings.Builder
+	b.Grow(len(term) + 4)
+	wild, prevWild := 0, false
+	for i := 0; i < len(term); i++ {
+		c := term[i]
+		switch c {
+		case '*', '%':
+			if !prevWild {
+				wild++
+				if wild > MaxNewsgroupSearchWildcards {
+					return "", ErrTooManyWildcards
+				}
+				b.WriteByte('%')
+			}
+			prevWild = true
+			continue
+		case '\\', '_':
+			b.WriteByte('\\')
+		}
+		prevWild = false
+		b.WriteByte(c)
+	}
+	return b.String(), nil
+}
+
 // escapeLike escapes the LIKE wildcards % and _ and the escape character \ itself,
 // for patterns used with ESCAPE '\'.
 func escapeLike(s string) string {
@@ -1870,8 +1914,11 @@ func (db *Database) CountSearchNewsgroups(searchTerm string) (int, error) {
 
 // CountSearchNewsgroupsWithOptions counts newsgroups with configurable options
 func (db *Database) CountSearchNewsgroupsWithOptions(searchTerm string, searchDescription bool, admin bool) (int, error) {
-	// Use prefix matching (term%) instead of substring (%term%); % and _ in the term are literal
-	searchPattern := escapeLike(searchTerm) + "%"
+	// prefix matching (term%) unless the term has '*'/'%' wildcards (newsgroupSearchPattern)
+	searchPattern, err := newsgroupSearchPattern(searchTerm)
+	if err != nil {
+		return 0, err
+	}
 
 	var query string
 	var args []interface{}
@@ -1895,7 +1942,7 @@ func (db *Database) CountSearchNewsgroupsWithOptions(searchTerm string, searchDe
 	}
 
 	var count int
-	err := db.mainDB.QueryRow(query, args...).Scan(&count)
+	err = db.mainDB.QueryRow(query, args...).Scan(&count)
 
 	return count, err
 }

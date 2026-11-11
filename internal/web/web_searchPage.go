@@ -2,11 +2,14 @@
 package web
 
 import (
+	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
 	"strings"
 
+	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
@@ -49,6 +52,10 @@ func (s *WebServer) searchPage(c *Context) {
 			// Search in group names only with pagination
 			offset := (page - 1) * pageSize
 			groups, err := s.DB.SearchNewsgroups(query, pageSize, offset, false)
+			if errors.Is(err, database.ErrTooManyWildcards) {
+				s.renderError(c, http.StatusBadRequest, "Search Error", fmt.Sprintf("Use at most %d wildcards (* or %%) in a search.", database.MaxNewsgroupSearchWildcards))
+				return
+			}
 			if err != nil {
 				log.Printf("[WEB]: searchPage: SearchNewsgroups(groups, offset=%d): %v", offset, err)
 				s.renderError(c, http.StatusInternalServerError, "Search Error", publicErrorDetail)
@@ -88,6 +95,10 @@ func (s *WebServer) searchPage(c *Context) {
 			// TODO: Implement combined search (groups + articles)
 			offset := (page - 1) * pageSize
 			groups, err := s.DB.SearchNewsgroups(query, pageSize, offset, false)
+			if errors.Is(err, database.ErrTooManyWildcards) {
+				s.renderError(c, http.StatusBadRequest, "Search Error", fmt.Sprintf("Use at most %d wildcards (* or %%) in a search.", database.MaxNewsgroupSearchWildcards))
+				return
+			}
 			if err != nil {
 				log.Printf("[WEB]: searchPage: SearchNewsgroups(all, offset=%d): %v", offset, err)
 				s.renderError(c, http.StatusInternalServerError, "Search Error", publicErrorDetail)

@@ -400,13 +400,15 @@ func TestW2DBPerfEscapeLike(t *testing.T) {
 	}
 }
 
-func TestW2DBPerfSearchLiteralWildcards(t *testing.T) {
+// TestW2DBPerfSearchWildcards: '*' and '%' are wildcards (a run counts as one, at most
+// MaxNewsgroupSearchWildcards), '_' stays literal, a term without a wildcard is a prefix
+// search, matching is case-insensitive, and search and count always agree.
+func TestW2DBPerfSearchWildcards(t *testing.T) {
 	db := w0DB(t)
 	suffix := strings.TrimPrefix(w0Name(""), ".")
-	pct := "%w2dbperf." + suffix
 	under := "w2dbperf_x." + suffix
 	plain := "w2dbperfAx." + suffix
-	for _, name := range []string{pct, under, plain} {
+	for _, name := range []string{under, plain} {
 		if err := db.InsertNewsgroup(&models.Newsgroup{Name: name, Active: true, Status: "y", Description: "w2dbperf " + suffix}); err != nil {
 			t.Fatal(err)
 		}
@@ -442,25 +444,55 @@ func TestW2DBPerfSearchLiteralWildcards(t *testing.T) {
 
 	for _, admin := range []bool{false, true} {
 		for _, desc := range []bool{false, true} {
-			got := names("%", admin, desc)
-			if !contains(got, pct) {
-				t.Errorf("admin=%v desc=%v: %q not found for term %%", admin, desc, pct)
-			}
-			for _, n := range got {
-				if !strings.HasPrefix(n, "%") {
-					t.Errorf("admin=%v desc=%v: term %% matched %q", admin, desc, n)
+			for _, tc := range []struct {
+				term         string
+				under, plain bool
+			}{
+				{"w2dbperf_", true, false},          // '_' is literal, prefix search
+				{"W2DBPERFAX", false, true},         // case-insensitive
+				{"*x." + suffix, true, true},        // leading wildcard, anchored at the end
+				{"%Ax." + suffix, false, true},      // '%' works like '*'
+				{"w2dbperf*." + suffix, true, true}, // wildcard in the middle
+				{"**W2DBPERFA*", false, true},       // a run of wildcards counts once
+				{"*_x.*", true, false},              // '_' literal next to wildcards
+				{"*x." + suffix + "*", true, true},  // trailing wildcard too
+			} {
+				got := names(tc.term, admin, desc)
+				if contains(got, under) != tc.under || contains(got, plain) != tc.plain {
+					t.Errorf("admin=%v desc=%v term %q = %v, want under=%v plain=%v", admin, desc, tc.term, got, tc.under, tc.plain)
 				}
 			}
+		}
+	}
 
-			got = names("w2dbperf_", admin, desc)
-			if !contains(got, under) || contains(got, plain) {
-				t.Errorf("admin=%v desc=%v: term w2dbperf_ = %v, want %q and not %q", admin, desc, got, under, plain)
-			}
+	ten := strings.Repeat("a*", MaxNewsgroupSearchWildcards)
+	if _, err := db.SearchNewsgroupsWithOptions(ten, 10, 0, true, false); err != nil {
+		t.Errorf("%d wildcards: %v, want accepted", MaxNewsgroupSearchWildcards, err)
+	}
+	eleven := ten + "a*"
+	if _, err := db.SearchNewsgroupsWithOptions(eleven, 10, 0, true, true); !errors.Is(err, ErrTooManyWildcards) {
+		t.Errorf("%d wildcards search: %v, want ErrTooManyWildcards", MaxNewsgroupSearchWildcards+1, err)
+	}
+	if _, err := db.CountSearchNewsgroupsWithOptions(eleven, false, false); !errors.Is(err, ErrTooManyWildcards) {
+		t.Errorf("%d wildcards count: %v, want ErrTooManyWildcards", MaxNewsgroupSearchWildcards+1, err)
+	}
+}
 
-			// still case-insensitive
-			if got = names("W2DBPERFAX", admin, desc); !contains(got, plain) {
-				t.Errorf("admin=%v desc=%v: upper-case term did not find %q", admin, desc, plain)
-			}
+func TestNewsgroupSearchPattern(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"", "%"},
+		{"comp.lang", "comp.lang%"},
+		{"comp_x", `comp\_x%`},
+		{"*.test", "%.test"},
+		{"%.test", "%.test"},
+		{"alt.*.d", "alt.%.d"},
+		{"*lang*", "%lang%"},
+		{"a**%*b", "a%b"},
+		{`a\*_`, `a\\%\_`},
+	} {
+		got, err := newsgroupSearchPattern(tc.in)
+		if err != nil || got != tc.want {
+			t.Errorf("newsgroupSearchPattern(%q) = %q, %v, want %q", tc.in, got, err, tc.want)
 		}
 	}
 }

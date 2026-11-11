@@ -1,6 +1,8 @@
 package web
 
 import (
+	"errors"
+	"fmt"
 	"html/template"
 	"log"
 	"net/http"
@@ -92,6 +94,10 @@ func (s *WebServer) adminPage(c *Context) {
 	if searchTerm != "" {
 		// Use search function with description option if search term provided
 		newsgroups, err = s.DB.SearchNewsgroupsWithOptions(searchTerm, 1000, 0, true, searchDescription) // High limit for admin
+		if errors.Is(err, database.ErrTooManyWildcards) {
+			s.renderError(c, http.StatusBadRequest, "Search Error", fmt.Sprintf("Use at most %d wildcards (* or %%) in a search.", database.MaxNewsgroupSearchWildcards))
+			return
+		}
 		if err != nil {
 			s.renderError(c, http.StatusInternalServerError, "Database Error", "Failed to search newsgroups")
 			return
