@@ -1,13 +1,13 @@
 package main
 
 import (
-	"io"
-	"net"
-	"net/textproto"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	"github.com/go-while/nntp-testkit/fakeserver"
 )
 
 // The fake NNTP server below is a copy of the one in internal/postmgr/adf_opt_postmgr_test.go
@@ -16,15 +16,17 @@ import (
 
 // flPqFake is a loopback NNTP server that accepts MODE READER and POST and answers every posted
 // article with code (240 or 441). No external network is used. In hang mode (flPqFakeHang) it
-// never answers the article: it closes received once the article is read, then blocks until the
-// connection is closed.
+// never answers the article: it closes received once the article is read, then reads and
+// discards until the connection is closed.
+//
+// The listener, the accept loop and the connection bookkeeping are the kit's
+// (fakeserver.Server). The three commands are a fakeserver.LineHandler and not a
+// fakeserver.Script, because a script step reads its dot block before it writes its reply, so
+// POST's 340 would arrive after the article.
 type flPqFake struct {
-	ln    net.Listener
+	srv   *fakeserver.Server
 	code  int
 	posts atomic.Int64 // articles received
-	mu    sync.Mutex
-	conns []net.Conn
-	wg    sync.WaitGroup
 
 	hang         bool
 	received     chan struct{} // hang mode: closed when the first article was read
@@ -44,85 +46,46 @@ func flPqFakeHang(t *testing.T) *flPqFake {
 	return flPqFakeStart(t, &flPqFake{hang: true, received: make(chan struct{})})
 }
 
-// flPqFakeStart listens on 127.0.0.1 and serves f; it stops when the test ends.
+// flPqFakeStart serves f on 127.0.0.1; the kit closes the listener and every connection when
+// the test ends.
 func flPqFakeStart(t *testing.T, f *flPqFake) *flPqFake {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	f.ln = ln
-	f.wg.Add(1)
-	go f.serve()
-	t.Cleanup(func() {
-		_ = ln.Close()
-		f.mu.Lock()
-		for _, c := range f.conns {
-			_ = c.Close()
-		}
-		f.mu.Unlock()
-		f.wg.Wait()
+	f.srv = fakeserver.New(t, fakeserver.Options{
+		Greeting: "200 flpq fake ready",
+		Handler:  fakeserver.LineHandler(f.line),
+		Deadline: testWait,
 	})
 	return f
 }
 
-func (f *flPqFake) port() int {
-	return f.ln.Addr().(*net.TCPAddr).Port
-}
+func (f *flPqFake) port() int { return f.srv.Port() }
 
-func (f *flPqFake) serve() {
-	defer f.wg.Done()
-	for {
-		c, err := f.ln.Accept()
-		if err != nil {
-			return
+// line answers one client line.
+func (f *flPqFake) line(c *fakeserver.Conn, line string) (reply []string, closeConn bool) {
+	switch strings.ToUpper(strings.TrimSpace(line)) {
+	case "MODE READER":
+		return []string{"200 reader mode"}, false
+	case "POST":
+		if err := c.WriteLines("340 send article"); err != nil {
+			return nil, true
 		}
-		f.mu.Lock()
-		f.conns = append(f.conns, c)
-		f.mu.Unlock()
-		f.wg.Add(1)
-		go f.handle(c)
-	}
-}
-
-func (f *flPqFake) handle(c net.Conn) {
-	defer f.wg.Done()
-	defer c.Close()
-	tp := textproto.NewConn(c)
-	if err := tp.PrintfLine("200 flpq fake ready"); err != nil {
-		return
-	}
-	for {
-		line, err := tp.ReadLine()
-		if err != nil {
-			return
+		if _, err := c.ReadDotBlock(); err != nil {
+			return nil, true
 		}
-		switch strings.ToUpper(strings.TrimSpace(line)) {
-		case "MODE READER":
-			err = tp.PrintfLine("200 reader mode")
-		case "POST":
-			if err = tp.PrintfLine("340 send article"); err != nil {
-				return
+		f.posts.Add(1)
+		if f.hang {
+			f.receivedOnce.Do(func() { close(f.received) })
+			// never answer: read and discard until the client (or the kit's Close) ends it
+			for {
+				if _, err := c.ReadLine(); err != nil {
+					return nil, true
+				}
 			}
-			if _, err = tp.ReadDotLines(); err != nil {
-				return
-			}
-			f.posts.Add(1)
-			if f.hang {
-				f.receivedOnce.Do(func() { close(f.received) })
-				// never answer: block until the client (or the test cleanup) closes the conn
-				_, _ = io.Copy(io.Discard, c)
-				return
-			}
-			err = tp.PrintfLine("%d flpq fake answer", f.code)
-		case "QUIT":
-			_ = tp.PrintfLine("205 bye")
-			return
-		default:
-			err = tp.PrintfLine("500 unknown command")
 		}
-		if err != nil {
-			return
-		}
+		return []string{fmt.Sprintf("%d flpq fake answer", f.code)}, false
+	case "QUIT":
+		return []string{"205 bye"}, true
+	default:
+		return []string{"500 unknown command"}, false
 	}
 }
