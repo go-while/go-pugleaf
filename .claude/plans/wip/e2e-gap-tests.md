@@ -227,3 +227,20 @@ once at peer B, never at A, queue empty afterwards, peer stats show accepted 1 i
 ## Progress
 - Wave 0 (2026-11-11, plan-e2e-gap-tests): nntp-testkit v0.8.0 → v0.12.0; full CLAUDE.md test list green with no
   test changes (the CAPABILITIES/ACTIVE.TIMES and implicit-TLS behaviour changes hit no go-pugleaf test).
+- Wave 1 (2026-11-11): five slices, all reviewed (verdict MERGE each, review minors fixed before merge), merged
+  into plan-e2e-gap-tests; full CLAUDE.md list green (33 packages), PUGLEAF_KNOWN_BUGS lists only the 430 bug.
+  - feed-400-and-feed-e2e: worktree-agent-a92f9882c986ea5d5 (4e76872, d3dac59, aaf81d5) → merge aa2b3bc. F1: a 400
+    to CHECK/TAKETHIS/IHAVE ends the connection, rest of the batch deferred (failResults); G2-G4 on the real dialer;
+    sender e2e tests on the frozen clock.
+  - relay-e2e: worktree-agent-aac87384dc93dd024 (e2d41ab, b089828) → merge 8499056. G1 TestE2ERelayBinary (~45 s,
+    sender poll 5 s not settable), out_flags limits, exact peer stats.
+  - units: worktree-agent-a31a0d4e04d379fff (816a0e4, 935218e, 9dd52fb) → merge dbb0733. G20 peer address tests
+    (hostsMatch skips unparsable "/" ":" entries instead of DNS); G21 date forms in internal/processor: 3-digit
+    obs-year (≤ next year) and 2-digit 50..68 → 19xx; archiveDateUsable has an upper bound (far-future Date falls
+    back to Date-Received on the archive path).
+  - intake-wire: worktree-agent-a8c791e18d12baa9b (b441809, ca6ca3b) → merge d0717d6. G5-G8, G10-G13; D3 pins on
+    separate connections; `// W2-size` pins; no production change.
+  - fetcher-faults: worktree-agent-a6fe8e16d8b1ae759 (6cdb2e5, 55b7df0) → merge 7380422. G14-G19; bug fixed: a
+    provider capping XHDR records made the fetcher skip the rest of the range and still move the progress (data
+    loss) — XHdrStreamed re-asks after the last record (≤ MaxXHdrReasks=16 per batch), only 423 = empty range,
+    streamXHdr keeps the connection after 423; `// W2-fetch` and `// FU-progress` pins.
