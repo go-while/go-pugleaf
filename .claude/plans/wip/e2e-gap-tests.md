@@ -143,6 +143,8 @@ parity (DEL) with INN: `strict-del-passes` is deliberate.
   hands `PUGLEAF_TEST_DEADLINE` to the kit today (no test sets NNTP_TEST_DEADLINE; likely per-call deadline
   arguments) and keep that behaviour; replace our own `hDeadlineFromEnv`/`testWaitFromEnv`
   copies by `testkit.Deadline()` only where the mapping guarantees the same value.
+  nntp-testkit-1 (2026-11-11): the kit will not read extra env names — map `PUGLEAF_TEST_DEADLINE` →
+  `NNTP_TEST_DEADLINE` with os.Setenv in each package's TestMain before the tests run (wave 3).
 - Checks: full CLAUDE.md list green.
 
 ### Wave 1 (parallel, disjoint files)
