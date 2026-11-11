@@ -189,3 +189,7 @@ known 430 bug.
 Wave 1 `relay-e2e` is the end-to-end scenario: build `./build_nntp-server.sh` into the worktree's `build/`, run
 with `-data ./data-test-e2e-gap`, two kit fake peers on free ports; expected: article offered by peer A appears
 once at peer B, never at A, queue empty afterwards, peer stats show accepted 1 in and out.
+
+## Progress
+- Wave 0 (2026-11-11, plan-e2e-gap-tests): nntp-testkit v0.8.0 → v0.12.0; full CLAUDE.md test list green with no
+  test changes (the CAPABILITIES/ACTIVE.TIMES and implicit-TLS behaviour changes hit no go-pugleaf test).
