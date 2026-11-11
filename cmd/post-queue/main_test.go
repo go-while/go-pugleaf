@@ -12,20 +12,29 @@ import (
 
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
+	testkit "github.com/go-while/nntp-testkit"
 	_ "github.com/mattn/go-sqlite3" // raw read-back of post_queue (pqStateOf)
 )
 
 // testWait is the hang guard of this package's tests: it only stops a hung test, a passing test
 // never waits on it. Override with PUGLEAF_TEST_DEADLINE (a Go duration, e.g. 120s); default 60 s.
-var testWait = testWaitFromEnv(60 * time.Second)
+// It is testkit.Deadline(), so the kit's own hang guards (fakeserver, client, proc,
+// testkit.WaitFor) use the same value.
+var testWait = testDeadline()
 
-func testWaitFromEnv(def time.Duration) time.Duration {
-	if v := os.Getenv("PUGLEAF_TEST_DEADLINE"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil && d > 0 {
-			return d
+// testDeadline hands PUGLEAF_TEST_DEADLINE to the kit, which reads only NNTP_TEST_DEADLINE
+// (testkit.EnvDeadline), and returns the kit's hang guard. An NNTP_TEST_DEADLINE set by the
+// caller wins. The mapping lives in this initialiser, not in TestMain, because testWait is a
+// package variable: Go evaluates those before TestMain runs. Plan e2e-gap-tests wave 3.
+func testDeadline() time.Duration {
+	if os.Getenv(testkit.EnvDeadline) == "" {
+		if v := os.Getenv("PUGLEAF_TEST_DEADLINE"); v != "" {
+			if err := os.Setenv(testkit.EnvDeadline, v); err != nil {
+				fmt.Fprintln(os.Stderr, "[POSTQUEUE-TEST] Setenv "+testkit.EnvDeadline+":", err)
+			}
 		}
 	}
-	return def
+	return testkit.Deadline()
 }
 
 func TestMain(m *testing.M) {
@@ -366,7 +375,7 @@ func TestPostQueueOneShot(t *testing.T) {
 			return f.port(), f.posts.Load
 		}, pqRow{attempts: 1, lastError: "441"}, 2},
 		{"closed-port", func(t *testing.T) (int, func() int64) {
-			return flPqClosedPort(t), func() int64 { return 0 }
+			return testkit.FreePort(t), func() int64 { return 0 }
 		}, pqRow{lastError: "failed to get connection"}, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

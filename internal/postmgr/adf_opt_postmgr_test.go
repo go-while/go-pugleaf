@@ -19,6 +19,7 @@ import (
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
 	"github.com/go-while/go-pugleaf/internal/nntp"
+	testkit "github.com/go-while/nntp-testkit"
 )
 
 // adfOptDB is the database of this test binary (temp data root, no caches).
@@ -27,15 +28,23 @@ var adfOptDB *database.Database
 // testWait is the hang guard of this package's tests: it only stops a hung test, a passing test
 // never waits on it. Override with PUGLEAF_TEST_DEADLINE (a Go duration, e.g. 120s); default 60 s.
 // Plan test-timing-hardening D3.
-var testWait = testWaitFromEnv(60 * time.Second)
+// It is testkit.Deadline(), so the kit's own hang guards (fakeserver, client, proc,
+// testkit.WaitFor) use the same value.
+var testWait = testDeadline()
 
-func testWaitFromEnv(def time.Duration) time.Duration {
-	if v := os.Getenv("PUGLEAF_TEST_DEADLINE"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil && d > 0 {
-			return d
+// testDeadline hands PUGLEAF_TEST_DEADLINE to the kit, which reads only NNTP_TEST_DEADLINE
+// (testkit.EnvDeadline), and returns the kit's hang guard. An NNTP_TEST_DEADLINE set by the
+// caller wins. The mapping lives in this initialiser, not in TestMain, because testWait is a
+// package variable: Go evaluates those before TestMain runs. Plan e2e-gap-tests wave 3.
+func testDeadline() time.Duration {
+	if os.Getenv(testkit.EnvDeadline) == "" {
+		if v := os.Getenv("PUGLEAF_TEST_DEADLINE"); v != "" {
+			if err := os.Setenv(testkit.EnvDeadline, v); err != nil {
+				fmt.Fprintln(os.Stderr, "[POSTMGR-TEST] Setenv "+testkit.EnvDeadline+":", err)
+			}
 		}
 	}
-	return def
+	return testkit.Deadline()
 }
 
 func TestMain(m *testing.M) {
@@ -351,20 +360,6 @@ func (f *flPqFake) handle(c net.Conn) {
 	}
 }
 
-// flPqClosedPort returns a loopback port nothing listens on (connection refused).
-func flPqClosedPort(t *testing.T) int {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	port := ln.Addr().(*net.TCPAddr).Port
-	if err := ln.Close(); err != nil {
-		t.Fatal(err)
-	}
-	return port
-}
-
 // flPqPool returns a posting pool for 127.0.0.1:port, closed when the test ends.
 func flPqPool(t *testing.T, name string, port int) *nntp.Pool {
 	t.Helper()
@@ -503,12 +498,12 @@ func TestFlPqPostmgrTransientNotCounted(t *testing.T) {
 		want  string // in last_error
 	}{
 		{"refused", func(t *testing.T) []*nntp.Pool {
-			return []*nntp.Pool{flPqPool(t, "flpq-refused", flPqClosedPort(t))}
+			return []*nntp.Pool{flPqPool(t, "flpq-refused", testkit.FreePort(t))}
 		}, "failed to get connection"},
 		{"441-and-refused", func(t *testing.T) []*nntp.Pool {
 			fake := flPqFakeNNTP(t, 441)
 			// refused first, 441 last: last_error must name the refusal, not the last pool's 441
-			return []*nntp.Pool{flPqPool(t, "flpq-refused", flPqClosedPort(t)), flPqPool(t, "flpq-441", fake.port())}
+			return []*nntp.Pool{flPqPool(t, "flpq-refused", testkit.FreePort(t)), flPqPool(t, "flpq-441", fake.port())}
 		}, "1 of 2 rejected): failed to get connection"}, // the non-441 reason, not the 441 text
 	} {
 		t.Run(tc.name, func(t *testing.T) {

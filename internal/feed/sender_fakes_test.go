@@ -15,31 +15,29 @@ import (
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/models"
+	testkit "github.com/go-while/nntp-testkit"
 )
 
 // sndWait is the hang guard of this package's tests: a passing test never waits on it.
-// Override with PUGLEAF_TEST_DEADLINE (plan test-timing-hardening D3).
-var sndWait = sndWaitFromEnv(60 * time.Second)
+// Override with PUGLEAF_TEST_DEADLINE (plan test-timing-hardening D3). It is
+// testkit.Deadline(), so the kit's own guards (fakeserver, client, testkit.WaitFor) use the
+// same value.
+var sndWait = sndTestDeadline()
 
-func sndWaitFromEnv(def time.Duration) time.Duration {
-	if v := os.Getenv("PUGLEAF_TEST_DEADLINE"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil && d > 0 {
-			return d
+// sndTestDeadline hands PUGLEAF_TEST_DEADLINE to the kit, which reads only NNTP_TEST_DEADLINE
+// (testkit.EnvDeadline), and returns the kit's hang guard. An NNTP_TEST_DEADLINE set by the
+// caller wins. The mapping lives in this initialiser, not in a TestMain, because sndWait and
+// testWait are package variables: Go evaluates those before TestMain would run.
+// Plan e2e-gap-tests wave 3.
+func sndTestDeadline() time.Duration {
+	if os.Getenv(testkit.EnvDeadline) == "" {
+		if v := os.Getenv("PUGLEAF_TEST_DEADLINE"); v != "" {
+			if err := os.Setenv(testkit.EnvDeadline, v); err != nil {
+				fmt.Fprintln(os.Stderr, "[FEEDTEST] Setenv "+testkit.EnvDeadline+":", err)
+			}
 		}
 	}
-	return def
-}
-
-// sndWaitFor polls cond until it holds or the hang guard expires.
-func sndWaitFor(t *testing.T, what string, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(sndWait)
-	for !cond() {
-		if time.Now().After(deadline) {
-			t.Fatalf("timeout waiting for %s", what)
-		}
-		time.Sleep(time.Millisecond)
-	}
+	return testkit.Deadline()
 }
 
 // sndClock is a clock a test moves by hand.

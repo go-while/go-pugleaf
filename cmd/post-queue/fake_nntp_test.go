@@ -126,17 +126,3 @@ func (f *flPqFake) handle(c net.Conn) {
 		}
 	}
 }
-
-// flPqClosedPort returns a loopback port nothing listens on (connection refused).
-func flPqClosedPort(t *testing.T) int {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	port := ln.Addr().(*net.TCPAddr).Port
-	if err := ln.Close(); err != nil {
-		t.Fatal(err)
-	}
-	return port
-}

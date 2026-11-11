@@ -18,6 +18,7 @@ import (
 	"github.com/go-while/go-pugleaf/internal/history"
 	"github.com/go-while/go-pugleaf/internal/models"
 	"github.com/go-while/go-pugleaf/internal/peerstats"
+	testkit "github.com/go-while/nntp-testkit"
 	"github.com/go-while/nntp-testkit/client"
 )
 
@@ -101,18 +102,6 @@ func (c *psCollector) closed() []psEvent {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return append([]psEvent(nil), c.closes...)
-}
-
-// psWaitFor polls cond until it holds or the hang guard expires.
-func psWaitFor(t *testing.T, what string, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(hDeadline)
-	for !cond() {
-		if time.Now().After(deadline) {
-			t.Fatalf("timeout waiting for %s", what)
-		}
-		time.Sleep(time.Millisecond)
-	}
 }
 
 // psStore is a PeerStore that also offers GetPeers, so the registry knows the disabled rows
@@ -227,7 +216,7 @@ func TestPeerStatsIHaveAccepted(t *testing.T) {
 
 	// The connection ends: exactly one Closed with the totals counted on it.
 	c.Close()
-	psWaitFor(t, "Closed after the connection ended", func() bool { return len(col.closed()) == 1 })
+	testkit.WaitFor(t, hDeadline, "Closed after the connection ended", func() bool { return len(col.closed()) == 1 })
 	cl := col.closed()[0]
 	if cl.Peer != ref || cl.Dir != peerstats.In {
 		t.Errorf("Closed = %+v, want the In event of %+v", cl, ref)
@@ -378,7 +367,7 @@ func TestPeerStatsDeniedDisabledRow(t *testing.T) {
 		t.Fatalf("Connected = %+v, want one event of the disabled row %+v", conns, ref)
 	}
 	c.Close()
-	psWaitFor(t, "Closed of the denied connection", func() bool { return len(col.closed()) == 1 })
+	testkit.WaitFor(t, hDeadline, "Closed of the denied connection", func() bool { return len(col.closed()) == 1 })
 	if cl := col.closed()[0]; cl.Peer != ref || cl.Conn.Denied != 3 {
 		t.Errorf("Closed = %+v, want the denied totals of %+v", cl, ref)
 	}

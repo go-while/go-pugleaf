@@ -36,6 +36,7 @@ import (
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
+	testkit "github.com/go-while/nntp-testkit"
 	"github.com/go-while/nntp-testkit/client"
 )
 
@@ -253,25 +254,24 @@ func (hs *hServer) track(c net.Conn) {
 // hDeadline is the hang guard of the test client: the per-command read/write deadline and the dial
 // timeout. It only stops a hung test; a passing test never waits on it. Override with
 // PUGLEAF_TEST_DEADLINE (a Go duration, e.g. 120s). Plan test-timing-hardening D3.
-var hDeadline = hDeadlineFromEnv(60 * time.Second)
+// It is testkit.Deadline(), so every kit hang guard of this package (client, fakeserver, proc,
+// testkit.WaitFor) uses the same value.
+var hDeadline = hTestDeadline()
 
-func hDeadlineFromEnv(def time.Duration) time.Duration {
-	if v := os.Getenv("PUGLEAF_TEST_DEADLINE"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil && d > 0 {
-			return d
+// hTestDeadline hands PUGLEAF_TEST_DEADLINE to the kit, which reads only NNTP_TEST_DEADLINE
+// (testkit.EnvDeadline), and returns the kit's hang guard. An NNTP_TEST_DEADLINE set by the
+// caller wins. The mapping lives in this initialiser, not in TestMain, because hDeadline (and
+// cliWait, which copies it) is a package variable: Go evaluates those before TestMain runs.
+// Plan e2e-gap-tests wave 3.
+func hTestDeadline() time.Duration {
+	if os.Getenv(testkit.EnvDeadline) == "" {
+		if v := os.Getenv("PUGLEAF_TEST_DEADLINE"); v != "" {
+			if err := os.Setenv(testkit.EnvDeadline, v); err != nil {
+				fmt.Fprintln(os.Stderr, "[HARNESS] Setenv "+testkit.EnvDeadline+":", err)
+			}
 		}
 	}
-	return def
-}
-
-// hNewClient wraps an open connection as a strict test client with the hang
-// guard deadline; it does not read a greeting and closes the conn at cleanup.
-func hNewClient(t testing.TB, conn net.Conn, deadline time.Duration) *client.Conn {
-	t.Helper()
-	c := client.New(t, conn)
-	c.Strict = true
-	c.Deadline = deadline
-	return c
+	return testkit.Deadline()
 }
 
 // dial connects, reads the greeting (c.Greeting) and tracks the connection.

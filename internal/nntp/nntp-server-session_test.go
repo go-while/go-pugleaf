@@ -34,6 +34,7 @@ import (
 
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/models"
+	testkit "github.com/go-while/nntp-testkit"
 	"github.com/go-while/nntp-testkit/client"
 )
 
@@ -1296,20 +1297,6 @@ func sessPipeConn(t *testing.T) (*ClientConnection, net.Conn) {
 	return c, clientEnd
 }
 
-// sessFreePort returns a TCP port that was free a moment ago.
-func sessFreePort(t *testing.T) int {
-	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	port := l.Addr().(*net.TCPAddr).Port
-	if err := l.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
-	return port
-}
-
 // sessWaitWG waits at most hDeadline for wg (server goroutines after Stop).
 func sessWaitWG(t *testing.T, wg *sync.WaitGroup) {
 	t.Helper()
@@ -1519,8 +1506,8 @@ func TestSessStartErrors(t *testing.T) {
 			dir := t.TempDir()
 			cfg := &config.ServerConfig{}
 			cfg.NNTP.MaxConns = 10
-			cfg.NNTP.Port = sessFreePort(t)
-			cfg.NNTP.TLSPort = sessFreePort(t)
+			cfg.NNTP.Port = testkit.FreePort(t)
+			cfg.NNTP.TLSPort = testkit.FreePort(t)
 			if tc.cert != "" {
 				cfg.NNTP.TLSCert = filepath.Join(dir, tc.cert)
 				cfg.NNTP.TLSKey = filepath.Join(dir, tc.key)
@@ -1570,7 +1557,7 @@ func TestSessTLSMinVersion(t *testing.T) {
 	var wg sync.WaitGroup
 	cfg := &config.ServerConfig{}
 	cfg.NNTP.MaxConns = 10
-	cfg.NNTP.TLSPort = sessFreePort(t)
+	cfg.NNTP.TLSPort = testkit.FreePort(t)
 	cfg.NNTP.TLSCert = certFile
 	cfg.NNTP.TLSKey = keyFile
 	s, err := NewNNTPServer(db, cfg, &wg, nil)
@@ -1600,7 +1587,7 @@ func TestSessTLSMinVersion(t *testing.T) {
 		t.Fatalf("TLS 1.2+ dial: %v", err)
 	}
 	defer conn.Close()
-	c := hNewClient(t, conn, hDeadline)
+	c := client.New(t, conn)
 	greeting, err := c.ReadLine()
 	if err != nil {
 		t.Fatalf("greeting: %v", err)

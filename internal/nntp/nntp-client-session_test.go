@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/models"
+	testkit "github.com/go-while/nntp-testkit"
 )
 
 // cliSessGroup is the group every store server of this file serves.
@@ -117,23 +118,23 @@ func cliSessWant(t *testing.T, pool *Pool, id string) {
 	}
 }
 
-// cliSessWaitStats polls pool.Stats() until ok(st) holds. ForceCloseConn frees
-// its slot from its own goroutine, so the counters settle asynchronously;
-// cliWait is the hang guard, never the assertion.
+// cliSessWaitStats polls pool.Stats() until ok(st) holds, with testkit.WaitFor
+// (cliWait as the hang guard). ForceCloseConn frees its slot from its own
+// goroutine, so the counters settle asynchronously; the wait is never the
+// assertion. The stats last seen are logged when the test fails, because
+// WaitFor's own message cannot carry them.
 func cliSessWaitStats(t *testing.T, pool *Pool, what string, ok func(PoolStats) bool) {
 	t.Helper()
-	deadline := time.Now().Add(cliWait)
 	var st PoolStats
-	for {
+	defer func() {
+		if t.Failed() {
+			t.Logf("last pool stats: %+v", st)
+		}
+	}()
+	testkit.WaitFor(t, cliWait, "pool stats "+what, func() bool {
 		st = pool.Stats()
-		if ok(st) {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("pool stats %+v, want %s (within %v)", st, what, cliWait)
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+		return ok(st)
+	})
 }
 
 // TestCliSessArticleFaults: one faulted ARTICLE in a running session (kit

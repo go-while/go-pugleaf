@@ -18,17 +18,9 @@ import (
 
 // testWait is the hang guard of this package's tests: it only stops a hung test, a passing
 // test never waits on it. Override with PUGLEAF_TEST_DEADLINE (a Go duration, e.g. 120s);
-// default 60 s. Plan test-timing-hardening D3.
-var testWait = testWaitFromEnv(60 * time.Second)
-
-func testWaitFromEnv(def time.Duration) time.Duration {
-	if v := os.Getenv("PUGLEAF_TEST_DEADLINE"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil && d > 0 {
-			return d
-		}
-	}
-	return def
-}
+// default 60 s. Plan test-timing-hardening D3. sndTestDeadline (sender_fakes_test.go) is the
+// one place that reads the environment and hands it to the kit.
+var testWait = sndWait
 
 // qEpoch is the fixed "now" the queue tests build their times from.
 var qEpoch = time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)
