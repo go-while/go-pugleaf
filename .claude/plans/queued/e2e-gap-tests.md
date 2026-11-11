@@ -139,8 +139,9 @@ parity (DEL) with INN: `strict-del-passes` is deliberate.
   notes list the behaviour changes). `go get github.com/go-while/nntp-testkit@v0.12.0`, `go mod tidy`.
 - Fix expectations broken by the bump: CAPABILITIES LIST line of the fake Store (`ACTIVE.TIMES HEADERS`),
   `LIST ACTIVE.TIMES` 215, implicit-TLS fakeserver greeting order.
-- Deadline: the kit reads only `NNTP_TEST_DEADLINE` (`testkit.EnvDeadline`, default 60 s). Keep go-pugleaf's
-  mapping of `PUGLEAF_TEST_DEADLINE` into the kit (as today); replace our own `hDeadlineFromEnv`/`testWaitFromEnv`
+- Deadline: the kit reads only `NNTP_TEST_DEADLINE` (`testkit.EnvDeadline`, default 60 s). Check how go-pugleaf
+  hands `PUGLEAF_TEST_DEADLINE` to the kit today (no test sets NNTP_TEST_DEADLINE; likely per-call deadline
+  arguments) and keep that behaviour; replace our own `hDeadlineFromEnv`/`testWaitFromEnv`
   copies by `testkit.Deadline()` only where the mapping guarantees the same value.
 - Checks: full CLAUDE.md list green.
 
