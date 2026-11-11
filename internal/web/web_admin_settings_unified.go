@@ -67,6 +67,32 @@ func (s *WebServer) adminUpdateSettings(c *Context) {
 			},
 			EmptyAllowed: false,
 		},
+		config.FORM_FIELD_PEERDATEMAXAGE: {
+			FormField: config.FORM_FIELD_PEERDATEMAXAGE,
+			ConfigKey: config.CFG_KEY_PEERDATEMAXAGE,
+			Validator: s.validatePeerDateHours,
+			Processor: nil, // Uses config key directly; the NNTP server reads it through the config cache
+			SuccessMsg: func(value string) string {
+				if value == "0" {
+					return "Peer article age limit disabled (no past cutoff)"
+				}
+				return "Peer article age limit set to: " + value + " hours"
+			},
+			EmptyAllowed: false,
+		},
+		config.FORM_FIELD_PEERDATEMAXFUTURE: {
+			FormField: config.FORM_FIELD_PEERDATEMAXFUTURE,
+			ConfigKey: config.CFG_KEY_PEERDATEMAXFUTURE,
+			Validator: s.validatePeerDateHours,
+			Processor: nil, // Uses config key directly
+			SuccessMsg: func(value string) string {
+				if value == "0" {
+					return "Peer article future limit disabled"
+				}
+				return "Peer article future limit set to: " + value + " hours"
+			},
+			EmptyAllowed: false,
+		},
 		config.FORM_FIELD_ABUSEMAIL: {
 			FormField:    config.FORM_FIELD_ABUSEMAIL,
 			ConfigKey:    config.CFG_KEY_ABUSEMAIL,
@@ -340,6 +366,19 @@ func (s *WebServer) validateMaxCrossPosts(value string) error {
 	}
 	if n < 1 || n > config.MaxCrossPostsLimit {
 		return fmt.Errorf("Maximum crossposts must be between 1 and %d", config.MaxCrossPostsLimit)
+	}
+	return nil
+}
+
+// validatePeerDateHours accepts 0..config.PeerDateHoursLimit hours for the two peer Date
+// limits (0 = the limit is off, like INN without artcutoff / DATE_FUZZ).
+func (s *WebServer) validatePeerDateHours(value string) error {
+	n, err := strconv.Atoi(value)
+	if err != nil {
+		return fmt.Errorf("Invalid limit: must be a number of hours (0 = off)")
+	}
+	if n < 0 || n > config.PeerDateHoursLimit {
+		return fmt.Errorf("Date limit must be between 0 (off) and %d hours", config.PeerDateHoursLimit)
 	}
 	return nil
 }

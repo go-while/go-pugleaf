@@ -276,6 +276,16 @@
                               <div class="form-text">Empty = the server limit (CFG &ldquo;Article Size Limit&rdquo;). Announced in the INN/Diablo config below.</div>
                             </div>
                           </div>
+                          <div class="col-md-3">
+                            <div class="mb-3">
+                              <label class="form-label">Header check (IHAVE/TAKETHIS)</label>
+                              <select class="form-select" name="header_check">
+                                <option value="relay" {{if ne .HeaderCheck "strict"}}selected{{end}}>relay (innd, default)</option>
+                                <option value="strict" {{if eq .HeaderCheck "strict"}}selected{{end}}>strict (nnrpd, like POST)</option>
+                              </select>
+                              <div class="form-text">relay: no header line length limit, a bare CR/LF in a header is stored verbatim and logged. strict: at most 998 octets per line, exactly &ldquo;: &rdquo; and a non-empty value. NUL, missing or duplicate core headers, a bad Message-ID and an unparseable Date are refused either way.</div>
+                            </div>
+                          </div>
                         </div>
                         <hr class="my-3">
                         <h6>Outgoing (we feed the peer)</h6>
@@ -446,6 +456,16 @@
                 <label class="form-label">Max article size from the peer (bytes)</label>
                 <input type="number" class="form-control" name="in_max_size" min="0" max="16777216" placeholder="{{if $.ServerMaxArtSize}}{{$.ServerMaxArtSize}} (server limit){{else}}server limit{{end}}">
                 <div class="form-text">Empty = the server limit (CFG &ldquo;Article Size Limit&rdquo;).</div>
+              </div>
+            </div>
+            <div class="col-md-3">
+              <div class="mb-3">
+                <label class="form-label">Header check (IHAVE/TAKETHIS)</label>
+                <select class="form-select" name="header_check">
+                  <option value="relay" selected>relay (innd, default)</option>
+                  <option value="strict">strict (nnrpd, like POST)</option>
+                </select>
+                <div class="form-text">relay keeps what another server accepted (no 998 limit, bare CR/LF stored verbatim); strict applies the POST rules.</div>
               </div>
             </div>
           </div>

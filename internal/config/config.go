@@ -83,10 +83,32 @@ const CFG_KEY_HISTORY_REJECT_DAYS string = "HistoryRejectDays"
 // DefaultHistoryRejectDays is the HistoryRejectDays used when the key is missing or invalid.
 const DefaultHistoryRejectDays = 30
 
+// CFG_KEY_PEERDATEMAXAGE is how many hours old the Date (or Injection-Date) of an article a
+// peer feeds us (IHAVE/TAKETHIS) may be before intake refuses it, like INN's artcutoff.
+// 0 = no past cutoff; a missing, invalid, negative or out-of-range value reads as
+// DefaultPeerDateMaxAgeHours. The NNTP server reads it through the config cache.
+const CFG_KEY_PEERDATEMAXAGE string = "PeerArticleMaxAgeHours"
+
+// CFG_KEY_PEERDATEMAXFUTURE is how many hours a peer's article may lie in the future before
+// intake refuses it, like INN's DATE_FUZZ. 0 = no future limit; a missing, invalid, negative
+// or out-of-range value reads as DefaultPeerDateMaxFutureHours.
+const CFG_KEY_PEERDATEMAXFUTURE string = "PeerArticleMaxFutureHours"
+
+// Defaults of the two peer Date limits (hours), used when the key is missing or invalid.
+const (
+	DefaultPeerDateMaxAgeHours    = 72
+	DefaultPeerDateMaxFutureHours = 24
+)
+
+// PeerDateHoursLimit is the largest peer Date limit the admin page accepts (one year).
+const PeerDateHoursLimit = 24 * 365
+
 // Admin settings form field names
 const FORM_FIELD_HOSTNAME string = "local_nntp_hostname"
 const FORM_FIELD_WEBPOSTSIZE string = "web_post_size"
 const FORM_FIELD_MAXCROSSPOSTS string = "max_crossposts"
+const FORM_FIELD_PEERDATEMAXAGE string = "peer_date_max_age_hours"
+const FORM_FIELD_PEERDATEMAXFUTURE string = "peer_date_max_future_hours"
 const FORM_FIELD_ABUSEMAIL string = "abuse_mail"
 const FORM_FIELD_WEBLOCALNNTP string = "web_local_nntp_server_addr_info"
 const FORM_FIELD_REVERSEPROXY string = "reverse_proxy_addr"

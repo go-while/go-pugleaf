@@ -63,6 +63,9 @@ type AdminPageData struct {
 	WebPostMaxArticleSize         string                                // Added for web post size configuration
 	MaxCrossPosts                 int                                   // MaxCrossPosts config key (newsgroups per article)
 	MaxCrossPostsLimit            int                                   // Largest accepted MaxCrossPosts (config.MaxCrossPostsLimit)
+	PeerDateMaxAgeHours           int                                   // PeerArticleMaxAgeHours config key (peer intake past cutoff, 0 = off)
+	PeerDateMaxFutureHours        int                                   // PeerArticleMaxFutureHours config key (peer intake future limit, 0 = off)
+	PeerDateHoursLimit            int                                   // Largest accepted peer Date limit (config.PeerDateHoursLimit)
 	AbuseMail                     string                                // Added for abuse email configuration
 	WebLocalNNTPServerAddrInfo    string                                // Added for NNTP server address info configuration
 	ReverseProxyAddr              string                                // Added for reverse proxy address configuration
@@ -74,6 +77,8 @@ type AdminPageData struct {
 	FormFieldHostname             string                                // NNTP hostname form field name
 	FormFieldWebPostSize          string                                // Web post size form field name
 	FormFieldMaxCrossPosts        string                                // MaxCrossPosts form field name
+	FormFieldPeerDateMaxAge       string                                // PeerArticleMaxAgeHours form field name
+	FormFieldPeerDateMaxFuture    string                                // PeerArticleMaxFutureHours form field name
 	FormFieldAbuseMail            string                                // Abuse email form field name
 	FormFieldWebLocalNNTP         string                                // Web local NNTP server form field name
 	FormFieldReverseProxy         string                                // Reverse proxy form field name
