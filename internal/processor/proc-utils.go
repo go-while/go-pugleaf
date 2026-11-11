@@ -27,7 +27,10 @@ var (
 	numOffsetRe      = regexp.MustCompile(`(?:^|\s)([+-])(\d{2}):?(\d{2})\b`)
 	gmtOffsetRe      = regexp.MustCompile(`(?i)\b(?:GMT|UTC)\s*([+-])\s*(\d{1,2})(?::?(\d{2}))?\b`)
 	// "91May07 11:07 pm": YYMonDD as written by some BBS gateways
-	yyMonDDRe     = regexp.MustCompile(`^(\d{2})([A-Za-z]{3})(\d{2})\b`)
+	yyMonDDRe = regexp.MustCompile(`^(\d{2})([A-Za-z]{3})(\d{2})\b`)
+	// an RFC 5322 §4.3 obs-year (two or three digits) in the year position: after the
+	// month name, before the time ("28 May 104 11:01:32", "28 May 60 11:01:32")
+	obsYearRe     = regexp.MustCompile(`(?i)\b((?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?[-\s]+)(\d{2,3})([-\s]+\d{1,2}:)`)
 	letterDigitRe = regexp.MustCompile(`([A-Za-z])(\d)|(\d)([A-Za-z])`)
 	// everything up to the time and an optional zone/offset: what remains of a date line
 	// that carries trailing junk ("<br>", " ,", "From: ...", a JIS escape)
@@ -636,6 +639,7 @@ func normalizeDateString(dateStr string) string {
 	if m := yyMonDDRe.FindStringSubmatch(dateStr); m != nil {
 		dateStr = m[3] + " " + m[2] + " " + m[1] + dateStr[len(m[0]):]
 	}
+	dateStr = rewriteObsYear(dateStr)
 	for _, z := range zoneLongNames {
 		if i := strings.Index(strings.ToLower(dateStr), strings.ToLower(z.name)); i >= 0 {
 			dateStr = dateStr[:i] + z.offset + dateStr[i+len(z.name):]
@@ -662,6 +666,33 @@ func normalizeDateString(dateStr string) string {
 		dateStr = threeDigitTimezoneRe.ReplaceAllString(dateStr, " "+match[1]+"0"+match[2])
 	}
 	return dateStr
+}
+
+// rewriteObsYear expands an RFC 5322 §4.3 obsolete year in the year position of a date to
+// four digits, but only in the two readings the layouts get wrong: a three-digit year is an
+// offset from 1900 ("28 May 104" = 2004) and Go's "06" layout cannot read it at all, and a
+// two-digit year 50..68 is 19xx while that layout pivots at 69 and reads it as 20xx. Every
+// other two-digit year (00..49 and 69..99 already agree with RFC 5322) is left untouched,
+// so no date that parses today changes its reading. A misread year matters: it trips the
+// 72 h stale / 24 h future check of peer intake and 437s an otherwise valid article.
+func rewriteObsYear(dateStr string) string {
+	return obsYearRe.ReplaceAllStringFunc(dateStr, func(s string) string {
+		m := obsYearRe.FindStringSubmatch(s)
+		if m == nil {
+			return s
+		}
+		y, err := strconv.Atoi(m[2])
+		if err != nil {
+			return s
+		}
+		switch {
+		case len(m[2]) == 3, y >= 50 && y <= 68:
+			y += 1900
+		default:
+			return s
+		}
+		return m[1] + strconv.Itoa(y) + m[3]
+	})
 }
 
 // fallbackDateHeaders are tried, in order, when the Date header is missing or unreadable
