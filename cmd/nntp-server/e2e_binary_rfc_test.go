@@ -86,40 +86,89 @@ func e2eRfcCaps(c *client.Conn) ([]string, map[string][]string, error) {
 	return lines, m, err
 }
 
-// e2eRfcConformance runs the kit's black-box protocol checks (package conformance) once
-// against addr and returns the results by name, so each step below can require the checks that
-// cover it on top of its own, fixture-specific assertions.
+// e2eRfcConf is the outcome of the kit's conformance run: the results by check name, or the
+// error that kept the run from starting. Every N5x step requires the checks that cover it on
+// top of its own, fixture-specific assertions, so a run that did not start fails the steps
+// instead of letting them pass with no kit check behind them.
+type e2eRfcConf struct {
+	res map[string]conformance.Result
+	err error
+}
+
+// e2eRfcConformance runs the kit's black-box protocol checks (package conformance) once against
+// addr, before the steps below.
 //
-// It runs before the steps below and posts into postGroup, which must be a group that already
-// holds articles: the checks that read an article skip themselves in an empty group. NEWNEWS
-// answers 500 by decision (plan nntp-rfc-commands), so that check is left out. Results no step
-// requires are printed as INFO lines: the shell driver counts only the PASS/FAIL N5x lines.
-func e2eRfcConformance(r e2eRfcReport, addr, user, pass, postGroup string) map[string]conformance.Result {
+// postGroup is a group of its own, seeded by e2eRfcSeed: the checks that read an article skip
+// themselves in an empty group, and the ones that post, feed or cancel must not move the
+// article numbers of PUGLEAF_E2E_GROUP, which N51-N56 assert. NEWNEWS answers 500 by decision
+// (plan nntp-rfc-commands), so that check is left out. Results no step requires are printed as
+// INFO lines: the shell driver counts only the PASS/FAIL N5x lines.
+func e2eRfcConformance(r e2eRfcReport, addr, user, pass, postGroup string) e2eRfcConf {
+	if err := e2eRfcSeed(addr, user, pass, postGroup); err != nil {
+		return e2eRfcConf{err: fmt.Errorf("seeding %s for the conformance run: %w", postGroup, err)}
+	}
 	rep, err := conformance.Check(conformance.Options{
 		Addr: addr, User: user, Pass: pass, PostGroup: postGroup,
 		Skip:     []string{"newnews"}, // 500 by decision
 		Deadline: testWait,
 	})
 	if err != nil {
-		r.info("N50", "conformance: "+err.Error())
-		return nil
+		return e2eRfcConf{err: err}
 	}
-	byName := rep.ByName()
 	for _, res := range rep.Results {
 		if res.Status != conformance.Pass {
 			r.info("N50", fmt.Sprintf("conformance %s (%s): %v: %s", res.Name, res.RFC, res.Status, res.Detail))
 		}
 	}
-	return byName
+	return e2eRfcConf{res: rep.ByName()}
 }
 
-// e2eRfcRequire returns an error unless every named conformance check passed.
-func e2eRfcRequire(res map[string]conformance.Result, names ...string) error {
-	if res == nil {
-		return nil // the conformance run itself could not reach the server: reported as INFO
+// e2eRfcSeedArticles is how many articles e2eRfcSeed posts: NEXT/LAST and the range forms of
+// the conformance checks want more than one article in the group.
+const e2eRfcSeedArticles = 2
+
+// e2eRfcSeed posts e2eRfcSeedArticles articles into group, so the conformance checks that read
+// an article have ones to read there. The commit is asynchronous, so it waits until GROUP
+// counts them.
+func e2eRfcSeed(addr, user, pass, group string) error {
+	c, err := e2eDialAddr(addr, testWait)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	if code, line, err := c.TryLogin(user, pass); err != nil || code != 281 {
+		return fmt.Errorf("AUTHINFO: code=%d line=%q err=%v", code, line, err)
+	}
+	for i := 0; i < e2eRfcSeedArticles; i++ {
+		id := fmt.Sprintf("<e2e-conf-seed-%d-%d@test.invalid>", time.Now().UnixNano(), i)
+		art := e2eArticle(e2eHead(id, group, "E2E conformance seed", e2eNow()), []string{"seed"})
+		if code, line, err := e2ePost(c, art); err != nil || code != 240 {
+			return fmt.Errorf("POST into %s: code=%d line=%q err=%v, want 240", group, code, line, err)
+		}
+	}
+	return e2eWaitFor(testWait, func() error {
+		code, line, err := c.TryCmd("GROUP %s", group)
+		if err != nil {
+			return err
+		}
+		f := strings.Fields(line)
+		if code != 211 || len(f) < 5 {
+			return fmt.Errorf("GROUP %s: %q", group, line)
+		}
+		if n, perr := strconv.ParseInt(f[1], 10, 64); perr != nil || n < e2eRfcSeedArticles {
+			return fmt.Errorf("GROUP %s: %q, want at least %d articles", group, line, e2eRfcSeedArticles)
+		}
+		return nil
+	})
+}
+
+// require returns an error unless the run started and every named check passed.
+func (cf e2eRfcConf) require(names ...string) error {
+	if cf.err != nil {
+		return fmt.Errorf("the kit's conformance run did not start: %v", cf.err)
 	}
 	for _, n := range names {
-		got, ok := res[n]
+		got, ok := cf.res[n]
 		if !ok {
 			return fmt.Errorf("conformance check %s did not run", n)
 		}
@@ -147,9 +196,9 @@ func TestE2EBinaryRFC(t *testing.T) {
 	withTLS := os.Getenv("PUGLEAF_E2E_STARTTLS") == "1"
 	r := e2eRfcReport{t: t}
 	freshID := fmt.Sprintf("<e2e-n55-%d@test.invalid>", time.Now().UnixNano())
-	// The kit's checks run first, on their own connections; they post into the same group,
-	// which the steps below then read as they find it.
-	conf := e2eRfcConformance(r, addr, user, pass, group)
+	// The kit's checks run first, on their own connections and in a group of their own, so
+	// the articles they post cannot move what the steps below read.
+	conf := e2eRfcConformance(r, addr, user, pass, e2eEnv("PUGLEAF_E2E_GROUP2", "e2e.test.b"))
 
 	c, err := e2eDialAddr(addr, testWait)
 	if err != nil {
@@ -175,7 +224,7 @@ func TestE2EBinaryRFC(t *testing.T) {
 		if d := time.Since(ts); d > 5*time.Minute || d < -5*time.Minute {
 			return fmt.Errorf("DATE %s is %s away from UTC now", f[1], d.Round(time.Second))
 		}
-		return e2eRfcRequire(conf, "greeting", "capabilities", "date", "help", "quit-eof",
+		return conf.require("greeting", "capabilities", "date", "help", "quit-eof",
 			"unknown-command", "bad-arguments")
 	}())
 
@@ -250,20 +299,23 @@ func TestE2EBinaryRFC(t *testing.T) {
 		if e := e2eRfcStatus(code, line, err, want); e != nil {
 			return fmt.Errorf("LAST at the last article: %v", e)
 		}
-		return e2eRfcRequire(conf, "group", "listgroup", "listgroup-range", "next-last",
+		return conf.require("group", "listgroup", "listgroup-range", "next-last",
 			"article", "head", "body", "stat")
 	}())
 
-	// N52: LIST OVERVIEW.FMT → 215 and the 7 fixed lines (RFC 3977 §8.4)
-	r.check("N52", "LIST OVERVIEW.FMT 215, 7 fields", func() error {
+	// N52: LIST OVERVIEW.FMT → 215 and the fixed lines (RFC 3977 §8.4): the seven mandatory
+	// fields plus "Xref:full", which the server appends in -xref partial and full
+	// (nntp-cmd-over-hdr.go; the in-process test pins the same block in
+	// internal/nntp/nntp-server-rfccmds_test.go rfcListOverviewFmt).
+	r.check("N52", "LIST OVERVIEW.FMT 215, 7 fields + Xref:full", func() error {
 		lines, err := e2eRfcBlock(c, 215, "LIST OVERVIEW.FMT")
 		if err != nil {
 			return err
 		}
-		if err := e2eExpectLines(lines, []string{"Subject:", "From:", "Date:", "Message-ID:", "References:", ":bytes", ":lines"}); err != nil {
+		if err := e2eExpectLines(lines, []string{"Subject:", "From:", "Date:", "Message-ID:", "References:", ":bytes", ":lines", "Xref:full"}); err != nil {
 			return err
 		}
-		return e2eRfcRequire(conf, "list-active", "list-newsgroups", "list-overview-fmt",
+		return conf.require("list-active", "list-newsgroups", "list-overview-fmt",
 			"list-unknown-keyword")
 	}())
 
@@ -286,7 +338,7 @@ func TestE2EBinaryRFC(t *testing.T) {
 		if e := e2eRfcStatus(code, line, err, 423); e != nil {
 			return e
 		}
-		return e2eRfcRequire(conf, "over", "over-errors")
+		return conf.require("over", "over-errors")
 	}())
 
 	// N54: HDR Subject 1 → 225 "1 …"; LIST HEADERS → 215 with :bytes (RFC 3977 §8.5, §8.6)
@@ -309,7 +361,7 @@ func TestE2EBinaryRFC(t *testing.T) {
 		if !found {
 			return fmt.Errorf("LIST HEADERS: lines %q lack :bytes", lines)
 		}
-		return e2eRfcRequire(conf, "hdr", "list-headers")
+		return conf.require("hdr", "list-headers")
 	}())
 
 	// N55: MODE STREAM 203, CHECK fresh id 238, CHECK stored id 438 (RFC 4644 §2.3, §2.4)
@@ -351,7 +403,7 @@ func TestE2EBinaryRFC(t *testing.T) {
 		// check-have and ihave-have are left out: this server commits asynchronously and
 		// answers 431/436 ("retry later") for an article that is still being committed, which
 		// the kit reports as a deferral (Skip), not as a pass.
-		return e2eRfcRequire(conf, "mode-stream", "mode-stream-capability", "check-new",
+		return conf.require("mode-stream", "mode-stream-capability", "check-new",
 			"check-pipelined", "takethis", "takethis-duplicate")
 	}())
 
@@ -390,7 +442,7 @@ func TestE2EBinaryRFC(t *testing.T) {
 		if !hasA || hasB {
 			return fmt.Errorf("LIST ACTIVE e2e.test.*,!*.b: %q, want e2e.test.a and not e2e.test.b", wm)
 		}
-		return e2eRfcRequire(conf, "newgroups")
+		return conf.require("newgroups")
 	}())
 
 	// The main connection ends here; N57 needs a fresh, unauthenticated one.
@@ -436,7 +488,7 @@ func TestE2EBinaryRFC(t *testing.T) {
 			if e := e2eRfcStatus(code, line, err, 205); e != nil {
 				return e
 			}
-			return e2eRfcRequire(conf, "starttls", "starttls-twice", "starttls-pipelined")
+			return conf.require("starttls", "starttls-twice", "starttls-pipelined")
 		}())
 	} else {
 		r.check("N57", "STARTTLS not listed and 502 without a certificate", func() error {

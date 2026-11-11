@@ -47,6 +47,7 @@ import (
 	"github.com/go-while/go-pugleaf/internal/models"
 	"github.com/go-while/go-pugleaf/internal/nntp"
 	"github.com/go-while/go-pugleaf/internal/processor"
+	testkit "github.com/go-while/nntp-testkit"
 	"github.com/go-while/nntp-testkit/client"
 	"github.com/go-while/nntp-testkit/proc"
 )
@@ -62,15 +63,24 @@ const e2ePeerPathToken = "e2e.client.invalid"
 // asynchronous commits, server and post-queue waits. It only stops a hung test; a passing test
 // never waits on it. Override with PUGLEAF_TEST_DEADLINE (a Go duration, e.g. 120s).
 // Plan test-timing-hardening D3.
-var testWait = testWaitFromEnv(60 * time.Second)
+// It is testkit.Deadline(), so the kit's own hang guards (client, proc, conformance,
+// testkit.WaitFor) use the same value.
+var testWait = testDeadline()
 
-func testWaitFromEnv(def time.Duration) time.Duration {
-	if v := os.Getenv("PUGLEAF_TEST_DEADLINE"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil && d > 0 {
-			return d
+// testDeadline hands PUGLEAF_TEST_DEADLINE to the kit, which reads only NNTP_TEST_DEADLINE
+// (testkit.EnvDeadline), and returns the kit's hang guard. An NNTP_TEST_DEADLINE set by the
+// caller wins. The mapping lives in this initialiser, not in TestMain, because testWait and
+// e2eCommitWait are package variables: Go evaluates those before TestMain runs.
+// Plan e2e-gap-tests wave 3.
+func testDeadline() time.Duration {
+	if os.Getenv(testkit.EnvDeadline) == "" {
+		if v := os.Getenv("PUGLEAF_TEST_DEADLINE"); v != "" {
+			if err := os.Setenv(testkit.EnvDeadline, v); err != nil {
+				fmt.Fprintln(os.Stderr, "[E2E] Setenv "+testkit.EnvDeadline+":", err)
+			}
 		}
 	}
-	return def
+	return testkit.Deadline()
 }
 
 // e2eCommitWait bounds every poll for an asynchronously committed article.
@@ -1252,7 +1262,7 @@ func TestE2EDotHeaderLine(t *testing.T) {
 	g := e2eGroup(t, "dothdr")
 	id := e2eMsgID("dothdr")
 	head := e2eHead(id, g, "E2E dot header", e2eNow())
-	head = append(head[:2], append([]string{"."}, head[2:]...)...) // sent as ".." by e2eWire
+	head = append(head[:2], append([]string{"."}, head[2:]...)...) // sent as ".." (client.StuffBytes)
 	c := e2ePoster(t)
 	code, line := e2eMustPost(t, c, e2eArticle(head, []string{"body"}))
 	switch code {
@@ -1519,13 +1529,14 @@ func TestE2EGroupPolicy(t *testing.T) {
 	t.Run("ihave-status-n", func(t *testing.T) {
 		g := e2eGroupWith(t, "policy", true, "n", 0)
 		id := newID()
-		if code, line := c.Cmd("IHAVE %s", id); code != 335 {
+		cc := c.For(t) // the connection was dialled with the parent t: fail this subtest
+		if code, line := cc.Cmd("IHAVE %s", id); code != 335 {
 			t.Fatalf("IHAVE %s: %q, want 335", id, line)
 		}
-		if err := c.Send(e2eWire(e2eHead(id, g, "E2E feed to status n", e2eNow()), []string{"feed body"})); err != nil {
+		if err := cc.Send(e2eWire(e2eHead(id, g, "E2E feed to status n", e2eNow()), []string{"feed body"})); err != nil {
 			t.Fatal(err)
 		}
-		if code, line, err := c.ReadStatus(); err != nil || code != 235 {
+		if code, line, err := cc.ReadStatus(); err != nil || code != 235 {
 			t.Fatalf("IHAVE to status n %s: code=%d line=%q err=%v, want 235", g, code, line, err)
 		}
 		e2eWaitStored(t, id, g)

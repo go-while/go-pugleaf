@@ -391,7 +391,7 @@ func TestE2EBinaryIntake(t *testing.T) {
 	// N49: POST with a header line ".." (un-stuffed ".") → 441, the connection stays usable
 	r.check("N49", "POST with a \"..\" header line 441, then MODE READER", func() error {
 		head := e2eHead(newID("n49"), gen, "E2E N49 dot header", e2eNow())
-		head = append(head[:2], append([]string{"."}, head[2:]...)...) // sent as ".." by e2eWire
+		head = append(head[:2], append([]string{"."}, head[2:]...)...) // sent as ".." (client.StuffBytes)
 		code, line, err := e2ePost(c, e2eArticle(head, []string{"n49"}))
 		if e := statusIs(code, line, err, 441); e != nil {
 			return e
