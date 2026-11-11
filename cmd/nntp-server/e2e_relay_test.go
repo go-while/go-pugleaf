@@ -47,6 +47,7 @@ package main
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -147,6 +148,12 @@ func relayFakePeer(t *testing.T, have []string, before func(c *fakeserver.Conn, 
 // relayOpenRO opens a SQLite file of the running server read-only (WAL readers do not disturb
 // the writer). The caller closes the handle.
 func relayOpenRO(path string) (*sql.DB, error) {
+	// SQLite's mode=ro error for a missing file says nothing a caller can test, so the stat
+	// comes first: a file the server has not created yet is reported as os.ErrNotExist
+	// (feed.OpenReadOnly does the same).
+	if _, err := os.Stat(path); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
 	db, err := sql.Open("sqlite3", "file:"+path+"?mode=ro&_busy_timeout=10000")
 	if err != nil {
 		return nil, err
@@ -162,47 +169,50 @@ func relayOpenRO(path string) (*sql.DB, error) {
 
 // relayQueueRows reads the outgoing queue file of a data root and returns the queued
 // message-ids per peer, in the order Claim would take them (enqueued_at, message_id).
-func relayQueueRows(dataDir string) (map[int64][]string, error) {
+func relayQueueRows(dataDir string) (out map[int64][]string, err error) {
 	db, err := relayOpenRO(feed.QueuePath(dataDir))
 	if err != nil {
 		return nil, err
 	}
-	out := make(map[int64][]string)
+	// Registered before the rows.Close below, so it runs after it (defers are LIFO): the
+	// rows are closed before the handle, and a close error becomes the result.
+	defer func() {
+		if cerr := db.Close(); cerr != nil && err == nil {
+			out, err = nil, cerr
+		}
+	}()
 	rows, err := db.Query(`SELECT peer_id, message_id FROM feed_queue ORDER BY peer_id, enqueued_at, message_id`)
 	if err != nil {
-		if cerr := db.Close(); cerr != nil {
-			return nil, fmt.Errorf("%w (and closing: %v)", err, cerr)
-		}
 		return nil, err
 	}
 	defer rows.Close()
+	out = make(map[int64][]string)
 	for rows.Next() {
 		var id int64
 		var msgID string
-		if err := rows.Scan(&id, &msgID); err != nil {
-			if cerr := db.Close(); cerr != nil {
-				return nil, fmt.Errorf("%w (and closing: %v)", err, cerr)
-			}
-			return nil, err
+		if serr := rows.Scan(&id, &msgID); serr != nil {
+			return nil, serr
 		}
 		out[id] = append(out[id], msgID)
 	}
-	err = rows.Err()
-	if cerr := db.Close(); cerr != nil && err == nil {
-		err = cerr
-	}
-	if err != nil {
-		return nil, err
+	if rerr := rows.Err(); rerr != nil {
+		return nil, rerr
 	}
 	return out, nil
 }
 
-// relayQueued is relayQueueRows for a poll condition: it reports the rows of one peer and
-// treats a read error as "not yet" (the file appears when the server opens the queue).
-func relayQueued(dataDir string, peerID int64) []string {
+// relayQueued is relayQueueRows for a poll condition: the rows of one peer, with a queue file
+// the server has not created yet counting as no rows. Every other read error fails the test,
+// so a poll for an empty queue can never pass because the read failed. The conditions of
+// testkit.WaitFor run on the test's goroutine, so t.Fatalf is allowed here.
+func relayQueued(t *testing.T, dataDir string, peerID int64) []string {
+	t.Helper()
 	rows, err := relayQueueRows(dataDir)
-	if err != nil {
+	if errors.Is(err, os.ErrNotExist) {
 		return nil
+	}
+	if err != nil {
+		t.Fatalf("reading the queue file: %v", err)
 	}
 	return rows[peerID]
 }
@@ -254,6 +264,8 @@ func relaySeed(t *testing.T, dataDir string, portA, portB int) (idA, idB int64) 
 		t.Fatalf("seed the groups: %v", err)
 	}
 	insert := func(name, token, hosts string, port int, flags string) int64 {
+		// max_conns 1 is load-bearing: one connWorker per peer means one claim at a time,
+		// so the order in which the articles are offered is the queue order.
 		res, err := db.Exec(`INSERT INTO peers(name, path_token, hosts, in_patterns, in_max_size,
 			out_enabled, out_host, out_port, out_patterns, out_flags, max_conns, enabled)
 			VALUES(?, ?, ?, '*', 0, 1, '127.0.0.1', ?, '*', ?, 1, 1)`, name, token, hosts, port, flags)
@@ -309,6 +321,38 @@ func relayWaitStored(t *testing.T, c *client.Conn, msgID string) string {
 		t.Fatalf("%s was not stored: %v", msgID, err)
 	}
 	return path
+}
+
+// relayWaitStoredIn polls HEAD <id> with group selected, so a crosspost is known to be
+// committed in that group too - and with it the feed hook of that group's batch, which runs at
+// the commit point. It dials a connection of its own: a selected group narrows a later
+// "HEAD <id>" to that group, which would break the group-free waits on the shared connection.
+func relayWaitStoredIn(t *testing.T, addr, group, msgID string) {
+	t.Helper()
+	c := client.DialWith(t, addr, testWait)
+	defer c.Close()
+	if err := e2eWaitFor(testWait, func() error {
+		code, line, err := c.TryCmd("GROUP %s", group)
+		if err != nil {
+			return err
+		}
+		if code != 211 {
+			return fmt.Errorf("GROUP %s: %q", group, line)
+		}
+		code, line, err = c.TryCmd("HEAD %s", msgID)
+		if err != nil {
+			return err
+		}
+		if code != 221 {
+			return fmt.Errorf("HEAD %s in %s: %q", msgID, group, line)
+		}
+		if _, err := c.TryReadDotLines(); err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("%s was not stored in %s: %v", msgID, group, err)
+	}
 }
 
 func TestE2ERelayBinary(t *testing.T) {
@@ -399,7 +443,7 @@ func TestE2ERelayBinary(t *testing.T) {
 	// The test is peer A's inbound session (matched by 127.0.0.1); r reads the stored articles.
 	c := client.DialWith(t, addr, testWait)
 	r := client.DialWith(t, addr, testWait)
-	feed := func(a *article.Article) {
+	ihave := func(a *article.Article) {
 		t.Helper()
 		c.ExpectIhave(235, a.MessageID(), a.Bytes())
 	}
@@ -407,7 +451,7 @@ func TestE2ERelayBinary(t *testing.T) {
 
 	// ---------------------------------------------------------------- 1. IHAVE → queue row
 	first := relayArticle(t, msgID(nFirst), relayGroupA, relayTokenA, nil)
-	feed(first)
+	ihave(first)
 	if got := relayWaitStored(t, r, first.MessageID()); got != wantPath {
 		t.Fatalf("stored Path %q, want %q", got, wantPath)
 	}
@@ -431,12 +475,12 @@ func TestE2ERelayBinary(t *testing.T) {
 	queued := []*article.Article{first}
 	for _, n := range []int{nQ1, nQ2, nQ3} {
 		a := relayArticle(t, msgID(n), relayGroupA, relayTokenA, nil)
-		feed(a)
+		ihave(a)
 		relayWaitStored(t, r, a.MessageID())
 		queued = append(queued, a)
 	}
 	testkit.WaitFor(t, testWait, "four rows in peer B's queue", func() bool {
-		return len(relayQueued(data, peerB)) == len(queued)
+		return len(relayQueued(t, data, peerB)) == len(queued)
 	})
 	close(relayGate)
 	testkit.WaitFor(t, testWait, "fake peer B taking the four queued articles", func() bool {
@@ -459,24 +503,24 @@ func TestE2ERelayBinary(t *testing.T) {
 			t.Errorf("%s did not reach fake peer B", a.MessageID())
 			continue
 		}
-		if p := got.Get("Path"); p != wantPath {
-			t.Errorf("%s reached fake peer B with Path %q, want %q", a.MessageID(), p, wantPath)
+		if pathHdr := got.Get("Path"); pathHdr != wantPath {
+			t.Errorf("%s reached fake peer B with Path %q, want %q", a.MessageID(), pathHdr, wantPath)
 		}
 		if s := got.Get("Subject"); s != a.Get("Subject") {
 			t.Errorf("%s reached fake peer B with Subject %q, want %q", a.MessageID(), s, a.Get("Subject"))
 		}
 	}
 	testkit.WaitFor(t, testWait, "peer B's queue to be empty again", func() bool {
-		return len(relayQueued(data, peerB)) == 0
+		return len(relayQueued(t, data, peerB)) == 0
 	})
 
 	// ---------------------------------------------------------------- 3. the peer has it (438)
 	takethis := srvB.Count("TAKETHIS")
 	dup := relayArticle(t, msgID(nDup), relayGroupA, relayTokenA, nil)
-	feed(dup)
+	ihave(dup)
 	relayWaitStored(t, r, dup.MessageID())
 	testkit.WaitFor(t, testWait, "the 438 of the article peer B has", func() bool {
-		return len(relayQueued(data, peerB)) == 0 && srvB.Count("CHECK") >= len(queued)+1
+		return len(relayQueued(t, data, peerB)) == 0 && srvB.Count("CHECK") >= len(queued)+1
 	})
 	if n := srvB.Count("TAKETHIS"); n != takethis {
 		t.Errorf("TAKETHIS count %d after the 438, want %d: an article the peer has must not be transferred", n, takethis)
@@ -496,13 +540,26 @@ func TestE2ERelayBinary(t *testing.T) {
 		relayArticle(t, msgID(nHops), relayGroupA, relayTokenA+"!hop2!hop3!hop4", nil), // "H4"
 	}
 	for _, a := range limited {
-		feed(a)
+		ihave(a)
 		relayWaitStored(t, r, a.MessageID())
+		if strings.Contains(a.Get("Newsgroups"), relayGroupB) {
+			// A crosspost is committed once per group and the feed hook runs per commit:
+			// wait for the second group too, or its hook could reach the enqueuer after
+			// the sentinel's and the sentinel would prove nothing about it.
+			relayWaitStoredIn(t, addr, relayGroupB, a.MessageID())
+		}
+		// Nothing of these may be queued for peer B at any point: the rows of the one claim
+		// that may still be open are read here too, not only after the sentinel.
+		for _, id := range relayQueued(t, data, peerB) {
+			if id == a.MessageID() {
+				t.Errorf("%s was queued for peer B although its out_flags %q refuse it", id, relayOutFlags)
+			}
+		}
 	}
 	// The sentinel is fed after all three are stored, so the enqueuer saw them first: once it
 	// reaches peer B, the three have been through the peer selection.
 	last := relayArticle(t, msgID(nLast), relayGroupA, relayTokenA, nil)
-	feed(last)
+	ihave(last)
 	relayWaitStored(t, r, last.MessageID())
 	testkit.WaitFor(t, testWait, "fake peer B taking the article after the three limited ones", func() bool {
 		return recB.article(last.MessageID()) != nil
@@ -517,7 +574,7 @@ func TestE2ERelayBinary(t *testing.T) {
 		t.Errorf("fake peer B took\n%q\nwant\n%q", got, wantGot)
 	}
 	testkit.WaitFor(t, testWait, "an empty queue for peer B", func() bool {
-		return len(relayQueued(data, peerB)) == 0
+		return len(relayQueued(t, data, peerB)) == 0
 	})
 
 	// ---------------------------------------------------------------- 5. never offered back
