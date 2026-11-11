@@ -13,16 +13,12 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
-	"math/big"
 	"net"
 	"os"
 	"path/filepath"
@@ -36,6 +32,7 @@ import (
 	"github.com/go-while/go-pugleaf/internal/models"
 	testkit "github.com/go-while/nntp-testkit"
 	"github.com/go-while/nntp-testkit/client"
+	"github.com/go-while/nntp-testkit/tlscert"
 )
 
 // sessKnownCommands is the dispatch table of handleCommand (nntp-server-cliconns.go).
@@ -113,33 +110,12 @@ func sessAuth(t *testing.T, c *client.Conn, user, pass string) {
 	}
 }
 
-// sessSelfSignedTLS builds an in-memory self-signed ECDSA P-256 server config.
+// sessSelfSignedTLS builds a server config with a throw-away self-signed certificate for
+// 127.0.0.1/localhost (kit package tlscert) and returns the certificate in DER too.
 func sessSelfSignedTLS(t *testing.T) (*tls.Config, []byte) {
 	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("GenerateKey: %v", err)
-	}
-	now := time.Now()
-	tmpl := &x509.Certificate{
-		SerialNumber:          big.NewInt(now.UnixNano()),
-		Subject:               pkix.Name{CommonName: "t1.session.test.invalid"},
-		NotBefore:             now.Add(-time.Hour),
-		NotAfter:              now.Add(time.Hour),
-		KeyUsage:              x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		BasicConstraintsValid: true,
-		DNSNames:              []string{"localhost"},
-		IPAddresses:           []net.IP{net.IPv4(127, 0, 0, 1)},
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
-	if err != nil {
-		t.Fatalf("CreateCertificate: %v", err)
-	}
-	return &tls.Config{
-		Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}},
-		MinVersion:   tls.VersionTLS12,
-	}, der
+	leaf := tlscert.SelfSigned(t, tlscert.Options{CommonName: "t1.session.test.invalid"})
+	return leaf.ServerConfig(), leaf.Cert.Raw
 }
 
 // ---------------------------------------------------------------------------

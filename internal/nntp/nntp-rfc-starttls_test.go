@@ -7,17 +7,9 @@ package nntp
 import (
 	"bufio"
 	"bytes"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/tls"
-	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/pem"
 	"errors"
-	"math/big"
 	"net"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -25,47 +17,17 @@ import (
 
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/nntp-testkit/client"
+	"github.com/go-while/nntp-testkit/tlscert"
 )
 
-// stlsWriteCert writes a self-signed ECDSA P-256 certificate for
-// 127.0.0.1/localhost and its key as PEM files into t.TempDir() (a copy of the
-// generation in sessSelfSignedTLS, kept here so this file is self-contained).
+// stlsWriteCert writes a throw-away self-signed certificate for 127.0.0.1/localhost and its
+// key as PEM files into t.TempDir() (kit package tlscert; the server config takes paths). It
+// also returns the certificate in DER, to compare with what the server presents.
 func stlsWriteCert(t *testing.T) (certFile, keyFile string, der []byte) {
 	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("GenerateKey: %v", err)
-	}
-	now := time.Now()
-	tmpl := &x509.Certificate{
-		SerialNumber:          big.NewInt(now.UnixNano()),
-		Subject:               pkix.Name{CommonName: "t5.starttls.test.invalid"},
-		NotBefore:             now.Add(-time.Hour),
-		NotAfter:              now.Add(time.Hour),
-		KeyUsage:              x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		BasicConstraintsValid: true,
-		DNSNames:              []string{"localhost"},
-		IPAddresses:           []net.IP{net.IPv4(127, 0, 0, 1)},
-	}
-	der, err = x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
-	if err != nil {
-		t.Fatalf("CreateCertificate: %v", err)
-	}
-	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
-	if err != nil {
-		t.Fatalf("MarshalPKCS8PrivateKey: %v", err)
-	}
-	dir := t.TempDir()
-	certFile = filepath.Join(dir, "cert.pem")
-	keyFile = filepath.Join(dir, "key.pem")
-	if err := os.WriteFile(certFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
-		t.Fatalf("write cert: %v", err)
-	}
-	if err := os.WriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
-		t.Fatalf("write key: %v", err)
-	}
-	return certFile, keyFile, der
+	leaf := tlscert.SelfSigned(t, tlscert.Options{CommonName: "t5.starttls.test.invalid"})
+	f := leaf.Write(t, "")
+	return f.Cert, f.Key, leaf.Cert.Raw
 }
 
 // stlsNewServer is newTestServer with Config.NNTP.TLSCert/TLSKey set before
@@ -162,25 +124,40 @@ var stlsExtra = map[string]func(cc *ClientConnection, args []string) error{
 	"STARTTLS": func(cc *ClientConnection, args []string) error { return cc.handleStartTLS(args) },
 }
 
-// stlsUpgrade runs the client side of the TLS handshake on c and switches c to
-// the TLS connection. It returns the peer's leaf certificate (DER).
-func stlsUpgrade(t *testing.T, c *client.Conn) []byte {
+// stlsClientTLS is the client side of the STARTTLS handshake: the scratch certificate is
+// self-signed, so it is not verified.
+func stlsClientTLS() *tls.Config {
+	return &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12} //nolint:gosec // test client
+}
+
+// stlsPeerCert returns the leaf certificate (DER) the server presented on c.
+func stlsPeerCert(t *testing.T, c *client.Conn) []byte {
+	t.Helper()
+	st, ok := c.TLSState()
+	if !ok {
+		t.Fatal("connection is not TLS")
+	}
+	if len(st.PeerCertificates) == 0 {
+		t.Fatal("no peer certificate")
+	}
+	return st.PeerCertificates[0].Raw
+}
+
+// stlsUpgrade runs the client side of the TLS handshake on a c whose 382 was already read, and
+// switches c to the TLS connection. Only the pipelining test needs it: client.StartTLS sends
+// the STARTTLS itself, so it cannot send a second command in the same write.
+func stlsUpgrade(t *testing.T, c *client.Conn) {
 	t.Helper()
 	if c.R.Buffered() != 0 {
 		t.Fatalf("client has %d unread bytes before the handshake", c.R.Buffered())
 	}
-	tc := tls.Client(c.Conn, &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}) //nolint:gosec // test client
+	tc := tls.Client(c.Conn, stlsClientTLS())
 	_ = tc.SetDeadline(time.Now().Add(hDeadline))
 	if err := tc.Handshake(); err != nil {
 		t.Fatalf("TLS handshake: %v", err)
 	}
 	c.Conn = tc
 	c.R = bufio.NewReaderSize(tc, 1<<20)
-	certs := tc.ConnectionState().PeerCertificates
-	if len(certs) == 0 {
-		t.Fatal("no peer certificate")
-	}
-	return certs[0].Raw
 }
 
 func TestStlsStartTLS(t *testing.T) {
@@ -191,8 +168,8 @@ func TestStlsStartTLS(t *testing.T) {
 	c := stlsSession(t, hs, stlsExtra)
 
 	c.ExpectCmd(211, "GROUP %s", g)
-	c.ExpectCmd(382, "STARTTLS")
-	if got := stlsUpgrade(t, c); !bytes.Equal(got, der) {
+	c = c.StartTLS(stlsClientTLS())
+	if got := stlsPeerCert(t, c); !bytes.Equal(got, der) {
 		t.Fatal("peer certificate differs from the configured one")
 	}
 	// RFC 4642 §2.2.2: no greeting, the current group is forgotten.
@@ -230,8 +207,7 @@ func TestStlsRefusals(t *testing.T) {
 		c := stlsSession(t, hs, stlsExtra)
 		c.ExpectCmd(501, "STARTTLS x")
 		// the session is still plaintext and STARTTLS still works
-		c.ExpectCmd(382, "STARTTLS")
-		stlsUpgrade(t, c)
+		c.StartTLS(stlsClientTLS())
 	})
 	t.Run("cert-missing", func(t *testing.T) {
 		dir := t.TempDir()

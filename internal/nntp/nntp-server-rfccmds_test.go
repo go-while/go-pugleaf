@@ -9,20 +9,11 @@ package nntp
 
 import (
 	"bufio"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/tls"
-	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
-	"math/big"
 	"net"
-	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -31,47 +22,15 @@ import (
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/history"
 	"github.com/go-while/nntp-testkit/client"
+	"github.com/go-while/nntp-testkit/tlscert"
 )
 
-// rfcWriteCert writes a self-signed ECDSA P-256 certificate for
-// 127.0.0.1/localhost and its key as PEM files into t.TempDir() (a copy of
-// stlsWriteCert, kept here so this file is self-contained).
+// rfcWriteCert writes a throw-away self-signed certificate for 127.0.0.1/localhost and its
+// key as PEM files into t.TempDir() (kit package tlscert; the server config takes paths).
 func rfcWriteCert(t *testing.T) (certFile, keyFile string) {
 	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("GenerateKey: %v", err)
-	}
-	now := time.Now()
-	tmpl := &x509.Certificate{
-		SerialNumber:          big.NewInt(now.UnixNano()),
-		Subject:               pkix.Name{CommonName: "t6.rfcwire.test.invalid"},
-		NotBefore:             now.Add(-time.Hour),
-		NotAfter:              now.Add(time.Hour),
-		KeyUsage:              x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		BasicConstraintsValid: true,
-		DNSNames:              []string{"localhost"},
-		IPAddresses:           []net.IP{net.IPv4(127, 0, 0, 1)},
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
-	if err != nil {
-		t.Fatalf("CreateCertificate: %v", err)
-	}
-	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
-	if err != nil {
-		t.Fatalf("MarshalPKCS8PrivateKey: %v", err)
-	}
-	dir := t.TempDir()
-	certFile = filepath.Join(dir, "cert.pem")
-	keyFile = filepath.Join(dir, "key.pem")
-	if err := os.WriteFile(certFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
-		t.Fatalf("write cert: %v", err)
-	}
-	if err := os.WriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
-		t.Fatalf("write key: %v", err)
-	}
-	return certFile, keyFile
+	f := tlscert.SelfSigned(t, tlscert.Options{CommonName: "t6.rfcwire.test.invalid"}).Write(t, "")
+	return f.Cert, f.Key
 }
 
 // rfcServerTLS builds an implicit-TLS server config from the PEM files.
@@ -139,15 +98,16 @@ func rfcAuth(t *testing.T, c *client.Conn, user, pass string) {
 	c.ExpectCmd(281, "AUTHINFO PASS %s", pass)
 }
 
-// rfcUpgrade runs the client side of the TLS handshake after a 382 and switches
-// c to the TLS connection. It returns the *tls.Conn.
-func rfcUpgrade(t *testing.T, c *client.Conn) *tls.Conn {
-	t.Helper()
-	return rfcUpgradeOver(t, c, c.Conn, 0)
+// rfcClientTLS is the client side of the STARTTLS handshake: the scratch certificate is
+// self-signed, so it is not verified.
+func rfcClientTLS() *tls.Config {
+	return &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12} //nolint:gosec // test client
 }
 
-// rfcUpgradeOver is rfcUpgrade with the TLS layer on raw (c.Conn or a wrapper of
-// it) and an optional maximum TLS version (0: the default).
+// rfcUpgradeOver runs the client side of the TLS handshake after a 382 with the TLS layer on
+// raw (a wrapper of c.Conn) and an optional maximum TLS version (0: the default), and switches
+// c to the TLS connection. The kit's client.StartTLS sends the STARTTLS itself, so it cannot be
+// used where the recorder has to be installed between the 382 and the handshake.
 func rfcUpgradeOver(t *testing.T, c *client.Conn, raw net.Conn, maxVersion uint16) *tls.Conn {
 	t.Helper()
 	if c.R.Buffered() != 0 {
@@ -420,9 +380,7 @@ func TestRfcCapabilities(t *testing.T) {
 			name: "after-starttls",
 			session: func(t *testing.T) *client.Conn {
 				c := rfcNewCertServer(t, certFile, keyFile, nil, &hFakeProcessor{}).dial(t)
-				c.ExpectCmd(382, "STARTTLS")
-				rfcUpgrade(t, c)
-				return c
+				return c.StartTLS(rfcClientTLS())
 			},
 			present: base,
 			never:   []string{"STARTTLS", "IHAVE", "STREAMING"},
@@ -507,8 +465,7 @@ func TestRfcStartTLSWire(t *testing.T) {
 		if _, caps := c.Capabilities(); !rfcHasLine(caps, "STARTTLS") {
 			t.Fatalf("STARTTLS not listed before auth: %q", caps)
 		}
-		c.ExpectCmd(382, "STARTTLS")
-		rfcUpgrade(t, c)
+		c = c.StartTLS(rfcClientTLS())
 		capsM, caps := c.Capabilities()
 		if _, listed := capsM["STARTTLS"]; listed {
 			t.Fatalf("STARTTLS still listed over TLS: %q", caps)
