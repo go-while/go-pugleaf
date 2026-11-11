@@ -188,7 +188,7 @@ parity (DEL) with INN: `strict-del-passes` is deliberate.
   (d) the D3 pins in `nntp-intake-wire_test.go` (`// D3`: IHAVE `<x@[a<b]>` → 501,
   CHECK → 438) become 335/238.
 
-  Proposed from the fetcher-faults review (needs go-while's OK): (e) the fetch path (`HeaderBlockFetch`) uses the
+  Decided 2026-11-11 (go-while: "Fetch = relay rules"): (e) the fetch path (`HeaderBlockFetch`) uses the
   relay rules too — accept a bare CR in a fetched header (stored verbatim, counted), reject NUL in header AND body
   (today a bare CR drops the whole fetched article, a body NUL is not checked); pins marked `// W2-fetch`.
 
@@ -244,3 +244,4 @@ once at peer B, never at A, queue empty afterwards, peer stats show accepted 1 i
     provider capping XHDR records made the fetcher skip the rest of the range and still move the progress (data
     loss) — XHdrStreamed re-asks after the last record (≤ MaxXHdrReasks=16 per batch), only 423 = empty range,
     streamXHdr keeps the connection after 423; `// W2-fetch` and `// FU-progress` pins.
+- 2026-11-11: fetch path = relay rules decided; wave 2 paused by go-while after wave 1 ("Not yet").
