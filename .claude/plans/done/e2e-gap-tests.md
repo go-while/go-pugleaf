@@ -266,3 +266,22 @@ once at peer B, never at A, queue empty afterwards, peer stats show accepted 1 i
   rfcHasLine, thin POST/IHAVE adapters, 381-then-281 login helpers, runIsolated, knownBug, RecordingConn,
   ParseGroup211/ExpectID, fake SOCKS5. Five missing kit features sent to nntp-testkit-1 (next-batch-ideas.md),
   incl. check-have/ihave-have re-offer until 438/435 so go-pugleaf can require them.
+
+## Outcome
+- Integration branch plan-e2e-gap-tests (main checkout), merged into testing-001 on 2026-11-11 (go-while: "Merge,
+  push and deploy 0.6.12"), together with testing-001's 0.6.10/0.6.11 work, the nginx sample and the wildcard
+  newsgroup search. Wave merges: 0 (7b50ed8 kit v0.12.0), 1 (aa2b3bc, 8499056, dbb0733, d0717d6, 7380422), 2 (36e9cd3,
+  + inline ca8fd36), 3 (b3333b4).
+- Worktree branches (left for the user to clean up, /tank0/claude/trees/go-pugleaf/agent-*):
+  worktree-agent-a92f9882c986ea5d5 (feed-400), worktree-agent-aac87384dc93dd024 (relay-e2e),
+  worktree-agent-a31a0d4e04d379fff (units), worktree-agent-a8c791e18d12baa9b (intake-wire),
+  worktree-agent-a6fe8e16d8b1ae759 (fetcher-faults), worktree-agent-a7b93da3cbba71dc9 (intake-policy),
+  worktree-agent-ab7b359c3fd539883 (helper-cleanup). Other worktrees from this session: profile-nntp-help,
+  feed-marks-postqueue, release-0.6.10 (testing-001).
+- Verification (pugleaf-verifier on 4e468ee): gofmt/vet (+e2e tag)/build clean; full list 33 packages green;
+  known bugs only nntp-article-430-cache-delay; build scripts OK; scripts/test-nntp-server.sh pass=38 fail=0 (run in
+  a same-HEAD worktree because ./.update in the main checkout blocks the script); TestE2ERelayBinary 9/9 in,
+  6/5/1 out; fresh DB has peers.header_check 'relay', PeerArticleMaxAgeHours 240, PeerArticleMaxFutureHours 24.
+- Leftovers: see "Follow-ups found in wave 1" (progress past a cut ARTICLE, empty-range livelock, out-of-range
+  Date fields, per-provider TLS root CA); kit next batch (UpgradeTLS, error-WaitFor, tb-less Conn, check-have/
+  ihave-have re-offer, RawStall conns); the main checkout's stale ./.update (Oct 18) blocks five test scripts.
