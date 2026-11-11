@@ -79,8 +79,14 @@ func TestIntakeCommonValidMessageID(t *testing.T) {
 		{"<abc@>", false},
 		{"<>", false},
 		{"", false},
-		{"<a<b@example.org>", false},
+		{"<a<b@example.org>", false},   // D3: "<" is not valid in the id-left
+		{"<a@b<c.example.org>", false}, // D3: nor in a dot-atom id-right
 		{"<a>b@example.org>", false},
+		// D3: "<" is RFC 5536 mdtext, so it is valid inside a no-fold-literal id-right
+		{"<x@[a<b]>", true},
+		{"<x@[<]>", true},
+		{"<x@[a>b]>", false}, // ">" would end the message-id on the wire
+		{"<x@[a\\<b]>", false},
 		{"<abc@.example.org>", false},
 		{"<abc@example.org.>", false},
 		{"<abc@example..org>", false},
@@ -234,26 +240,43 @@ func TestIntakeCommonCheckHeaderBlock(t *testing.T) {
 		wantErr   bool
 		wantSame  bool // output must be the input slice itself
 		wantFresh bool // output must not share the input backing array
+		wantCR    int  // expected HeaderDefects.BareCR of a kept block
+		wantLF    int  // expected HeaderDefects.BareLF of a kept block
 	}{
 		{name: "strict-valid", mode: HeaderBlockStrict, in: base, wantSame: true},
 		{name: "fetch-valid", mode: HeaderBlockFetch, in: base, wantSame: true},
+		{name: "relay-valid", mode: HeaderBlockRelay, in: base, wantSame: true},
 		{name: "strict-folded", mode: HeaderBlockStrict, in: with("References: <a@b>", "\t<c@d>", " <e@f>"), wantSame: true},
 		{name: "empty", mode: HeaderBlockStrict, in: []string{}, wantSame: true},
 		// rule 1
 		{name: "strict-nul", mode: HeaderBlockStrict, in: with("X-A: a\x00b"), wantErr: true},
 		{name: "fetch-nul", mode: HeaderBlockFetch, in: with("X-A: a\x00b"), wantErr: true},
+		{name: "relay-nul", mode: HeaderBlockRelay, in: with("X-A: a\x00b"), wantErr: true},
 		{name: "strict-cr", mode: HeaderBlockStrict, in: with("X-A: a\rb"), wantErr: true},
-		{name: "fetch-cr", mode: HeaderBlockFetch, in: with("X-A: a\rb"), wantErr: true},
+		// D1 / "Fetch = relay rules": a bare CR or LF inside a header line is kept verbatim
+		// and counted (innd "Article accepted but includes CR without LF")
+		{name: "fetch-cr", mode: HeaderBlockFetch, in: with("X-A: a\rb"), wantSame: true, wantCR: 1},
+		{name: "relay-cr", mode: HeaderBlockRelay, in: with("X-A: a\rb"), wantSame: true, wantCR: 1},
+		{name: "relay-two-cr", mode: HeaderBlockRelay, in: with("X-A: a\rb\rc", "X-B: \r"), wantSame: true, wantCR: 3},
 		{name: "strict-lf", mode: HeaderBlockStrict, in: with("X-A: a\nb"), wantErr: true},
-		{name: "fetch-lf", mode: HeaderBlockFetch, in: with("X-A: a\nb"), wantErr: true},
-		{name: "fetch-lf-in-dropped-line", mode: HeaderBlockFetch, in: with("no colon\n"), wantErr: true},
+		{name: "fetch-lf", mode: HeaderBlockFetch, in: with("X-A: a\nb"), wantSame: true, wantLF: 1},
+		{name: "relay-lf", mode: HeaderBlockRelay, in: with("X-A: a\nb"), wantSame: true, wantLF: 1},
+		{name: "relay-crlf", mode: HeaderBlockRelay, in: with("X-A: a\r\nb"), wantSame: true, wantCR: 1, wantLF: 1},
+		// a dropped line's defects are not counted: it is not stored
+		{name: "fetch-lf-in-dropped-line", mode: HeaderBlockFetch, in: with("no colon\n"), want: base, wantFresh: true},
 		{name: "strict-esc", mode: HeaderBlockStrict, in: with("X-A: a\x1bb"), wantErr: true},
+		{name: "relay-esc", mode: HeaderBlockRelay, in: with("X-A: a\x1bb"), wantSame: true},
+		{name: "relay-8bit", mode: HeaderBlockRelay, in: with("X-A: \xc3\xa4\xff"), wantSame: true},
 		{name: "strict-iso2022jp", mode: HeaderBlockStrict, in: []string{isoSubject}, wantErr: true},
 		{name: "fetch-iso2022jp", mode: HeaderBlockFetch, in: []string{"From: x@example.org", isoSubject}, wantSame: true},
+		{name: "relay-iso2022jp", mode: HeaderBlockRelay, in: []string{"From: x@example.org", isoSubject}, wantSame: true},
 		{name: "strict-tab-in-value", mode: HeaderBlockStrict, in: with("X-A: a\tb"), wantSame: true},
 		{name: "strict-del-passes", mode: HeaderBlockStrict, in: with("X-A: a\x7fb"), wantSame: true},
 		// rule 2
 		{name: "strict-leading-continuation", mode: HeaderBlockStrict, in: append([]string{" lead"}, base...), wantErr: true},
+		{name: "relay-leading-continuation", mode: HeaderBlockRelay, in: append([]string{" lead"}, base...), wantErr: true},
+		{name: "relay-wsp-only-continuation", mode: HeaderBlockRelay, in: with("X-A: a", "  ", " more"), wantErr: true},
+		{name: "relay-folded", mode: HeaderBlockRelay, in: with("References: <a@b>", "\t<c@d>"), wantSame: true},
 		{name: "fetch-leading-continuation", mode: HeaderBlockFetch, in: append([]string{" lead", "\tlead2"}, base...), want: base, wantFresh: true},
 		{name: "strict-wsp-only-continuation", mode: HeaderBlockStrict, in: with("X-A: a", "  ", " more"), wantErr: true},
 		{name: "strict-tab-only-continuation", mode: HeaderBlockStrict, in: with("X-A: a", "\t"), wantErr: true},
@@ -269,6 +292,21 @@ func TestIntakeCommonCheckHeaderBlock(t *testing.T) {
 		{name: "fetch-empty-name", mode: HeaderBlockFetch, in: with(": value"), want: base, wantFresh: true},
 		{name: "strict-space-in-name", mode: HeaderBlockStrict, in: with("Bad Name: v"), wantErr: true},
 		{name: "fetch-space-before-colon", mode: HeaderBlockFetch, in: with("Subject2 : v"), want: base, wantFresh: true},
+		// D4: relay needs SP or HTAB after the colon and accepts an empty value (innd),
+		// strict needs exactly ": " and a non-empty value (nnrpd), fetch needs neither
+		{name: "relay-space-in-name", mode: HeaderBlockRelay, in: with("Bad Name: v"), wantErr: true},
+		{name: "relay-space-before-colon", mode: HeaderBlockRelay, in: with("Subject2 : v"), wantErr: true},
+		{name: "relay-no-colon-space", mode: HeaderBlockRelay, in: with("X-A:value"), wantErr: true},
+		{name: "relay-colon-eol", mode: HeaderBlockRelay, in: with("X-A:"), wantErr: true},
+		{name: "relay-colon-tab", mode: HeaderBlockRelay, in: with("X-A:\tvalue"), wantSame: true},
+		{name: "relay-empty-value", mode: HeaderBlockRelay, in: with("X-A: "), wantSame: true},
+		{name: "strict-no-colon-space", mode: HeaderBlockStrict, in: with("X-A:value"), wantErr: true},
+		{name: "strict-colon-eol", mode: HeaderBlockStrict, in: with("X-A:"), wantErr: true},
+		{name: "strict-colon-tab", mode: HeaderBlockStrict, in: with("X-A:\tvalue"), wantErr: true},
+		{name: "strict-empty-value", mode: HeaderBlockStrict, in: with("X-A: "), wantErr: true},
+		{name: "strict-wsp-value", mode: HeaderBlockStrict, in: with("X-A: \t "), wantErr: true},
+		{name: "strict-two-spaces", mode: HeaderBlockStrict, in: with("X-A:  value"), wantSame: true},
+		{name: "fetch-no-colon-space", mode: HeaderBlockFetch, in: with("X-A:value", "X-B:"), wantSame: true},
 		{name: "strict-empty-line", mode: HeaderBlockStrict, in: with(""), wantErr: true},
 		{name: "fetch-empty-line", mode: HeaderBlockFetch, in: with(""), want: base, wantFresh: true},
 		{name: "fetch-drop-middle", mode: HeaderBlockFetch,
@@ -278,7 +316,9 @@ func TestIntakeCommonCheckHeaderBlock(t *testing.T) {
 		{name: "strict-dup-subject", mode: HeaderBlockStrict, in: with("subject: again"), wantErr: true},
 		{name: "fetch-dup-subject", mode: HeaderBlockFetch, in: with("SUBJECT: again"), wantErr: true},
 		{name: "fetch-dup-path", mode: HeaderBlockFetch, in: with("Path: c!d"), wantErr: true},
+		{name: "relay-dup-subject", mode: HeaderBlockRelay, in: with("subject: again"), wantErr: true},
 		{name: "strict-dup-references", mode: HeaderBlockStrict, in: with("References: <a@b>", "References: <c@d>"), wantErr: true},
+		{name: "relay-dup-references", mode: HeaderBlockRelay, in: with("References: <a@b>", "References: <c@d>"), wantErr: true},
 		{name: "fetch-dup-references", mode: HeaderBlockFetch, in: with("References: <a@b>", "References: <c@d>"), wantSame: true},
 		{name: "strict-dup-xref", mode: HeaderBlockStrict, in: with("Xref: h a:1", "Xref: h b:2"), wantErr: true},
 		{name: "strict-dup-approved", mode: HeaderBlockStrict, in: with("Approved: a", "approved: b"), wantErr: true},
@@ -294,15 +334,22 @@ func TestIntakeCommonCheckHeaderBlock(t *testing.T) {
 		{name: "strict-998", mode: HeaderBlockStrict, in: with("X-Long: " + strings.Repeat("a", 990)), wantSame: true},
 		{name: "strict-999", mode: HeaderBlockStrict, in: with("X-Long: " + strings.Repeat("a", 991)), wantErr: true},
 		{name: "fetch-999", mode: HeaderBlockFetch, in: with("X-Long: " + strings.Repeat("a", 991)), wantSame: true},
-		// unknown mode values behave like strict
-		{name: "unknown-mode-strict", mode: HeaderBlockMode(42), in: with("no colon"), wantErr: true},
+		// D1: a relaying agent has no line length limit (INN artparse-t.c: "Not an error
+		// for a relaying agent")
+		{name: "relay-999", mode: HeaderBlockRelay, in: with("X-Long: " + strings.Repeat("a", 991)), wantSame: true},
+		{name: "relay-very-long", mode: HeaderBlockRelay, in: with("X-Long: " + strings.Repeat("a", 20000)), wantSame: true},
+		// an unknown mode value never drops a line: a malformed line rejects (as in relay)
+		{name: "unknown-mode-rejects", mode: HeaderBlockMode(42), in: with("no colon"), wantErr: true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			snapshot := append([]string(nil), c.in...)
-			got, err := CheckHeaderBlock(c.in, c.mode)
+			got, defects, err := CheckHeaderBlockDefects(c.in, c.mode)
 			if !slices.Equal(c.in, snapshot) {
 				t.Fatalf("input modified: %q", c.in)
+			}
+			if plain, perr := CheckHeaderBlock(c.in, c.mode); !reflect.DeepEqual(plain, got) || (perr == nil) != (err == nil) {
+				t.Fatalf("CheckHeaderBlock = %q, %v; CheckHeaderBlockDefects = %q, %v", plain, perr, got, err)
 			}
 			if c.wantErr {
 				if !icTestIsRejected(err, "invalid header block") {
@@ -311,10 +358,16 @@ func TestIntakeCommonCheckHeaderBlock(t *testing.T) {
 				if got != nil {
 					t.Fatalf("got %q with error", got)
 				}
+				if defects != (HeaderDefects{}) {
+					t.Fatalf("defects %+v with error, want none", defects)
+				}
 				return
 			}
 			if err != nil {
 				t.Fatalf("unexpected error %v", err)
+			}
+			if defects.BareCR != c.wantCR || defects.BareLF != c.wantLF {
+				t.Errorf("defects = %+v, want BareCR %d / BareLF %d", defects, c.wantCR, c.wantLF)
 			}
 			want := c.want
 			if want == nil {
@@ -434,6 +487,25 @@ func TestIntakeCommonWireArticleSize(t *testing.T) {
 	}
 }
 
+// TestIntakeCommonBodyHasNUL: decision D2, a NUL octet anywhere in the body is found.
+func TestIntakeCommonBodyHasNUL(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body []string
+		want bool
+	}{
+		{"nil", nil, false},
+		{"clean", []string{"a", "", "b\tc\x7f"}, false},
+		{"8bit", []string{"\xc3\xa4\xff"}, false},
+		{"first-line", []string{"a\x00b", "c"}, true},
+		{"last-line", []string{"a", "b", "\x00"}, true},
+	} {
+		if got := BodyHasNUL(tc.body); got != tc.want {
+			t.Errorf("BodyHasNUL(%s) = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
 func TestIntakeCommonGenerateMessageID(t *testing.T) {
 	seen := make(map[string]struct{})
 	for i := 0; i < 50; i++ {
@@ -504,17 +576,15 @@ func FuzzIntakeCommonCheckHeaderBlock(f *testing.F) {
 		"",
 	}
 	for _, s := range seeds {
-		f.Add(s, true)
-		f.Add(s, false)
+		for _, m := range []uint8{0, 1, 2} { // strict, fetch, relay
+			f.Add(s, m)
+		}
 	}
-	f.Fuzz(func(t *testing.T, data string, strict bool) {
+	f.Fuzz(func(t *testing.T, data string, modeSel uint8) {
 		lines := strings.Split(data, "\r\n")
 		snapshot := append([]string(nil), lines...)
-		mode := HeaderBlockFetch
-		if strict {
-			mode = HeaderBlockStrict
-		}
-		got, err := CheckHeaderBlock(lines, mode)
+		mode := []HeaderBlockMode{HeaderBlockStrict, HeaderBlockFetch, HeaderBlockRelay}[modeSel%3]
+		got, defects, err := CheckHeaderBlockDefects(lines, mode)
 		if !slices.Equal(lines, snapshot) {
 			t.Fatal("input modified")
 		}
@@ -531,10 +601,23 @@ func FuzzIntakeCommonCheckHeaderBlock(f *testing.F) {
 			if l != "" && strings.Trim(l, " \t") == "" {
 				t.Fatalf("success with a whitespace-only line in %q", got)
 			}
+			if strings.IndexByte(l, 0) >= 0 {
+				t.Fatalf("success with a NUL octet in %q", l)
+			}
 		}
-		if strict {
+		if cr, lf := strings.Count(strings.Join(got, ""), "\r"), strings.Count(strings.Join(got, ""), "\n"); cr != defects.BareCR || lf != defects.BareLF {
+			t.Fatalf("kept block holds %d CR / %d LF, defects say %d / %d", cr, lf, defects.BareCR, defects.BareLF)
+		}
+		switch mode {
+		case HeaderBlockStrict, HeaderBlockRelay:
+			// neither mode drops a line: either the whole block is kept or it rejects
 			if !reflect.DeepEqual(got, lines) {
-				t.Fatalf("strict mode changed the block: %q", got)
+				t.Fatalf("mode %v changed the block: %q", mode, got)
+			}
+		}
+		if mode == HeaderBlockStrict {
+			if defects != (HeaderDefects{}) {
+				t.Fatalf("strict success with defects %+v", defects)
 			}
 			for _, l := range got {
 				if l == "." {
@@ -548,18 +631,15 @@ func FuzzIntakeCommonCheckHeaderBlock(f *testing.F) {
 			}
 			return
 		}
-		for _, l := range got {
-			if strings.ContainsAny(l, "\x00\r\n") {
-				t.Fatalf("fetch success with NUL/CR/LF in %q", l)
+		if mode == HeaderBlockFetch {
+			if !icTestIsSubsequence(got, lines) {
+				t.Fatalf("fetch output %q is not a subsequence of %q", got, lines)
 			}
-		}
-		if !icTestIsSubsequence(got, lines) {
-			t.Fatalf("fetch output %q is not a subsequence of %q", got, lines)
-		}
-		// the normalized block must pass fetch mode unchanged
-		again, err := CheckHeaderBlock(got, HeaderBlockFetch)
-		if err != nil || !reflect.DeepEqual(again, got) {
-			t.Fatalf("fetch output not stable: %q, %v", again, err)
+			// the normalized block must pass fetch mode unchanged
+			again, err := CheckHeaderBlock(got, HeaderBlockFetch)
+			if err != nil || !reflect.DeepEqual(again, got) {
+				t.Fatalf("fetch output not stable: %q, %v", again, err)
+			}
 		}
 	})
 }
