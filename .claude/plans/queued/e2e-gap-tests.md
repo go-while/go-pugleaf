@@ -53,11 +53,16 @@ inn-1 confirmed 2026-11-11 (innd/art.c @ 6843efceb) and added: required fields (
 Newsgroups, Path, Subject; missing or duplicate → 437); Message-ID valid and ≤ 250 octets; Date must parse
 (parsedate_rfc5322_lax), Injection-Date too if present; age/future limits are optional config only (artcutoff,
 DATE_FUZZ); do NOT reject 8-bit bytes or control characters other than NUL on the relay path.
-**Proposed D1/D4 (mirror innd, needs go-while's OK):** peer intake drops the 998 limit, accepts bare CR and bare
+**Decided 2026-11-11 (go-while: "could be a per peer option? -lax / -strict"):** D1/D4 become a per-peer
+setting `header_check` = `relay` | `strict` (new column in `peers`, migration after the last one, admin
+/admin/peers field, validation like `in_max_size`). Default `relay` (innd behaviour, so peers do not lose
+articles); `strict` = the POST rules below. POST is always strict.
+Date limits: keep 72 h past / 24 h future as defaults, make them admin CFG settings (0 = off), like innd's
+artcutoff / DATE_FUZZ; they apply to peer intake (both modes).
+Rules of the two modes (was: proposed D1/D4): peer intake drops the 998 limit, accepts bare CR and bare
 LF inside header lines (logged with a counter, stored verbatim), accepts colon + SP or HTAB and an empty value,
-keeps NUL / missing or duplicate required fields / Message-ID / Date-parse rejects. POST mirrors nnrpd: ≤ 998,
-exactly `": "`, non-empty value. Open sub-question: go-pugleaf's 72h-stale / 24h-future Date check on peers is
-stricter than innd's default (optional there) — keep or make it a setting.
+keeps NUL / missing or duplicate required fields / Message-ID / Date-parse rejects (`relay`). POST and `strict`
+mirror nnrpd: ≤ 998, exactly `": "`, non-empty value.
 
 | # | Question | Today | Recommendation |
 |---|---|---|---|
@@ -155,8 +160,11 @@ parity (DEL) with INN: `strict-del-passes` is deliberate.
   Checks: `./internal/nntp/... ./internal/common/...`.
 
 ### Wave 2 (after D1-D4 are answered)
-- slice `intake-policy`: implement D1-D4 in `internal/common/intake.go` (new relay mode next to Strict/Fetch),
-  `internal/processor/intake.go` (mode per path: POST strict, IHAVE/TAKETHIS relay), message-id syntax in
+- slice `intake-policy`: implement D1-D4 in `internal/common/intake.go` (new `HeaderBlockRelay` next to
+  Strict/Fetch), `internal/processor/intake.go` (mode per path: POST strict, IHAVE/TAKETHIS per peer
+  `header_check`), migration `peers.header_check TEXT NOT NULL DEFAULT 'relay'` + `models.Peer.HeaderCheck` +
+  peers.go insert/update/validation + `admin_peers.html` field, CFG keys for the peer Date limits (72 h / 24 h,
+  0 = off) in `db_config.go` + `admin_settings.html`; message-id syntax in
   `internal/common` (D3); update the wave-1 pins marked `// D1..D4` and the INN-derived G9 NUL-in-body case.
   Checks: full list.
 
