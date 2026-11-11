@@ -22,6 +22,30 @@ var ErrIntakeRejected = errors.New("article rejected")
 // sender may retry the article later. Producers wrap it like ErrIntakeRejected.
 var ErrIntakeTemporary = errors.New("temporary intake failure")
 
+// ErrIntakeNotRemembered marks a permanent rejection of this offer that must NOT be
+// remembered in the history index (INN remembertrash): the refusal depends on a setting, not
+// on the article, so the same article must be judged again when it is offered later. Today
+// only the peer age cutoff (PeerArticleMaxAgeHours) uses it: raising or disabling the setting
+// must bring the refused articles back. The reply is the same as for any other rejection.
+var ErrIntakeNotRemembered = errors.New("rejection not remembered")
+
+// NotRemembered marks err (a rejection wrapping ErrIntakeRejected) as one the history index
+// must not remember. The message is unchanged, so the NNTP reply keeps its reason, and
+// errors.Is reports both ErrIntakeRejected and ErrIntakeNotRemembered.
+func NotRemembered(err error) error {
+	if err == nil {
+		return nil
+	}
+	return notRememberedError{err: err}
+}
+
+// notRememberedError is the wrapper NotRemembered returns.
+type notRememberedError struct{ err error }
+
+func (e notRememberedError) Error() string        { return e.err.Error() }
+func (e notRememberedError) Unwrap() error        { return e.err }
+func (e notRememberedError) Is(target error) bool { return target == ErrIntakeNotRemembered }
+
 // maximum lengths used by the intake helpers
 const (
 	intakeMaxMessageIDLen = 250 // RFC 5536 §3.1.3
@@ -31,9 +55,10 @@ const (
 
 // ValidMessageID reports whether s is a syntactically valid message-id
 // (RFC 5536 §3.1.3, RFC 3977 §3.6): at most 250 octets, enclosed in "<" and ">",
-// every inner octet in %x21-7E except "<" and ">", exactly one "@" outside a
-// "[...]" literal, a non-empty left part and a right part that is either
-// dot-atom-text or a no-fold-literal "[...]".
+// every inner octet in %x21-7E, no ">" and no "<" except inside a no-fold-literal
+// id-right (decision D3: "<" is RFC 5536 mdtext, so "<x@[a<b]>" is valid), exactly
+// one "@" outside a "[...]" literal, a non-empty left part and a right part that is
+// either dot-atom-text or a no-fold-literal "[...]".
 func ValidMessageID(s string) bool {
 	if len(s) > intakeMaxMessageIDLen || len(s) < 5 || s[0] != '<' || s[len(s)-1] != '>' {
 		return false
@@ -41,13 +66,18 @@ func ValidMessageID(s string) bool {
 	inner := s[1 : len(s)-1]
 	for i := 0; i < len(inner); i++ {
 		c := inner[i]
-		if c < 0x21 || c > 0x7E || c == '<' || c == '>' {
+		// ">" would end the message-id on the wire, so it is never valid inside one;
+		// "<" is checked per part below.
+		if c < 0x21 || c > 0x7E || c == '>' {
 			return false
 		}
 	}
 	at := strings.IndexByte(inner, '@')
 	if at <= 0 || at == len(inner)-1 {
 		return false
+	}
+	if strings.IndexByte(inner[:at], '<') >= 0 {
+		return false // id-left: no-fold-quote has no mdtext, so "<" is invalid there
 	}
 	right := inner[at+1:]
 	if right[0] == '[' {
@@ -187,15 +217,26 @@ func ParseNewsgroups(value string) ([]string, error) {
 type HeaderBlockMode int
 
 const (
-	// HeaderBlockStrict is used for NNTP intake (POST/IHAVE/TAKETHIS): every defect rejects.
-	// It is the zero value; any mode other than HeaderBlockFetch is treated as strict.
+	// HeaderBlockStrict mirrors nnrpd (INN): POST, and a peer whose header_check is
+	// "strict". Every defect rejects: a line over 998 octets, a bare CR or LF, any C0
+	// control except TAB, a field name not followed by exactly ": ", an empty field value,
+	// a malformed continuation line and a duplicate core header. It is the zero value.
 	HeaderBlockStrict HeaderBlockMode = iota
-	// HeaderBlockFetch is used for fetched/imported articles: NUL/CR/LF and duplicate core
-	// headers reject, malformed lines are dropped (normalized).
+	// HeaderBlockFetch is used for fetched and imported articles (the bulk path): NUL and
+	// duplicate core headers reject, malformed lines are dropped (normalized), and a bare
+	// CR or LF is kept verbatim and counted (decision 2026-11-11, "Fetch = relay rules";
+	// the NUL of a fetched body is refused by the caller).
 	HeaderBlockFetch
+	// HeaderBlockRelay mirrors innd (INN): a peer whose header_check is "relay" (the
+	// default), so a relaying agent does not lose articles another server accepted. There
+	// is no line length limit, a bare CR or LF is kept verbatim and counted, the other C0
+	// controls and 8-bit octets pass, and a field value may be empty; NUL, a field name
+	// whose colon is not followed by SP or HTAB, a malformed continuation line and a
+	// duplicate core header still reject.
+	HeaderBlockRelay
 )
 
-// headers that must not appear twice in strict mode (lower-case names)
+// headers that must not appear twice in strict and relay mode (lower-case names)
 var intakeStrictUniqueHeaders = map[string]struct{}{
 	"date": {}, "from": {}, "message-id": {}, "newsgroups": {}, "path": {}, "subject": {},
 	"references": {}, "injection-date": {}, "injection-info": {}, "xref": {}, "control": {},
@@ -207,31 +248,61 @@ var intakeFetchUniqueHeaders = map[string]struct{}{
 	"date": {}, "from": {}, "message-id": {}, "newsgroups": {}, "path": {}, "subject": {},
 }
 
-// CheckHeaderBlock validates an article header block. The lines are un-stuffed, without
-// CRLF and without the empty separator line. Rules:
-//  1. both modes: a line containing NUL, CR or LF rejects. Strict mode also rejects every
-//     other C0 control except TAB; fetch mode lets them pass (ESC in ISO-2022-JP headers).
+// HeaderDefects counts the defects a lax mode (relay, fetch) accepted in the header block it
+// kept. innd logs them once per article instead of refusing the article.
+type HeaderDefects struct {
+	BareCR int // CR octets inside a kept header line (innd "CR without LF")
+	BareLF int // LF octets inside a kept header line (innd "LF without CR")
+}
+
+// CheckHeaderBlock is CheckHeaderBlockDefects without the defect counts.
+func CheckHeaderBlock(lines []string, mode HeaderBlockMode) ([]string, error) {
+	out, _, err := CheckHeaderBlockDefects(lines, mode)
+	return out, err
+}
+
+// CheckHeaderBlockDefects validates an article header block. The lines are un-stuffed,
+// without CRLF and without the empty separator line. Rules:
+//  1. a line containing NUL rejects in every mode. A bare CR or LF rejects in strict mode;
+//     relay and fetch mode keep the line verbatim and count the octet in the returned
+//     HeaderDefects (innd art.c: "Article accepted but includes CR without LF"). Strict
+//     mode also rejects every other C0 control except TAB; relay and fetch let them pass
+//     (ESC in ISO-2022-JP headers), and no mode looks at 8-bit octets.
 //  2. a line starting with SP/TAB without a preceding field line (first line, or after a
 //     dropped line), or a continuation line made only of SP/TAB (RFC 5322 §3.2.2):
-//     strict rejects, fetch drops it (a dropped whitespace-only line keeps the field open).
+//     strict and relay reject, fetch drops it (a dropped whitespace-only line keeps the
+//     field open).
 //  3. a non-continuation line without ":", with an empty field name, or with a name octet
-//     outside %x21-39 / %x3B-7E (this covers a lone "."): strict rejects, fetch drops it
-//     and its continuation lines.
+//     outside %x21-39 / %x3B-7E (this covers a lone "."): strict and relay reject, fetch
+//     drops it and its continuation lines. Strict needs exactly ": " after the name and a
+//     non-empty value (RFC 5536 §2.2, nnrpd); relay needs SP or HTAB after the colon and
+//     accepts an empty value (innd "No colon-space in header"); fetch requires neither.
 //  4. a second copy (case-insensitive name) of Date, From, Message-ID, Newsgroups, Path,
-//     Subject rejects in both modes; strict mode also rejects a second References,
+//     Subject rejects in every mode; strict and relay mode also reject a second References,
 //     Injection-Date, Injection-Info, Xref, Control, Supersedes or Approved.
-//  5. strict only: a line longer than 998 octets rejects.
+//  5. strict only: a line longer than 998 octets rejects, except the Path field line and its
+//     continuation lines. The server prepends its own Path identity (feedPath on the feed
+//     path, injectProtoArticle on POST) before intake sees the block, so that length is not
+//     the sender's doing.
 //
+// A mode value that is none of the three constants is treated as strict (the safe default).
 // Errors wrap ErrIntakeRejected with the reason "invalid header block". The input slice is
 // returned unchanged when nothing was dropped, otherwise a new slice; the input is never modified.
-func CheckHeaderBlock(lines []string, mode HeaderBlockMode) ([]string, error) {
-	strict := mode != HeaderBlockFetch
+func CheckHeaderBlockDefects(lines []string, mode HeaderBlockMode) ([]string, HeaderDefects, error) {
+	var defects HeaderDefects
+	switch mode {
+	case HeaderBlockFetch, HeaderBlockRelay:
+	default:
+		mode = HeaderBlockStrict // an unknown mode value is strict
+	}
+	strict := mode == HeaderBlockStrict
+	dropsBadLines := mode == HeaderBlockFetch
 	unique := intakeStrictUniqueHeaders
-	if !strict {
+	if mode == HeaderBlockFetch {
 		unique = intakeFetchUniqueHeaders
 	}
-	reject := func() ([]string, error) {
-		return nil, fmt.Errorf("%w: invalid header block", ErrIntakeRejected)
+	reject := func() ([]string, HeaderDefects, error) {
+		return nil, HeaderDefects{}, fmt.Errorf("%w: invalid header block", ErrIntakeRejected)
 	}
 	var out []string // nil until the first dropped line
 	dropped := false
@@ -242,52 +313,79 @@ func CheckHeaderBlock(lines []string, mode HeaderBlockMode) ([]string, error) {
 			out = append(out, lines[:i]...)
 		}
 	}
-	keep := func(line string) {
+	keep := func(line string, cr, lf int) {
+		defects.BareCR += cr // only the lines that stay are "accepted" with their defects
+		defects.BareLF += lf
 		if dropped {
 			out = append(out, line)
 		}
 	}
 	seen := make(map[string]struct{})
 	havePrevField := false
+	inPathField := false // the current field is Path: rule 5 does not apply to it
 	for i, line := range lines {
 		// rule 1
+		cr, lf := 0, 0
 		for j := 0; j < len(line); j++ {
 			c := line[j]
-			if c == 0 || c == '\r' || c == '\n' {
+			switch {
+			case c == 0:
 				return reject()
+			case c == '\r':
+				if strict {
+					return reject()
+				}
+				cr++
+			case c == '\n':
+				if strict {
+					return reject()
+				}
+				lf++
+			case c < 0x20 && c != '\t':
+				if strict {
+					return reject()
+				}
 			}
-			if strict && c < 0x20 && c != '\t' {
-				return reject()
-			}
-		}
-		// rule 5
-		if strict && len(line) > intakeMaxHeaderLine {
-			return reject()
 		}
 		// rule 2
 		if line != "" && (line[0] == ' ' || line[0] == '\t') {
+			// rule 5 (a continuation of the Path field is exempt, see below)
+			if strict && !inPathField && len(line) > intakeMaxHeaderLine {
+				return reject()
+			}
 			if !havePrevField || strings.Trim(line, " \t") == "" {
-				if strict {
+				if !dropsBadLines {
 					return reject()
 				}
 				drop(i)
 				continue
 			}
-			keep(line)
+			keep(line, cr, lf)
 			continue
 		}
 		// rule 3
 		colon := strings.IndexByte(line, ':')
-		if colon <= 0 || !validFieldName(line[:colon]) {
-			if strict {
+		if colon <= 0 || !validFieldName(line[:colon]) || !validColonSpacing(line, colon, mode) {
+			// rule 5 for a line that is no field line at all
+			if strict && len(line) > intakeMaxHeaderLine {
+				return reject()
+			}
+			if !dropsBadLines {
 				return reject()
 			}
 			drop(i)
 			havePrevField = false
+			inPathField = false
 			continue
 		}
 		// rule 4
 		lname := strings.ToLower(line[:colon])
+		// rule 5: the Path line carries the identity this server prepended, so its length
+		// is never the sender's doing (plan e2e-gap-tests, review item 8)
+		inPathField = lname == "path"
+		if strict && !inPathField && len(line) > intakeMaxHeaderLine {
+			return reject()
+		}
 		if _, ok := unique[lname]; ok {
 			if _, dup := seen[lname]; dup {
 				return reject()
@@ -295,12 +393,29 @@ func CheckHeaderBlock(lines []string, mode HeaderBlockMode) ([]string, error) {
 			seen[lname] = struct{}{}
 		}
 		havePrevField = true
-		keep(line)
+		keep(line, cr, lf)
 	}
 	if !dropped {
-		return lines, nil
+		return lines, defects, nil
 	}
-	return out, nil
+	return out, defects, nil
+}
+
+// validColonSpacing reports whether the colon at index colon of a field line is followed by
+// the white space its mode requires (decision D4): strict needs exactly ": " and a value
+// that is not only white space (RFC 5536 §2.2, nnrpd IsValidHeaderField), relay needs SP or
+// HTAB and accepts an empty value (innd rejects "X:value" and "X:" as "No colon-space in
+// header"), fetch requires nothing (archives carry both forms). An unknown mode value is
+// treated as strict.
+func validColonSpacing(line string, colon int, mode HeaderBlockMode) bool {
+	switch mode {
+	case HeaderBlockRelay:
+		return colon+1 < len(line) && (line[colon+1] == ' ' || line[colon+1] == '\t')
+	case HeaderBlockFetch:
+		return true
+	default: // strict
+		return colon+1 < len(line) && line[colon+1] == ' ' && strings.Trim(line[colon+1:], " \t") != ""
+	}
 }
 
 // validFieldName reports whether every octet of name is RFC 5322 ftext (%x21-39 / %x3B-7E).
@@ -426,6 +541,18 @@ func RemoveHeaders(lines []string, name string) []string {
 		return lines
 	}
 	return out
+}
+
+// BodyHasNUL reports whether any body line holds a NUL octet (decision D2: INN refuses such
+// an article on every path, so POST answers 441, IHAVE 437, TAKETHIS 439 and the fetch path
+// stores nothing).
+func BodyHasNUL(lines []string) bool {
+	for _, l := range lines {
+		if strings.IndexByte(l, 0) >= 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // WireArticleSize returns the size of the article on the wire without dot-stuffing

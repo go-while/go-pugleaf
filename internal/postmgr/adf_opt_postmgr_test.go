@@ -3,9 +3,6 @@ package postmgr
 import (
 	"errors"
 	"fmt"
-	"io"
-	"net"
-	"net/textproto"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -19,6 +16,8 @@ import (
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
 	"github.com/go-while/go-pugleaf/internal/nntp"
+	testkit "github.com/go-while/nntp-testkit"
+	"github.com/go-while/nntp-testkit/fakeserver"
 )
 
 // adfOptDB is the database of this test binary (temp data root, no caches).
@@ -27,15 +26,23 @@ var adfOptDB *database.Database
 // testWait is the hang guard of this package's tests: it only stops a hung test, a passing test
 // never waits on it. Override with PUGLEAF_TEST_DEADLINE (a Go duration, e.g. 120s); default 60 s.
 // Plan test-timing-hardening D3.
-var testWait = testWaitFromEnv(60 * time.Second)
+// It is testkit.Deadline(), so the kit's own hang guards (fakeserver, client, proc,
+// testkit.WaitFor) use the same value.
+var testWait = testDeadline()
 
-func testWaitFromEnv(def time.Duration) time.Duration {
-	if v := os.Getenv("PUGLEAF_TEST_DEADLINE"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil && d > 0 {
-			return d
+// testDeadline hands PUGLEAF_TEST_DEADLINE to the kit, which reads only NNTP_TEST_DEADLINE
+// (testkit.EnvDeadline), and returns the kit's hang guard. An NNTP_TEST_DEADLINE set by the
+// caller wins. The mapping lives in this initialiser, not in TestMain, because testWait is a
+// package variable: Go evaluates those before TestMain runs. Plan e2e-gap-tests wave 3.
+func testDeadline() time.Duration {
+	if os.Getenv(testkit.EnvDeadline) == "" {
+		if v := os.Getenv("PUGLEAF_TEST_DEADLINE"); v != "" {
+			if err := os.Setenv(testkit.EnvDeadline, v); err != nil {
+				fmt.Fprintln(os.Stderr, "[POSTMGR-TEST] Setenv "+testkit.EnvDeadline+":", err)
+			}
 		}
 	}
-	return def
+	return testkit.Deadline()
 }
 
 func TestMain(m *testing.M) {
@@ -240,15 +247,17 @@ func TestAdfOptPostmgrRunStopsOnShutdown(t *testing.T) {
 
 // flPqFake is a loopback NNTP server that accepts MODE READER and POST and answers every posted
 // article with code (240 or 441). No external network is used. In hang mode (flPqFakeHang) it
-// never answers the article: it closes received once the article is read, then blocks until the
-// connection is closed.
+// never answers the article: it closes received once the article is read, then reads and
+// discards until the connection is closed.
+//
+// The listener, the accept loop and the connection bookkeeping are the kit's
+// (fakeserver.Server). The three commands are a fakeserver.LineHandler and not a
+// fakeserver.Script, because a script step reads its dot block before it writes its reply, so
+// POST's 340 would arrive after the article.
 type flPqFake struct {
-	ln    net.Listener
+	srv   *fakeserver.Server
 	code  int
 	posts atomic.Int64 // articles received
-	mu    sync.Mutex
-	conns []net.Conn
-	wg    sync.WaitGroup
 
 	hang         bool
 	received     chan struct{} // hang mode: closed when the first article was read
@@ -268,101 +277,48 @@ func flPqFakeHang(t *testing.T) *flPqFake {
 	return flPqFakeStart(t, &flPqFake{hang: true, received: make(chan struct{})})
 }
 
-// flPqFakeStart listens on 127.0.0.1 and serves f; it stops when the test ends.
+// flPqFakeStart serves f on 127.0.0.1; the kit closes the listener and every connection when
+// the test ends.
 func flPqFakeStart(t *testing.T, f *flPqFake) *flPqFake {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	f.ln = ln
-	f.wg.Add(1)
-	go f.serve()
-	t.Cleanup(func() {
-		_ = ln.Close()
-		f.mu.Lock()
-		for _, c := range f.conns {
-			_ = c.Close()
-		}
-		f.mu.Unlock()
-		f.wg.Wait()
+	f.srv = fakeserver.New(t, fakeserver.Options{
+		Greeting: "200 flpq fake ready",
+		Handler:  fakeserver.LineHandler(f.line),
+		Deadline: testWait,
 	})
 	return f
 }
 
-func (f *flPqFake) port() int {
-	return f.ln.Addr().(*net.TCPAddr).Port
-}
+func (f *flPqFake) port() int { return f.srv.Port() }
 
-func (f *flPqFake) serve() {
-	defer f.wg.Done()
-	for {
-		c, err := f.ln.Accept()
-		if err != nil {
-			return
+// line answers one client line.
+func (f *flPqFake) line(c *fakeserver.Conn, line string) (reply []string, closeConn bool) {
+	switch strings.ToUpper(strings.TrimSpace(line)) {
+	case "MODE READER":
+		return []string{"200 reader mode"}, false
+	case "POST":
+		if err := c.WriteLines("340 send article"); err != nil {
+			return nil, true
 		}
-		f.mu.Lock()
-		f.conns = append(f.conns, c)
-		f.mu.Unlock()
-		f.wg.Add(1)
-		go f.handle(c)
-	}
-}
-
-func (f *flPqFake) handle(c net.Conn) {
-	defer f.wg.Done()
-	defer c.Close()
-	tp := textproto.NewConn(c)
-	if err := tp.PrintfLine("200 flpq fake ready"); err != nil {
-		return
-	}
-	for {
-		line, err := tp.ReadLine()
-		if err != nil {
-			return
+		if _, err := c.ReadDotBlock(); err != nil {
+			return nil, true
 		}
-		switch strings.ToUpper(strings.TrimSpace(line)) {
-		case "MODE READER":
-			err = tp.PrintfLine("200 reader mode")
-		case "POST":
-			if err = tp.PrintfLine("340 send article"); err != nil {
-				return
+		f.posts.Add(1)
+		if f.hang {
+			f.receivedOnce.Do(func() { close(f.received) })
+			// never answer: read and discard until the client (or the kit's Close) ends it
+			for {
+				if _, err := c.ReadLine(); err != nil {
+					return nil, true
+				}
 			}
-			if _, err = tp.ReadDotLines(); err != nil {
-				return
-			}
-			f.posts.Add(1)
-			if f.hang {
-				f.receivedOnce.Do(func() { close(f.received) })
-				// never answer: block until the client (or the test cleanup) closes the conn
-				_, _ = io.Copy(io.Discard, c)
-				return
-			}
-			err = tp.PrintfLine("%d flpq fake answer", f.code)
-		case "QUIT":
-			_ = tp.PrintfLine("205 bye")
-			return
-		default:
-			err = tp.PrintfLine("500 unknown command")
 		}
-		if err != nil {
-			return
-		}
+		return []string{fmt.Sprintf("%d flpq fake answer", f.code)}, false
+	case "QUIT":
+		return []string{"205 bye"}, true
+	default:
+		return []string{"500 unknown command"}, false
 	}
-}
-
-// flPqClosedPort returns a loopback port nothing listens on (connection refused).
-func flPqClosedPort(t *testing.T) int {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	port := ln.Addr().(*net.TCPAddr).Port
-	if err := ln.Close(); err != nil {
-		t.Fatal(err)
-	}
-	return port
 }
 
 // flPqPool returns a posting pool for 127.0.0.1:port, closed when the test ends.
@@ -503,12 +459,12 @@ func TestFlPqPostmgrTransientNotCounted(t *testing.T) {
 		want  string // in last_error
 	}{
 		{"refused", func(t *testing.T) []*nntp.Pool {
-			return []*nntp.Pool{flPqPool(t, "flpq-refused", flPqClosedPort(t))}
+			return []*nntp.Pool{flPqPool(t, "flpq-refused", testkit.FreePort(t))}
 		}, "failed to get connection"},
 		{"441-and-refused", func(t *testing.T) []*nntp.Pool {
 			fake := flPqFakeNNTP(t, 441)
 			// refused first, 441 last: last_error must name the refusal, not the last pool's 441
-			return []*nntp.Pool{flPqPool(t, "flpq-refused", flPqClosedPort(t)), flPqPool(t, "flpq-441", fake.port())}
+			return []*nntp.Pool{flPqPool(t, "flpq-refused", testkit.FreePort(t)), flPqPool(t, "flpq-441", fake.port())}
 		}, "1 of 2 rejected): failed to get connection"}, // the non-441 reason, not the 441 text
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -66,7 +66,7 @@ func stmSession(t *testing.T, hs *hServer, extra map[string]func(cc *ClientConne
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := hNewClient(t, conn, hDeadline)
+	c := client.New(t, conn)
 	t.Cleanup(func() { _ = conn.Close(); <-done })
 	if c.Greeting, err = c.ReadLine(); err != nil {
 		t.Fatalf("greeting: %v", err)

@@ -358,6 +358,13 @@ func (r *PeerRegistry) hostsMatch(p *models.Peer, ip net.IP) bool {
 			}
 			continue
 		}
+		if strings.ContainsAny(h, "/:") {
+			// A malformed prefix ("192.0.2.0/33") or address literal ("fffg::1") is not a
+			// host name: neither character may appear in one. Such an entry matches
+			// nothing, like INN's network_addr_match on a syntax error, and must not cost
+			// a DNS lookup on every connection.
+			continue
+		}
 		names = append(names, h)
 	}
 	for _, name := range names {

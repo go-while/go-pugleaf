@@ -18,7 +18,6 @@ package main
 // groups e2e.test.a and e2e.test.b must exist (N56).
 
 import (
-	"bufio"
 	"crypto/tls"
 	"fmt"
 	"os"
@@ -26,6 +25,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/go-while/nntp-testkit/client"
+	"github.com/go-while/nntp-testkit/conformance"
 )
 
 // e2eRfcReport prints the step lines with the [rfc] tag and fails t on FAIL.
@@ -61,47 +63,126 @@ func e2eRfcStatus(code int, line string, err error, want int) error {
 }
 
 // e2eRfcBlock sends cmd, requires the status want and returns the data block.
-func e2eRfcBlock(c *e2eClient, want int, cmd string) ([]string, error) {
-	code, line, err := c.tryCmd("%s", cmd)
+func e2eRfcBlock(c *client.Conn, want int, cmd string) ([]string, error) {
+	code, line, err := c.TryCmd("%s", cmd)
 	if e := e2eRfcStatus(code, line, err, want); e != nil {
 		return nil, fmt.Errorf("%s: %v", cmd, e)
 	}
-	lines, err := c.tryDotLines()
+	lines, err := c.TryReadDotLines()
 	if err != nil {
 		return lines, fmt.Errorf("%s: %v", cmd, err)
 	}
 	return lines, nil
 }
 
-// e2eRfcCaps runs CAPABILITIES and returns the capability lines.
-func e2eRfcCaps(c *e2eClient) ([]string, error) {
-	return e2eRfcBlock(c, 101, "CAPABILITIES")
+// e2eRfcCaps runs CAPABILITIES and returns the capability lines and the parsed labels
+// (kit client.ParseCapabilities, which also checks the block's format).
+func e2eRfcCaps(c *client.Conn) ([]string, map[string][]string, error) {
+	lines, err := e2eRfcBlock(c, 101, "CAPABILITIES")
+	if err != nil {
+		return lines, nil, err
+	}
+	m, err := client.ParseCapabilities(lines)
+	return lines, m, err
 }
 
-// e2eRfcHasLabel reports whether a capability line has label as its first word.
-func e2eRfcHasLabel(caps []string, label string) bool {
-	for _, l := range caps {
-		if f := strings.Fields(l); len(f) > 0 && strings.EqualFold(f[0], label) {
-			return true
+// e2eRfcConf is the outcome of the kit's conformance run: the results by check name, or the
+// error that kept the run from starting. Every N5x step requires the checks that cover it on
+// top of its own, fixture-specific assertions, so a run that did not start fails the steps
+// instead of letting them pass with no kit check behind them.
+type e2eRfcConf struct {
+	res map[string]conformance.Result
+	err error
+}
+
+// e2eRfcConformance runs the kit's black-box protocol checks (package conformance) once against
+// addr, before the steps below.
+//
+// postGroup is a group of its own, seeded by e2eRfcSeed: the checks that read an article skip
+// themselves in an empty group, and the ones that post, feed or cancel must not move the
+// article numbers of PUGLEAF_E2E_GROUP, which N51-N56 assert. NEWNEWS answers 500 by decision
+// (plan nntp-rfc-commands), so that check is left out. Results no step requires are printed as
+// INFO lines: the shell driver counts only the PASS/FAIL N5x lines.
+func e2eRfcConformance(r e2eRfcReport, addr, user, pass, postGroup string) e2eRfcConf {
+	if err := e2eRfcSeed(addr, user, pass, postGroup); err != nil {
+		return e2eRfcConf{err: fmt.Errorf("seeding %s for the conformance run: %w", postGroup, err)}
+	}
+	rep, err := conformance.Check(conformance.Options{
+		Addr: addr, User: user, Pass: pass, PostGroup: postGroup,
+		Skip:     []string{"newnews"}, // 500 by decision
+		Deadline: testWait,
+	})
+	if err != nil {
+		return e2eRfcConf{err: err}
+	}
+	for _, res := range rep.Results {
+		if res.Status != conformance.Pass {
+			r.info("N50", fmt.Sprintf("conformance %s (%s): %v: %s", res.Name, res.RFC, res.Status, res.Detail))
 		}
 	}
-	return false
+	return e2eRfcConf{res: rep.ByName()}
 }
 
-// e2eRfcUpgrade runs the client side of the TLS handshake after a 382 and
-// switches c to the TLS connection.
-func e2eRfcUpgrade(c *e2eClient) error {
-	if n := c.R.Buffered(); n != 0 {
-		return fmt.Errorf("%d unread bytes before the handshake", n)
+// e2eRfcSeedArticles is how many articles e2eRfcSeed posts: NEXT/LAST and the range forms of
+// the conformance checks want more than one article in the group.
+const e2eRfcSeedArticles = 2
+
+// e2eRfcSeed posts e2eRfcSeedArticles articles into group, so the conformance checks that read
+// an article have ones to read there. The commit is asynchronous, so it waits until GROUP
+// counts them.
+func e2eRfcSeed(addr, user, pass, group string) error {
+	c, err := e2eDialAddr(addr, testWait)
+	if err != nil {
+		return err
 	}
-	tc := tls.Client(c.Conn, &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}) //nolint:gosec // test client, self-signed scratch certificate
-	_ = tc.SetDeadline(time.Now().Add(c.Deadline))
-	if err := tc.Handshake(); err != nil {
-		return fmt.Errorf("TLS handshake: %w", err)
+	defer c.Close()
+	if code, line, err := c.TryLogin(user, pass); err != nil || code != 281 {
+		return fmt.Errorf("AUTHINFO: code=%d line=%q err=%v", code, line, err)
 	}
-	c.Conn = tc
-	c.R = bufio.NewReaderSize(tc, 1<<16)
+	for i := 0; i < e2eRfcSeedArticles; i++ {
+		id := fmt.Sprintf("<e2e-conf-seed-%d-%d@test.invalid>", time.Now().UnixNano(), i)
+		art := e2eArticle(e2eHead(id, group, "E2E conformance seed", e2eNow()), []string{"seed"})
+		if code, line, err := e2ePost(c, art); err != nil || code != 240 {
+			return fmt.Errorf("POST into %s: code=%d line=%q err=%v, want 240", group, code, line, err)
+		}
+	}
+	return e2eWaitFor(testWait, func() error {
+		code, line, err := c.TryCmd("GROUP %s", group)
+		if err != nil {
+			return err
+		}
+		f := strings.Fields(line)
+		if code != 211 || len(f) < 5 {
+			return fmt.Errorf("GROUP %s: %q", group, line)
+		}
+		if n, perr := strconv.ParseInt(f[1], 10, 64); perr != nil || n < e2eRfcSeedArticles {
+			return fmt.Errorf("GROUP %s: %q, want at least %d articles", group, line, e2eRfcSeedArticles)
+		}
+		return nil
+	})
+}
+
+// require returns an error unless the run started and every named check passed.
+func (cf e2eRfcConf) require(names ...string) error {
+	if cf.err != nil {
+		return fmt.Errorf("the kit's conformance run did not start: %v", cf.err)
+	}
+	for _, n := range names {
+		got, ok := cf.res[n]
+		if !ok {
+			return fmt.Errorf("conformance check %s did not run", n)
+		}
+		if got.Status != conformance.Pass {
+			return fmt.Errorf("conformance %s (%s): %v: %s", n, got.RFC, got.Status, got.Detail)
+		}
+	}
 	return nil
+}
+
+// e2eRfcClientTLS is the client side of the STARTTLS handshake: the server's scratch
+// certificate is self-signed, so it is not verified.
+func e2eRfcClientTLS() *tls.Config {
+	return &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12} //nolint:gosec // test client, self-signed scratch certificate
 }
 
 func TestE2EBinaryRFC(t *testing.T) {
@@ -115,17 +196,20 @@ func TestE2EBinaryRFC(t *testing.T) {
 	withTLS := os.Getenv("PUGLEAF_E2E_STARTTLS") == "1"
 	r := e2eRfcReport{t: t}
 	freshID := fmt.Sprintf("<e2e-n55-%d@test.invalid>", time.Now().UnixNano())
+	// The kit's checks run first, on their own connections and in a group of their own, so
+	// the articles they post cannot move what the steps below read.
+	conf := e2eRfcConformance(r, addr, user, pass, e2eEnv("PUGLEAF_E2E_GROUP2", "e2e.test.b"))
 
 	c, err := e2eDialAddr(addr, testWait)
 	if err != nil {
 		r.fail("N50", "connect", err.Error())
 		t.FailNow()
 	}
-	defer c.close()
+	defer c.Close()
 
 	// N50: DATE → 111 yyyymmddhhmmss within 5 minutes of UTC now (RFC 3977 §7.1)
 	r.check("N50", "DATE 111 within 5 min of UTC", func() error {
-		code, line, err := c.tryCmd("DATE")
+		code, line, err := c.TryCmd("DATE")
 		if e := e2eRfcStatus(code, line, err, 111); e != nil {
 			return e
 		}
@@ -140,7 +224,8 @@ func TestE2EBinaryRFC(t *testing.T) {
 		if d := time.Since(ts); d > 5*time.Minute || d < -5*time.Minute {
 			return fmt.Errorf("DATE %s is %s away from UTC now", f[1], d.Round(time.Second))
 		}
-		return nil
+		return conf.require("greeting", "capabilities", "date", "help", "quit-eof",
+			"unknown-command", "bad-arguments")
 	}())
 
 	// N51: NEXT/LAST walk the group (RFC 3977 §6.1.3, §6.1.4)
@@ -152,7 +237,7 @@ func TestE2EBinaryRFC(t *testing.T) {
 		var count, low, high int64
 		var last string
 		perr := e2eWaitFor(n51SoftWait, func() error {
-			code, line, err := c.tryCmd("GROUP %s", group)
+			code, line, err := c.TryCmd("GROUP %s", group)
 			if err != nil {
 				return err
 			}
@@ -175,14 +260,14 @@ func TestE2EBinaryRFC(t *testing.T) {
 		if perr != nil {
 			r.info("N51", fmt.Sprintf("count stayed %d after %v (%q): walking one article", count, n51SoftWait, last))
 		}
-		code, line, err := c.tryCmd("LAST")
+		code, line, err := c.TryCmd("LAST")
 		if e := e2eRfcStatus(code, line, err, 422); e != nil {
 			return fmt.Errorf("LAST at the first article: %v", e)
 		}
 		prev := low
 		got := int64(0)
 		for i := int64(0); i <= count+1; i++ {
-			code, line, err := c.tryCmd("NEXT")
+			code, line, err := c.TryCmd("NEXT")
 			if err != nil {
 				return fmt.Errorf("NEXT: %v", err)
 			}
@@ -210,20 +295,28 @@ func TestE2EBinaryRFC(t *testing.T) {
 		if count >= 2 {
 			want = 223
 		}
-		code, line, err = c.tryCmd("LAST")
+		code, line, err = c.TryCmd("LAST")
 		if e := e2eRfcStatus(code, line, err, want); e != nil {
 			return fmt.Errorf("LAST at the last article: %v", e)
 		}
-		return nil
+		return conf.require("group", "listgroup", "listgroup-range", "next-last",
+			"article", "head", "body", "stat")
 	}())
 
-	// N52: LIST OVERVIEW.FMT → 215 and the 7 fixed lines (RFC 3977 §8.4)
-	r.check("N52", "LIST OVERVIEW.FMT 215, 7 fields", func() error {
+	// N52: LIST OVERVIEW.FMT → 215 and the fixed lines (RFC 3977 §8.4): the seven mandatory
+	// fields plus "Xref:full", which the server appends in -xref partial and full
+	// (nntp-cmd-over-hdr.go; the in-process test pins the same block in
+	// internal/nntp/nntp-server-rfccmds_test.go rfcListOverviewFmt).
+	r.check("N52", "LIST OVERVIEW.FMT 215, 7 fields + Xref:full", func() error {
 		lines, err := e2eRfcBlock(c, 215, "LIST OVERVIEW.FMT")
 		if err != nil {
 			return err
 		}
-		return e2eExpectLines(lines, []string{"Subject:", "From:", "Date:", "Message-ID:", "References:", ":bytes", ":lines"})
+		if err := e2eExpectLines(lines, []string{"Subject:", "From:", "Date:", "Message-ID:", "References:", ":bytes", ":lines", "Xref:full"}); err != nil {
+			return err
+		}
+		return conf.require("list-active", "list-newsgroups", "list-overview-fmt",
+			"list-unknown-keyword")
 	}())
 
 	// N53: OVER 1- → 224 with numbered lines; OVER 999999999- → 423 (RFC 3977 §8.3)
@@ -241,8 +334,11 @@ func TestE2EBinaryRFC(t *testing.T) {
 				return fmt.Errorf("OVER 1-: line %q does not start with a number and TAB", l)
 			}
 		}
-		code, line, err := c.tryCmd("OVER 999999999-")
-		return e2eRfcStatus(code, line, err, 423)
+		code, line, err := c.TryCmd("OVER 999999999-")
+		if e := e2eRfcStatus(code, line, err, 423); e != nil {
+			return e
+		}
+		return conf.require("over", "over-errors")
 	}())
 
 	// N54: HDR Subject 1 → 225 "1 …"; LIST HEADERS → 215 with :bytes (RFC 3977 §8.5, §8.6)
@@ -258,25 +354,27 @@ func TestE2EBinaryRFC(t *testing.T) {
 		if err != nil {
 			return err
 		}
+		found := false
 		for _, l := range lines {
-			if l == ":bytes" {
-				return nil
-			}
+			found = found || l == ":bytes"
 		}
-		return fmt.Errorf("LIST HEADERS: lines %q lack :bytes", lines)
+		if !found {
+			return fmt.Errorf("LIST HEADERS: lines %q lack :bytes", lines)
+		}
+		return conf.require("hdr", "list-headers")
 	}())
 
 	// N55: MODE STREAM 203, CHECK fresh id 238, CHECK stored id 438 (RFC 4644 §2.3, §2.4)
 	r.check("N55", "MODE STREAM 203, CHECK 238/438", func() error {
-		code, line, err := c.tryCmd("MODE STREAM")
+		code, line, err := c.TryCmd("MODE STREAM")
 		if e := e2eRfcStatus(code, line, err, 203); e != nil {
 			return fmt.Errorf("MODE STREAM: %v", e)
 		}
-		code, line, err = c.tryAuth(user, pass)
+		code, line, err = c.TryLogin(user, pass)
 		if e := e2eRfcStatus(code, line, err, 281); e != nil {
 			return fmt.Errorf("AUTHINFO: %v", e)
 		}
-		code, line, err = c.tryCmd("CHECK %s", freshID)
+		code, line, err = c.TryCmd("CHECK %s", freshID)
 		if e := e2eRfcStatus(code, line, err, 238); e != nil {
 			return fmt.Errorf("CHECK fresh id: %v", e)
 		}
@@ -295,14 +393,18 @@ func TestE2EBinaryRFC(t *testing.T) {
 			return fmt.Errorf("HDR Message-ID 1: lines %q", lines)
 		}
 		stored := f[1]
-		code, line, err = c.tryCmd("CHECK %s", stored)
+		code, line, err = c.TryCmd("CHECK %s", stored)
 		if e := e2eRfcStatus(code, line, err, 438); e != nil {
 			return fmt.Errorf("CHECK stored id: %v", e)
 		}
 		if f := strings.Fields(line); len(f) < 2 || f[1] != stored {
 			return fmt.Errorf("CHECK stored id: %q does not carry %s", line, stored)
 		}
-		return nil
+		// check-have and ihave-have are left out: this server commits asynchronously and
+		// answers 431/436 ("retry later") for an article that is still being committed, which
+		// the kit reports as a deferral (Skip), not as a pass.
+		return conf.require("mode-stream", "mode-stream-capability", "check-new",
+			"check-pipelined", "takethis", "takethis-duplicate")
 	}())
 
 	// N56: NEWGROUPS lists the group in LIST ACTIVE format; LIST ACTIVE wildmat (RFC 3977 §7.3, §7.6.3, §4)
@@ -340,14 +442,14 @@ func TestE2EBinaryRFC(t *testing.T) {
 		if !hasA || hasB {
 			return fmt.Errorf("LIST ACTIVE e2e.test.*,!*.b: %q, want e2e.test.a and not e2e.test.b", wm)
 		}
-		return nil
+		return conf.require("newgroups")
 	}())
 
 	// The main connection ends here; N57 needs a fresh, unauthenticated one.
-	if code, line, err := c.tryCmd("QUIT"); err != nil || code != 205 {
+	if code, line, err := c.TryCmd("QUIT"); err != nil || code != 205 {
 		r.info("N56", fmt.Sprintf("QUIT after the main steps: code=%d line=%q err=%v", code, line, err))
 	}
-	c.close()
+	c.Close()
 
 	// N57: STARTTLS (RFC 4642 §2.2)
 	if withTLS {
@@ -356,34 +458,37 @@ func TestE2EBinaryRFC(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			defer s.close()
-			caps, err := e2eRfcCaps(s)
+			defer s.Close()
+			caps, labels, err := e2eRfcCaps(s)
 			if err != nil {
 				return err
 			}
-			if !e2eRfcHasLabel(caps, "STARTTLS") {
+			if _, listed := labels["STARTTLS"]; !listed {
 				return fmt.Errorf("STARTTLS not listed before TLS: %q", caps)
 			}
-			code, line, err := s.tryCmd("STARTTLS")
-			if e := e2eRfcStatus(code, line, err, 382); e != nil {
-				return fmt.Errorf("STARTTLS: %v", e)
-			}
-			if err := e2eRfcUpgrade(s); err != nil {
+			// the kit does the STARTTLS, the 382, the "no plaintext behind it" check
+			// (CVE-2011-0411) and the handshake
+			tc, err := s.TryStartTLS(e2eRfcClientTLS())
+			if err != nil {
 				return err
 			}
-			caps, err = e2eRfcCaps(s)
+			defer tc.Close()
+			caps, labels, err = e2eRfcCaps(tc)
 			if err != nil {
 				return fmt.Errorf("over TLS: %v", err)
 			}
-			if e2eRfcHasLabel(caps, "STARTTLS") {
+			if _, listed := labels["STARTTLS"]; listed {
 				return fmt.Errorf("STARTTLS still listed over TLS: %q", caps)
 			}
-			code, line, err = s.tryCmd("STARTTLS")
+			code, line, err := tc.TryCmd("STARTTLS")
 			if e := e2eRfcStatus(code, line, err, 502); e != nil {
 				return fmt.Errorf("second STARTTLS: %v", e)
 			}
-			code, line, err = s.tryCmd("QUIT")
-			return e2eRfcStatus(code, line, err, 205)
+			code, line, err = tc.TryCmd("QUIT")
+			if e := e2eRfcStatus(code, line, err, 205); e != nil {
+				return e
+			}
+			return conf.require("starttls", "starttls-twice", "starttls-pipelined")
 		}())
 	} else {
 		r.check("N57", "STARTTLS not listed and 502 without a certificate", func() error {
@@ -391,19 +496,19 @@ func TestE2EBinaryRFC(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			defer s.close()
-			caps, err := e2eRfcCaps(s)
+			defer s.Close()
+			caps, labels, err := e2eRfcCaps(s)
 			if err != nil {
 				return err
 			}
-			if e2eRfcHasLabel(caps, "STARTTLS") {
+			if _, listed := labels["STARTTLS"]; listed {
 				return fmt.Errorf("STARTTLS listed without a certificate: %q", caps)
 			}
-			code, line, err := s.tryCmd("STARTTLS")
+			code, line, err := s.TryCmd("STARTTLS")
 			if e := e2eRfcStatus(code, line, err, 502); e != nil {
 				return fmt.Errorf("STARTTLS: %v", e)
 			}
-			code, line, err = s.tryCmd("QUIT")
+			code, line, err = s.TryCmd("QUIT")
 			return e2eRfcStatus(code, line, err, 205)
 		}())
 		r.info("N57", "no certificate configured")

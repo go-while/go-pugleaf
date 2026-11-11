@@ -11,6 +11,7 @@ import (
 	"github.com/go-while/go-pugleaf/internal/history"
 	"github.com/go-while/go-pugleaf/internal/models"
 	"github.com/go-while/go-pugleaf/internal/nntp"
+	testkit "github.com/go-while/nntp-testkit"
 )
 
 // Tests for the per-run return queue of DownloadArticles (A-intake-11, plan nntp-intake-injection S5).
@@ -18,15 +19,23 @@ import (
 // testWait is the hang guard of this package's tests: it only stops a hung test, a passing test
 // never waits on it. Override with PUGLEAF_TEST_DEADLINE (a Go duration, e.g. 120s); default 60 s.
 // Plan test-timing-hardening D3.
-var testWait = testWaitFromEnv(60 * time.Second)
+// It is testkit.Deadline(), so the kit's own hang guards (fakeserver, client, proc,
+// testkit.WaitFor) use the same value.
+var testWait = testDeadline()
 
-func testWaitFromEnv(def time.Duration) time.Duration {
-	if v := os.Getenv("PUGLEAF_TEST_DEADLINE"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil && d > 0 {
-			return d
+// testDeadline hands PUGLEAF_TEST_DEADLINE to the kit, which reads only NNTP_TEST_DEADLINE
+// (testkit.EnvDeadline), and returns the kit's hang guard. An NNTP_TEST_DEADLINE set by the
+// caller wins. The mapping lives in this initialiser, not in TestMain, because testWait is a
+// package variable: Go evaluates those before TestMain runs. Plan e2e-gap-tests wave 3.
+func testDeadline() time.Duration {
+	if os.Getenv(testkit.EnvDeadline) == "" {
+		if v := os.Getenv("PUGLEAF_TEST_DEADLINE"); v != "" {
+			if err := os.Setenv(testkit.EnvDeadline, v); err != nil {
+				fmt.Fprintln(os.Stderr, "[PROCTEST] Setenv "+testkit.EnvDeadline+":", err)
+			}
 		}
 	}
-	return def
+	return testkit.Deadline()
 }
 
 // intakeDLLateTTL is the TTL resetLateMsgID gives a dropped item (proc_DLArt.go, 5 s).

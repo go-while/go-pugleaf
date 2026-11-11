@@ -245,7 +245,7 @@ func (t *streamTransport) Send(arts []Outgoing) ([]Result, int, error) {
 	sent, err := t.conn.SendCheckMultiple(ids, t.rrCheck, t.job, t.demux)
 	offered := int(sent)
 	if err != nil {
-		t.fail(res, checked, err)
+		failResults(res, checked, err)
 		return res, offered, fmt.Errorf("CHECK: %w", err)
 	}
 
@@ -255,12 +255,12 @@ func (t *streamTransport) Send(arts []Outgoing) ([]Result, int, error) {
 		i := checked[n]
 		id, code, _, rerr := t.readResult(t.rrCheck, t.demux.GetCheckResponseChan())
 		if rerr != nil {
-			t.fail(res, checked[n:], rerr)
+			failResults(res, checked[n:], rerr)
 			return res, offered, rerr
 		}
 		if id != arts[i].Article.MessageID {
 			err := fmt.Errorf("feed: peer %s: CHECK answer for %s, expected %s", t.peerName, id, arts[i].Article.MessageID)
-			t.fail(res, checked[n:], err)
+			failResults(res, checked[n:], err)
 			return res, offered, err
 		}
 		switch code {
@@ -268,14 +268,23 @@ func (t *streamTransport) Send(arts []Outgoing) ([]Result, int, error) {
 			wanted = append(wanted, i)
 		case 438, 435: // the peer has it
 			res[i] = Result{MessageID: id, Code: code, Outcome: OutcomeDone}
-		case 431, 400: // try again later
+		case 431: // try again later
 			res[i] = Result{MessageID: id, Code: code, Outcome: OutcomeDefer, Err: fmt.Sprintf("CHECK %d", code)}
+		case 400:
+			// The peer is going away (RFC 3977 3.2.1, RFC 4644 2.3): nothing more may be
+			// offered on this connection. This article and every later one of the batch come
+			// back later, and the error tells the sender to close the connection and redial
+			// with its backoff instead of writing into a dead one.
+			res[i] = Result{MessageID: id, Code: code, Outcome: OutcomeDefer, Err: fmt.Sprintf("CHECK %d", code)}
+			err := fmt.Errorf("feed: peer %s: CHECK %s answered 400: the peer is going away", t.peerName, id)
+			failResults(res, checked[n:], err)
+			return res, offered, err
 		case 439, 437: // refused by id
 			res[i] = Result{MessageID: id, Code: code, Outcome: OutcomeDone}
 		default:
 			// 480, 500, 501, 502, 403: the peer does not take CHECK from us (any more).
 			err := denied(code, fmt.Errorf("feed: peer %s: CHECK %s answered %d", t.peerName, id, code))
-			t.fail(res, checked[n:], err)
+			failResults(res, checked[n:], err)
 			return res, offered, err
 		}
 	}
@@ -305,12 +314,12 @@ func (t *streamTransport) Send(arts []Outgoing) ([]Result, int, error) {
 	for n, i := range taken {
 		id, code, _, rerr := t.readResult(t.rrTake, t.demux.GetTakeThisResponseChan())
 		if rerr != nil {
-			t.fail(res, taken[n:], rerr)
+			failResults(res, taken[n:], rerr)
 			return res, offered, rerr
 		}
 		if id != arts[i].Article.MessageID {
 			err := fmt.Errorf("feed: peer %s: TAKETHIS answer for %s, expected %s", t.peerName, id, arts[i].Article.MessageID)
-			t.fail(res, taken[n:], err)
+			failResults(res, taken[n:], err)
 			return res, offered, err
 		}
 		// The article was on the wire before every one of these answers (Transferred).
@@ -321,11 +330,18 @@ func (t *streamTransport) Send(arts []Outgoing) ([]Result, int, error) {
 			res[i] = Result{MessageID: id, Code: code, Outcome: OutcomeDone, Transferred: true}
 		case 438, 435: // the peer got it meanwhile
 			res[i] = Result{MessageID: id, Code: code, Outcome: OutcomeDone, Transferred: true}
-		case 431, 436, 400:
+		case 431, 436:
 			res[i] = Result{MessageID: id, Code: code, Outcome: OutcomeDefer, Transferred: true, Err: fmt.Sprintf("TAKETHIS %d", code)}
+		case 400:
+			// As in the CHECK loop: the peer is going away, so the rest of the batch is
+			// deferred and the connection is dropped by the sender.
+			res[i] = Result{MessageID: id, Code: code, Outcome: OutcomeDefer, Transferred: true, Err: fmt.Sprintf("TAKETHIS %d", code)}
+			err := fmt.Errorf("feed: peer %s: TAKETHIS %s answered 400: the peer is going away", t.peerName, id)
+			failResults(res, taken[n:], err)
+			return res, offered, err
 		default:
 			err := denied(code, fmt.Errorf("feed: peer %s: TAKETHIS %s answered %d", t.peerName, id, code))
-			t.fail(res, taken[n:], err)
+			failResults(res, taken[n:], err)
 			return res, offered, err
 		}
 	}
@@ -335,8 +351,9 @@ func (t *streamTransport) Send(arts []Outgoing) ([]Result, int, error) {
 	return res, offered, nil
 }
 
-// fail marks every article of idx that has no answer yet as deferred with reason.
-func (t *streamTransport) fail(res []Result, idx []int, reason error) {
+// failResults marks every article of idx that has no answer yet as deferred with reason. Both
+// transports use it when they give up on a batch.
+func failResults(res []Result, idx []int, reason error) {
 	msg := reason.Error()
 	for _, i := range idx {
 		if res[i].Code != 0 || res[i].Outcome == OutcomeDrop {
@@ -422,6 +439,21 @@ func (t *ihaveTransport) Send(arts []Outgoing) ([]Result, int, error) {
 		// so its octets count in the peering statistics.
 		code, txBytes, err := t.conn.IHave(arts[i].Article, &t.identity, arts[i].Newsgroup)
 		sent := txBytes > 0
+		if code == 400 {
+			// The peer is going away (RFC 3977 3.2.1), whether it said so instead of the 335
+			// or after it read the article: as on the streaming path, this article and every
+			// later one of the batch come back later and the error makes the sender drop the
+			// connection and redial with its backoff.
+			offered++
+			res[i] = Result{MessageID: id, Code: code, Outcome: OutcomeDefer, Transferred: sent, Err: "IHAVE 400"}
+			gerr := fmt.Errorf("feed: peer %s: IHAVE %s answered 400: the peer is going away", t.peerName, id)
+			rest := make([]int, 0, len(arts)-i-1)
+			for j := i + 1; j < len(arts); j++ {
+				rest = append(rest, j)
+			}
+			failResults(res, rest, gerr)
+			return res, offered, gerr
+		}
 		switch {
 		case err == nil:
 			offered++

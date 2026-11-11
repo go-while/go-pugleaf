@@ -34,6 +34,9 @@ import (
 	"testing"
 	"time"
 
+	testkit "github.com/go-while/nntp-testkit"
+	"github.com/go-while/nntp-testkit/client"
+	"github.com/go-while/nntp-testkit/proc"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -107,158 +110,83 @@ type xrefEnv struct {
 	data, run, host      string
 }
 
-// xrefBuild builds the three binaries into dir.
-func xrefBuild(t *testing.T, goTool, dir string) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*testWait) // cold cgo builds are slow
-	defer cancel()
-	// the binaries refuse to start with the default appVersion "-unset-"
-	cmd := exec.CommandContext(ctx, goTool, "build", "-o", dir+string(filepath.Separator), "-ldflags", "-X main.appVersion=e2e-test",
-		"github.com/go-while/go-pugleaf/cmd/nntp-server",
-		"github.com/go-while/go-pugleaf/cmd/nntpmgr",
-		"github.com/go-while/go-pugleaf/cmd/history-rebuild")
-	cmd.WaitDelay = 2 * time.Second
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("go build: %v\n%s", err, out)
-	}
+// tool runs a one-shot binary in the scratch root and returns its combined output and its
+// exit code (kit proc.TryRun; err is set only for a start error or the timeout, so every exit
+// status is the caller's to judge).
+func (e *xrefEnv) tool(bin string, args ...string) (string, int, error) {
+	return proc.TryRun(proc.RunOptions{Path: bin, Args: args, Dir: e.run, Timeout: testWait})
 }
 
-// tool runs a one-shot binary in the scratch root and returns its combined output.
-func (e *xrefEnv) tool(bin string, args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), testWait)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, bin, args...)
-	cmd.Dir = e.run
-	cmd.WaitDelay = 2 * time.Second
-	out, err := cmd.CombinedOutput()
-	if ctx.Err() == context.DeadlineExceeded {
-		return string(out), fmt.Errorf("%s did not exit within %s", filepath.Base(bin), testWait)
-	}
-	return string(out), err
-}
-
-// xrefServer is one running pugleaf-nntp-server process.
+// xrefServer is one running pugleaf-nntp-server process (kit proc.Process).
 type xrefServer struct {
-	cmd     *exec.Cmd
-	out     *e2eLogBuffer
-	addr    string
-	done    chan struct{}
-	waitErr error // valid after done is closed
+	p    *proc.Process
+	addr string
 }
 
-// xrefFreePort asks the OS for a free TCP port on 127.0.0.1.
-func xrefFreePort() (int, error) {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return 0, err
-	}
-	port := l.Addr().(*net.TCPAddr).Port
-	return port, l.Close()
-}
+// out returns the last n lines of the process output.
+func (s *xrefServer) out(n int) string { return e2eTail(s.p.Stderr(), n) }
 
-// xrefOutput returns the last n lines of a process output buffer.
-func xrefOutput(b *e2eLogBuffer, n int) string {
-	b.mu.Lock()
-	s := b.buf.String()
-	b.mu.Unlock()
-	return e2eTail(s, n)
-}
+// logHas reports whether the process output holds sub.
+func (s *xrefServer) logHas(sub string) bool { return strings.Contains(s.p.Stderr(), sub) }
 
-// start launches the server with -xref mode (and the extra flags) and waits until it sends a
-// greeting. The process is killed at test end if it still runs.
+// start launches the server with -xref mode (and the extra flags) and waits until it answers a
+// dial with a greeting (kit proc.StartTCP, which also stops the process at test end and prints
+// its output when the test failed).
 func (e *xrefEnv) start(mode string, extra ...string) *xrefServer {
 	e.t.Helper()
-	port, err := xrefFreePort()
-	if err != nil {
-		e.t.Fatalf("free port: %v", err)
-	}
-	s := &xrefServer{out: &e2eLogBuffer{}, addr: fmt.Sprintf("127.0.0.1:%d", port), done: make(chan struct{})}
+	port := testkit.FreePort(e.t)
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	args := []string{
 		"-data", e.data, "-nntphostname", e.host, "-nntptcpport", strconv.Itoa(port),
 		"-xref", mode, "-articledelay", "0", "-groupdelay", "0", "-errordelay", "0",
 		// polls by message-id may answer 430 before the commit: do not cache that miss
 		"-local430ttl", "1ms"}
-	s.cmd = exec.Command(e.server, append(args, extra...)...)
-	s.cmd.Dir = e.run
-	s.cmd.Stdout = s.out
-	s.cmd.Stderr = s.out
-	if err := s.cmd.Start(); err != nil {
-		e.t.Fatalf("start server: %v", err)
-	}
-	go func() { s.waitErr = s.cmd.Wait(); close(s.done) }()
-	e.t.Cleanup(func() {
-		select {
-		case <-s.done:
-		default:
-			_ = s.cmd.Process.Kill()
-			<-s.done
-		}
-	})
-	err = e2eWaitFor(testWait, func() error {
-		select {
-		case <-s.done:
-			return nil // exited: reported below
-		default:
-		}
-		c, err := e2eDialAddr(s.addr, testWait)
-		if err != nil {
-			return err
-		}
-		c.close()
-		return nil
-	})
-	select {
-	case <-s.done:
-		e.t.Fatalf("server -xref %s exited during startup: %v\n%s", mode, s.waitErr, xrefOutput(s.out, 30))
-	default:
-	}
-	if err != nil {
-		e.t.Fatalf("server -xref %s not ready: %v\n%s", mode, err, xrefOutput(s.out, 30))
-	}
-	return s
+	p := proc.StartTCP(e.t, proc.Options{
+		Path: e.server, Args: append(args, extra...), Dir: e.run,
+		Deadline: testWait, StopTimeout: testWait,
+	}, addr)
+	return &xrefServer{p: p, addr: addr}
 }
 
 // stop sends SIGINT and waits for the exit (killed after testWait); a non-zero exit is an error.
 func (s *xrefServer) stop() error {
-	if err := s.cmd.Process.Signal(os.Interrupt); err != nil {
+	if err := s.p.Signal(os.Interrupt); err != nil {
 		return fmt.Errorf("SIGINT: %w", err)
 	}
 	select {
-	case <-s.done:
+	case <-s.p.Done():
 	case <-time.After(testWait):
-		_ = s.cmd.Process.Kill()
-		<-s.done
+		s.p.Stop()
 		return fmt.Errorf("no exit within %s after SIGINT, killed", testWait)
 	}
-	if s.waitErr != nil {
-		return fmt.Errorf("exit: %v\n%s", s.waitErr, xrefOutput(s.out, 20))
+	if err := s.p.Wait(); err != nil {
+		return fmt.Errorf("exit: %v\n%s", err, s.out(20))
 	}
 	return nil
 }
 
 // dial connects a reader to s (no GROUP selected).
-func (s *xrefServer) dial(t *testing.T) *e2eClient {
+func (s *xrefServer) dial(t *testing.T) *client.Conn {
 	t.Helper()
 	c, err := e2eDialAddr(s.addr, testWait)
 	if err != nil {
 		t.Fatalf("dial %s: %v", s.addr, err)
 	}
-	t.Cleanup(c.close)
+	t.Cleanup(c.Close)
 	return c
 }
 
 // xrefBlock sends cmd, requires the status want and returns the data block.
-func xrefBlock(c *e2eClient, want int, format string, args ...interface{}) ([]string, error) {
+func xrefBlock(c *client.Conn, want int, format string, args ...interface{}) ([]string, error) {
 	cmd := fmt.Sprintf(format, args...)
-	code, line, err := c.tryCmd("%s", cmd)
+	code, line, err := c.TryCmd("%s", cmd)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %v (line %q)", cmd, err, line)
 	}
 	if code != want {
 		return nil, fmt.Errorf("%s: got %q, want %d", cmd, line, want)
 	}
-	lines, err := c.tryDotLines()
+	lines, err := c.TryReadDotLines()
 	if err != nil {
 		return nil, fmt.Errorf("%s: %v", cmd, err)
 	}
@@ -266,8 +194,8 @@ func xrefBlock(c *e2eClient, want int, format string, args ...interface{}) ([]st
 }
 
 // xrefSelect selects group (211).
-func xrefSelect(c *e2eClient, group string) error {
-	code, line, err := c.tryCmd("GROUP %s", group)
+func xrefSelect(c *client.Conn, group string) error {
+	code, line, err := c.TryCmd("GROUP %s", group)
 	if err != nil || code != 211 {
 		return fmt.Errorf("GROUP %s: code=%d line=%q err=%v", group, code, line, err)
 	}
@@ -305,12 +233,12 @@ func xrefNoHeader(hdrs []string) error {
 }
 
 // xrefHead runs HEAD arg (221) in the selected group (or without one) and returns the headers.
-func xrefHead(c *e2eClient, arg string) ([]string, error) {
+func xrefHead(c *client.Conn, arg string) ([]string, error) {
 	return xrefBlock(c, 221, "HEAD %s", arg)
 }
 
 // xrefArticleHead runs ARTICLE arg (220) and returns the header part.
-func xrefArticleHead(c *e2eClient, arg string) ([]string, error) {
+func xrefArticleHead(c *client.Conn, arg string) ([]string, error) {
 	lines, err := xrefBlock(c, 220, "ARTICLE %s", arg)
 	if err != nil {
 		return nil, err
@@ -323,7 +251,7 @@ func xrefArticleHead(c *e2eClient, arg string) ([]string, error) {
 }
 
 // xrefOver runs OVER 1 in the selected group and returns the TAB fields of the one line.
-func xrefOver(c *e2eClient) ([]string, error) {
+func xrefOver(c *client.Conn) ([]string, error) {
 	lines, err := xrefBlock(c, 224, "OVER 1")
 	if err != nil {
 		return nil, err
@@ -335,7 +263,7 @@ func xrefOver(c *e2eClient) ([]string, error) {
 }
 
 // xrefHdr runs HDR Xref 1 in the selected group and returns the one line.
-func xrefHdr(c *e2eClient) (string, error) {
+func xrefHdr(c *client.Conn) (string, error) {
 	lines, err := xrefBlock(c, 225, "HDR Xref 1")
 	if err != nil {
 		return "", err
@@ -348,7 +276,7 @@ func xrefHdr(c *e2eClient) (string, error) {
 
 // xrefRanges runs the range forms OVER 1-, XOVER 1-, HDR Xref 1- and XHDR Xref 1- in each of
 // groups and returns every reply line, prefixed with the group and the command.
-func xrefRanges(c *e2eClient, groups ...string) ([]string, error) {
+func xrefRanges(c *client.Conn, groups ...string) ([]string, error) {
 	var out []string
 	for _, g := range groups {
 		if err := xrefSelect(c, g); err != nil {
@@ -370,15 +298,8 @@ func xrefRanges(c *e2eClient, groups ...string) ([]string, error) {
 	return out, nil
 }
 
-// xrefLogHas reports whether the server output holds s.
-func xrefLogHas(b *e2eLogBuffer, s string) bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return strings.Contains(b.buf.String(), s)
-}
-
 // xrefFmt runs LIST OVERVIEW.FMT.
-func xrefFmt(c *e2eClient) ([]string, error) {
+func xrefFmt(c *client.Conn) ([]string, error) {
 	return xrefBlock(c, 215, "LIST OVERVIEW.FMT")
 }
 
@@ -392,8 +313,7 @@ func TestE2EXrefBinary(t *testing.T) {
 	if os.Geteuid() < 1000 {
 		t.Skip("running as root/system user (uid < 1000): the binaries refuse to open a database")
 	}
-	goTool, err := exec.LookPath("go")
-	if err != nil {
+	if _, err := exec.LookPath("go"); err != nil {
 		t.Skipf("go tool not found: %v", err)
 	}
 	host, err := xrefHostname()
@@ -404,20 +324,19 @@ func TestE2EXrefBinary(t *testing.T) {
 	root := t.TempDir()
 	e := &xrefEnv{
 		t: t, host: host,
-		server:  filepath.Join(root, "bin", "nntp-server"),
-		mgr:     filepath.Join(root, "bin", "nntpmgr"),
-		rebuild: filepath.Join(root, "bin", "history-rebuild"),
+		server:  e2eBuild(t, "github.com/go-while/go-pugleaf/cmd/nntp-server"),
+		mgr:     e2eBuild(t, "github.com/go-while/go-pugleaf/cmd/nntpmgr"),
+		rebuild: e2eBuild(t, "github.com/go-while/go-pugleaf/cmd/history-rebuild"),
 		data:    filepath.Join(root, "data"),
 		run:     filepath.Join(root, "run"),
 	}
 	if err := os.MkdirAll(e.run, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	xrefBuild(t, goTool, filepath.Join(root, "bin"))
 
 	// seed: nntpmgr creates the schema and the posting user, then the two groups by SQL
-	if out, err := e.tool(e.mgr, "-data", e.data, "-create", "-username", xrefUser, "-password", xrefPass, "-posting", "-maxconns", "4"); err != nil {
-		t.Fatalf("nntpmgr -create: %v\n%s", err, e2eTail(out, 20))
+	if out, code, err := e.tool(e.mgr, "-data", e.data, "-create", "-username", xrefUser, "-password", xrefPass, "-posting", "-maxconns", "4"); err != nil || code != 0 {
+		t.Fatalf("nntpmgr -create: code=%d err=%v\n%s", code, err, e2eTail(out, 20))
 	}
 	mainDB, err := sql.Open("sqlite3", filepath.Join(e.data, "cfg", "pugleaf.sq3"))
 	if err != nil {
@@ -443,11 +362,11 @@ func TestE2EXrefBinary(t *testing.T) {
 	// ---------------------------------------------------------------- -xref full
 	srv := e.start("full")
 	c := srv.dial(t)
-	if code, line, err := c.tryAuth(xrefUser, xrefPass); err != nil || code != 281 {
-		t.Fatalf("AUTHINFO: code=%d line=%q err=%v\n%s", code, line, err, xrefOutput(srv.out, 30))
+	if code, line, err := c.TryLogin(xrefUser, xrefPass); err != nil || code != 281 {
+		t.Fatalf("AUTHINFO: code=%d line=%q err=%v\n%s", code, line, err, srv.out(30))
 	}
 	if !r.check("X01", "POST crosspost "+ga+","+gb+" 240", func() error {
-		code, line, err := c.tryPost(e2eWire(e2eHead(id, ga+","+gb, "Xref e2e crosspost", e2eNow()), []string{"xref crosspost body"}))
+		code, line, err := e2ePost(c, e2eArticle(e2eHead(id, ga+","+gb, "Xref e2e crosspost", e2eNow()), []string{"xref crosspost body"}))
 		if err != nil || code != 240 {
 			return fmt.Errorf("code=%d line=%q err=%v", code, line, err)
 		}
@@ -475,7 +394,7 @@ func TestE2EXrefBinary(t *testing.T) {
 		}
 		return nil
 	}()) {
-		t.Fatalf("server output:\n%s", xrefOutput(srv.out, 40))
+		t.Fatalf("server output:\n%s", srv.out(40))
 	}
 
 	for _, g := range []string{ga, gb} {
@@ -504,12 +423,12 @@ func TestE2EXrefBinary(t *testing.T) {
 
 	r.check("X04", "full: HEAD <id> without GROUP lists both groups", func() error {
 		c0 := srv.dial(t)
-		defer c0.close()
-		code, line, err := c0.tryCmd("HEAD %s", id)
+		defer c0.Close()
+		code, line, err := c0.TryCmd("HEAD %s", id)
 		if err != nil || code != 221 || !strings.HasPrefix(line, "221 0 "+id) {
 			return fmt.Errorf("code=%d line=%q err=%v", code, line, err)
 		}
-		hdrs, err := c0.tryDotLines()
+		hdrs, err := c0.TryReadDotLines()
 		if err != nil {
 			return err
 		}
@@ -572,8 +491,8 @@ func TestE2EXrefBinary(t *testing.T) {
 	// ranges with the batched lookup (the default): kept for the -xref-batched-lookup=false run
 	var batchedRanges []string
 	r.check("X09", "full (batched lookup): OVER/XOVER/HDR/XHDR ranges in both groups, startup log xref-batched-lookup=true", func() error {
-		if !xrefLogHas(srv.out, "xref=full xref-batched-lookup=true") {
-			return fmt.Errorf("startup log has no %q:\n%s", "xref=full xref-batched-lookup=true", xrefOutput(srv.out, 20))
+		if !srv.logHas("xref=full xref-batched-lookup=true") {
+			return fmt.Errorf("startup log has no %q:\n%s", "xref=full xref-batched-lookup=true", srv.out(20))
 		}
 		lines, err := xrefRanges(c, ga, gb)
 		if err != nil {
@@ -601,15 +520,15 @@ func TestE2EXrefBinary(t *testing.T) {
 		batchedRanges = lines
 		return nil
 	}())
-	c.close()
+	c.Close()
 	r.check("X08", "full: SIGINT, exit 0", srv.stop())
 
 	// ---------------------------------------------------------------- -xref full -xref-batched-lookup=false
 	srv = e.start("full", "-xref-batched-lookup=false")
 	c = srv.dial(t)
 	r.check("X14", "full -xref-batched-lookup=false: ranges byte-identical to the batched run, startup log xref-batched-lookup=false", func() error {
-		if !xrefLogHas(srv.out, "xref=full xref-batched-lookup=false") {
-			return fmt.Errorf("startup log has no %q:\n%s", "xref=full xref-batched-lookup=false", xrefOutput(srv.out, 20))
+		if !srv.logHas("xref=full xref-batched-lookup=false") {
+			return fmt.Errorf("startup log has no %q:\n%s", "xref=full xref-batched-lookup=false", srv.out(20))
 		}
 		if batchedRanges == nil {
 			return errors.New("no batched output to compare (X09 failed)")
@@ -628,7 +547,7 @@ func TestE2EXrefBinary(t *testing.T) {
 		}
 		return nil
 	}())
-	c.close()
+	c.Close()
 	r.check("X15", "full -xref-batched-lookup=false: SIGINT, exit 0", srv.stop())
 
 	// ---------------------------------------------------------------- -xref partial
@@ -656,7 +575,7 @@ func TestE2EXrefBinary(t *testing.T) {
 
 	r.check("X11", "partial: HEAD <id> without GROUP has no Xref line", func() error {
 		c0 := srv.dial(t)
-		defer c0.close()
+		defer c0.Close()
 		hdrs, err := xrefHead(c0, id)
 		if err != nil {
 			return err
@@ -691,7 +610,7 @@ func TestE2EXrefBinary(t *testing.T) {
 		}
 		return nil
 	}())
-	c.close()
+	c.Close()
 	r.check("X13", "partial: SIGINT, exit 0", srv.stop())
 
 	// ---------------------------------------------------------------- -xref off -nntpbind 127.0.0.1
@@ -703,15 +622,15 @@ func TestE2EXrefBinary(t *testing.T) {
 			return fmt.Errorf("greeting %q, want 200", c.Greeting)
 		}
 		for _, want := range []string{"NNTP server listening on " + srv.addr, `bind="127.0.0.1"`} {
-			if !xrefLogHas(srv.out, want) {
-				return fmt.Errorf("startup log has no %q:\n%s", want, xrefOutput(srv.out, 20))
+			if !srv.logHas(want) {
+				return fmt.Errorf("startup log has no %q:\n%s", want, srv.out(20))
 			}
 		}
 		return nil
 	}())
 	r.check("X20", "off: HEAD 1, ARTICLE 1 in "+ga+" and HEAD <id> without GROUP have no Xref line", func() error {
 		c0 := srv.dial(t)
-		defer c0.close()
+		defer c0.Close()
 		hdrs, err := xrefHead(c0, id)
 		if err != nil {
 			return err
@@ -769,15 +688,14 @@ func TestE2EXrefBinary(t *testing.T) {
 		}
 		return nil
 	}())
-	c.close()
+	c.Close()
 	r.check("X23", "off: SIGINT, exit 0", srv.stop())
 
 	// ---------------------------------------------------------------- invalid mode
 	r.check("X30", "-xref maybe exits non-zero", func() error {
-		out, err := e.tool(e.server, "-data", e.data, "-nntphostname", host, "-nntptcpport", "0", "-xref", "maybe")
-		var ee *exec.ExitError
-		if !errors.As(err, &ee) || ee.ExitCode() == 0 {
-			return fmt.Errorf("err=%v, want a non-zero exit; output:\n%s", err, e2eTail(out, 10))
+		out, code, err := e.tool(e.server, "-data", e.data, "-nntphostname", host, "-nntptcpport", "0", "-xref", "maybe")
+		if err != nil || code == 0 {
+			return fmt.Errorf("code=%d err=%v, want a non-zero exit; output:\n%s", code, err, e2eTail(out, 10))
 		}
 		if !strings.Contains(out, `invalid -xref value "maybe"`) {
 			return fmt.Errorf("output has no usage error:\n%s", e2eTail(out, 10))
@@ -787,10 +705,9 @@ func TestE2EXrefBinary(t *testing.T) {
 
 	// ---------------------------------------------------------------- invalid bind address
 	r.check("X32", "-nntpbind 999.1.1.1 exits 1", func() error {
-		out, err := e.tool(e.server, "-data", e.data, "-nntphostname", host, "-nntptcpport", "0", "-nntpbind", "999.1.1.1")
-		var ee *exec.ExitError
-		if !errors.As(err, &ee) || ee.ExitCode() != 1 {
-			return fmt.Errorf("err=%v, want exit 1; output:\n%s", err, e2eTail(out, 10))
+		out, code, err := e.tool(e.server, "-data", e.data, "-nntphostname", host, "-nntptcpport", "0", "-nntpbind", "999.1.1.1")
+		if err != nil || code != 1 {
+			return fmt.Errorf("code=%d err=%v, want exit 1; output:\n%s", code, err, e2eTail(out, 10))
 		}
 		if !strings.Contains(out, `invalid -nntpbind value "999.1.1.1"`) {
 			return fmt.Errorf("output has no usage error:\n%s", e2eTail(out, 10))
@@ -800,9 +717,9 @@ func TestE2EXrefBinary(t *testing.T) {
 
 	// ---------------------------------------------------------------- history-rebuild -validate-only
 	r.check("X31", "history-rebuild -validate-only: 2 found, 0 missing, 0 without/wrong number", func() error {
-		out, err := e.tool(e.rebuild, "-data", e.data, "-validate-only")
-		if err != nil {
-			return fmt.Errorf("%v\n%s", err, e2eTail(out, 20))
+		out, code, err := e.tool(e.rebuild, "-data", e.data, "-validate-only")
+		if err != nil || code != 0 {
+			return fmt.Errorf("code=%d err=%v\n%s", code, err, e2eTail(out, 20))
 		}
 		for _, want := range []*regexp.Regexp{
 			regexp.MustCompile(`(?m)^Found in History:\s+2$`),

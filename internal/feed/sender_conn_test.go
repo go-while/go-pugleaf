@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/go-while/go-pugleaf/internal/models"
+	testkit "github.com/go-while/nntp-testkit"
 	"github.com/go-while/nntp-testkit/fakeserver"
 )
 
@@ -358,7 +359,7 @@ func TestFeedSenderEndToEnd(t *testing.T) {
 	if err := f.s.Start(); err != nil {
 		t.Fatal(err)
 	}
-	sndWaitFor(t, "the queue to be drained", func() bool { return len(f.q.doneIDs()) == len(ids) })
+	testkit.WaitFor(t, sndWait, "the queue to be drained", func() bool { return len(f.q.doneIDs()) == len(ids) })
 	f.s.Stop()
 
 	st, ok := f.q.storedStats(1)

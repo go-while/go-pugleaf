@@ -143,6 +143,8 @@ parity (DEL) with INN: `strict-del-passes` is deliberate.
   hands `PUGLEAF_TEST_DEADLINE` to the kit today (no test sets NNTP_TEST_DEADLINE; likely per-call deadline
   arguments) and keep that behaviour; replace our own `hDeadlineFromEnv`/`testWaitFromEnv`
   copies by `testkit.Deadline()` only where the mapping guarantees the same value.
+  nntp-testkit-1 (2026-11-11): the kit will not read extra env names — map `PUGLEAF_TEST_DEADLINE` →
+  `NNTP_TEST_DEADLINE` with os.Setenv in each package's TestMain before the tests run (wave 3).
 - Checks: full CLAUDE.md list green.
 
 ### Wave 1 (parallel, disjoint files)
@@ -170,6 +172,38 @@ parity (DEL) with INN: `strict-del-passes` is deliberate.
   `internal/common` (D3); update the wave-1 pins marked `// D1..D4` and the INN-derived G9 NUL-in-body case.
   Checks: full list.
 
+  Added from wave 1 (intake-wire report): (a) G9 framing rejects and the D1/D2/D4 rules need tests in
+  `internal/processor` (the internal/nntp harness's fake processor never runs `validateIntakeHeaders`), incl.
+  per-peer `header_check` relay vs strict through `ProcessIncomingArticle`; (b) group `max_art_size` at exactly
+  N and N+1 (`resolveIntakeGroups`); (c) size accounting: the group limit is measured after `feedPath` prepended
+  our Path identity (+ `.MISMATCH`), ~55 octets more than transferred, and the server limit
+  (`readArticleBlock`) counts dot-stuffing while `common.WireArticleSize` does not — make all three limits
+  (server, peer `in_max_size`, group) measure the same thing (un-stuffed article as received, before
+  `feedPath`; INN's Bytes also excludes the stuffing dots) and update TestIwProcessorWireSize /
+  TestIwSizeLimitDotStuffing (marked `// W2-size`). Review notes: the honest size is only known at read time,
+  so carry it into the processor (a `models.Article` field or parameter) instead of recomputing it from the
+  mutated header block; on POST `injectProtoArticle` adds Injection-Info/Message-ID/Date/Path (100+ octets) —
+  the group limit must not count those either; `readArticleBlock` subtracts the stuffing dots it strips when
+  comparing against `maxBytes`, but `maxArticleDrainBytes` keeps counting raw wire bytes (it caps wire volume);
+  (d) the D3 pins in `nntp-intake-wire_test.go` (`// D3`: IHAVE `<x@[a<b]>` → 501,
+  CHECK → 438) become 335/238.
+
+  Decided 2026-11-11 (go-while: "Fetch = relay rules"): (e) the fetch path (`HeaderBlockFetch`) uses the
+  relay rules too — accept a bare CR in a fetched header (stored verbatim, counted), reject NUL in header AND body
+  (today a bare CR drops the whole fetched article, a body NUL is not checked); pins marked `// W2-fetch`.
+
+### Follow-ups found in wave 1 (separate queued plan, not this plan)
+- FU-progress-cut: an ARTICLE reply cut by the provider is asked once, then `commitThenProgress` moves the
+  progress past it (proc_DLArt.go:403-425, :520-522) → permanent hole on a transient fault. Fix: progress = highest
+  number below which every number was stored / dup / 430 / deliberately refused (plumb `BatchItem.ArticleNum`), or
+  at least one retry on a transport error. Pin: TestDLArtUpArticleCutOff (`// FU-progress`).
+- FU-progress-empty: a wholly-gone range (provider low water ahead of what it serves) → XHDR 423 → error →
+  progress unchanged → same range forever; and a complete empty listing never moves the progress
+  (`gotQueued > 0 || dups > 0`). Fix: a complete XHDR listing without error moves the progress to `end`.
+  Pin: TestDLArtUpLowWater/emptied-group (`// FU-progress`).
+- Date brute-force fallback accepts out-of-range fields ("32 May", "25:01:32"); INN rejects them.
+- Client TLS: no per-provider extra root CA (`TLSRootCAFile`); never add InsecureSkipVerify.
+
 ### Wave 3 (after wave 1+2 merged; touches many test files, so alone)
 - slice `helper-cleanup`: survey section 4 rows — `e2eClient`, `sessDialRaw`, `hNewClient` → kit client;
   `xrefEnv.start/stop` → `proc.StartTCP`; `flPqFake` ×2 → fakeserver Script; `adfTorSilentProxy` → RawStall;
@@ -189,3 +223,46 @@ known 430 bug.
 Wave 1 `relay-e2e` is the end-to-end scenario: build `./build_nntp-server.sh` into the worktree's `build/`, run
 with `-data ./data-test-e2e-gap`, two kit fake peers on free ports; expected: article offered by peer A appears
 once at peer B, never at A, queue empty afterwards, peer stats show accepted 1 in and out.
+
+## Progress
+- Wave 0 (2026-11-11, plan-e2e-gap-tests): nntp-testkit v0.8.0 → v0.12.0; full CLAUDE.md test list green with no
+  test changes (the CAPABILITIES/ACTIVE.TIMES and implicit-TLS behaviour changes hit no go-pugleaf test).
+- Wave 1 (2026-11-11): five slices, all reviewed (verdict MERGE each, review minors fixed before merge), merged
+  into plan-e2e-gap-tests; full CLAUDE.md list green (33 packages), PUGLEAF_KNOWN_BUGS lists only the 430 bug.
+  - feed-400-and-feed-e2e: worktree-agent-a92f9882c986ea5d5 (4e76872, d3dac59, aaf81d5) → merge aa2b3bc. F1: a 400
+    to CHECK/TAKETHIS/IHAVE ends the connection, rest of the batch deferred (failResults); G2-G4 on the real dialer;
+    sender e2e tests on the frozen clock.
+  - relay-e2e: worktree-agent-aac87384dc93dd024 (e2d41ab, b089828) → merge 8499056. G1 TestE2ERelayBinary (~45 s,
+    sender poll 5 s not settable), out_flags limits, exact peer stats.
+  - units: worktree-agent-a31a0d4e04d379fff (816a0e4, 935218e, 9dd52fb) → merge dbb0733. G20 peer address tests
+    (hostsMatch skips unparsable "/" ":" entries instead of DNS); G21 date forms in internal/processor: 3-digit
+    obs-year (≤ next year) and 2-digit 50..68 → 19xx; archiveDateUsable has an upper bound (far-future Date falls
+    back to Date-Received on the archive path).
+  - intake-wire: worktree-agent-a8c791e18d12baa9b (b441809, ca6ca3b) → merge d0717d6. G5-G8, G10-G13; D3 pins on
+    separate connections; `// W2-size` pins; no production change.
+  - fetcher-faults: worktree-agent-a6fe8e16d8b1ae759 (6cdb2e5, 55b7df0) → merge 7380422. G14-G19; bug fixed: a
+    provider capping XHDR records made the fetcher skip the rest of the range and still move the progress (data
+    loss) — XHdrStreamed re-asks after the last record (≤ MaxXHdrReasks=16 per batch), only 423 = empty range,
+    streamXHdr keeps the connection after 423; `// W2-fetch` and `// FU-progress` pins.
+- 2026-11-11: fetch path = relay rules decided; wave 2 paused by go-while after wave 1 ("Not yet").
+- Wave 2 (2026-11-11): slice intake-policy, worktree-agent-a7b93da3cbba71dc9 (577f600, 4c82608, 21d4a81, 6c0f92d,
+  c7a56b8) → merge 36e9cd3; review MERGE AFTER FIXES, all fixed; full list green (33), known bugs: only 430.
+  Migration 0037_main_peers_header_check.sql (peers.header_check default relay; config PeerArticleMaxAgeHours=240
+  (go-while: INN artcutoff 10 days; the plan's "72 h exists" was wrong, peer intake had no past cutoff),
+  PeerArticleMaxFutureHours=24). testing-001 has an unrelated 0038_main_bad_bots_2026_11.sql — filenames are the
+  migration key, never rename 0037. HeaderBlockRelay = innd rules; strict = nnrpd (Path line exempt from 998 for
+  strict peers); unknown mode → strict; fetch keeps bare CR/LF verbatim (malformed lines still dropped) and rejects
+  NUL in the body; D2 NUL body rejected on POST/IHAVE/TAKETHIS; D3 `<` only inside [..]; D4 strict ": " + value;
+  an age refusal is NOT remembered (common.NotRemembered) so raising the limit brings the article back (the future
+  limit still remembers); RelayHeaders relays a bare CR verbatim (only LF/NUL make a block unrelayable); one honest
+  size (IntakeWireSize, un-stuffed, before feedPath / injectProtoArticle) for server, peer and group limits.
+- Inline (2026-11-11, ca8fd36): a date-in-the-future refusal is not remembered either (go-while, after checking
+  INN: innd remembers both date refusals but keeps them only /remember/ days from the article's own date).
+- Wave 3 (2026-11-11): slice helper-cleanup, worktree-agent-ab7b359c3fd539883 (fde4a96, 208024a, 8dd9d1a, fc70b79,
+  e413d04, 06ce771, 9630f2f, 8a44401) → merge b3333b4; 32 test files, -1504/+1022; review MERGE AFTER FIXES, fixed;
+  top-level test names identical (1401), t.Run 148 → 148; full list green; scripts/test-nntp-server.sh on scratch data
+  pass=38 fail=0 (N52 now expects Xref:full; conformance runs in its own group and a run that cannot start fails N50).
+  Kept local (not in kit v0.12.0): adfCronWait, adfTorSilentProxyConns, e2eWaitFor, rfcUpgradeOver/stlsUpgrade,
+  rfcHasLine, thin POST/IHAVE adapters, 381-then-281 login helpers, runIsolated, knownBug, RecordingConn,
+  ParseGroup211/ExpectID, fake SOCKS5. Five missing kit features sent to nntp-testkit-1 (next-batch-ideas.md),
+  incl. check-have/ihave-have re-offer until 438/435 so go-pugleaf can require them.
