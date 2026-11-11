@@ -574,6 +574,7 @@ func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, xh
 
 	currentStart := start
 	var isleep int64 = 10
+	reask := false // the current request continues a reply that looked capped
 	for currentStart <= end {
 		// Check for shutdown signal
 		if c.WantShutdown(shutdownChan) {
@@ -598,7 +599,15 @@ func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, xh
 
 		// Fetch this batch
 		startStream := time.Now()
-		if err := c.XHdrStreamedBatch(groupName, field, currentStart, batchEnd, xhdrChan, shutdownChan); err != nil {
+		highest, capped, err := c.xhdrStreamedBatch(groupName, field, currentStart, batchEnd, xhdrChan, shutdownChan)
+		if err != nil {
+			// A re-asked range the provider has no article in (423/420) is the end of this
+			// batch, not a failure: the numbers above the last record really are gone.
+			if reask && errors.Is(err, ErrNoArticlesInRange) {
+				currentStart = batchEnd + 1
+				reask = false
+				continue
+			}
 			return fmt.Errorf("XHdrStreamedBatch failed for range %d-%d: %w", currentStart, batchEnd, err)
 		}
 		isleep = time.Since(startStream).Milliseconds() / 2
@@ -606,8 +615,25 @@ func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, xh
 			isleep = 10
 		}
 
-		// Move to next batch
-		currentStart = batchEnd + 1
+		// Move to the next batch. A provider that caps the records of one request answers
+		// with the terminating dot after its first N records although the range asked for
+		// more (G15 of plan e2e-gap-tests): continuing at batchEnd+1 would skip the rest of
+		// the range for good and still let the fetcher's progress pass it. So when the reply
+		// looks capped (capped: an unbroken run of numbers from the start of the request that
+		// ends below its end) the next request continues after the last record instead. The
+		// re-ask ends the batch when the provider has no further article (no record, 423 or
+		// 420 above), and it always starts above the current start, so the loop moves on.
+		//
+		// A reply with gaps is a range whose articles are gone, not a capped reply: asking
+		// again would cost a round trip per run without ever finding anything. A provider
+		// that caps a range that also has gaps is therefore not detected (slice report).
+		next := batchEnd + 1
+		reask = false
+		if capped && highest < batchEnd {
+			next = highest + 1
+			reask = true
+		}
+		currentStart = next
 
 	}
 
@@ -616,28 +642,40 @@ func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, xh
 
 // XHdrStreamedBatch performs XHDR command and streams results line by line through a channel
 func (c *BackendConn) XHdrStreamedBatch(groupName, field string, start, end int64, xhdrChan chan<- HeaderLine, shutdownChan <-chan struct{}) error {
+	_, _, err := c.xhdrStreamedBatch(groupName, field, start, end, xhdrChan, shutdownChan)
+	return err
+}
+
+// xhdrStreamedBatch is XHdrStreamedBatch with two facts about the reply that XHdrStreamed
+// needs to tell a provider that capped the records of this request from a range that really
+// ends where the reply ends:
+//
+//	highest: the highest article number streamed (0 when the reply held no usable record)
+//	capped:  the reply is an unbroken run of numbers from start to highest, the shape a
+//	         provider's record cap produces (a reply with gaps is not)
+func (c *BackendConn) xhdrStreamedBatch(groupName, field string, start, end int64, xhdrChan chan<- HeaderLine, shutdownChan <-chan struct{}) (highest int64, capped bool, err error) {
 	if err := validGroupArg(groupName); err != nil {
-		return err
+		return highest, capped, err
 	}
 	if err := validTokenArg(field, false); err != nil {
-		return fmt.Errorf("XHDR field: %w", err)
+		return highest, capped, fmt.Errorf("XHDR field: %w", err)
 	}
 	c.mux.Lock()
 	if !c.IsConnected() {
 		c.mux.Unlock()
-		return fmt.Errorf("not connected")
+		return highest, capped, fmt.Errorf("not connected")
 	}
 	c.mux.Unlock()
 
 	groupInfo, code, err := c.SelectGroup(groupName)
 	if err != nil || groupInfo == nil {
 		if code == 411 {
-			return fmt.Errorf("XHDR group '%s': %w", groupName, ErrNewsgroupNotFound)
+			return highest, capped, fmt.Errorf("XHDR group '%s': %w", groupName, ErrNewsgroupNotFound)
 		}
-		return fmt.Errorf("failed to select group '%s': code=%d err=%w", groupName, code, err)
+		return highest, capped, fmt.Errorf("failed to select group '%s': code=%d err=%w", groupName, code, err)
 	}
 	if end > groupInfo.Last {
-		return ErrOutOfRange
+		return highest, capped, ErrOutOfRange
 	}
 	c.lastUsed = time.Now()
 
@@ -660,7 +698,7 @@ func (c *BackendConn) XHdrStreamedBatch(groupName, field string, start, end int6
 		id, err = c.sendCmd("XHDR %s %d-%d", field, start, start)
 	}
 	if err != nil {
-		return fmt.Errorf("failed to send XHDR command: %w", err)
+		return highest, capped, fmt.Errorf("failed to send XHDR command: %w", err)
 	}
 
 	c.TextConn.StartResponse(id)
@@ -669,37 +707,44 @@ func (c *BackendConn) XHdrStreamedBatch(groupName, field string, start, end int6
 	// Check for shutdown before reading initial response
 	if c.WantShutdown(shutdownChan) {
 		log.Printf("XHdrStreamed: Worker received shutdown signal, stopping")
-		return fmt.Errorf("shutdown requested")
+		return highest, capped, fmt.Errorf("shutdown requested")
 	}
 
 	code, message, err := c.TextConn.ReadCodeLine(221)
 	if err != nil {
 		if code == AuthRequired {
-			return authRequiredErr("XHDR", code, message)
+			return highest, capped, authRequiredErr("XHDR", code, message)
 		}
-		return fmt.Errorf("failed to read XHDR response: %w", err)
+		if code == 423 || code == 420 {
+			// RFC 3977 8.3.2 / RFC 2980: no article in that range. The status line was
+			// read completely, so the connection is still in sync; XHdrStreamed takes it
+			// as the end of a capped range.
+			return highest, capped, fmt.Errorf("XHDR ng '%s': %d %s: %w", groupName, code, strings.TrimSpace(message), ErrNoArticlesInRange)
+		}
+		return highest, capped, fmt.Errorf("failed to read XHDR response: %w", err)
 	}
 
 	if code != 221 {
-		return fmt.Errorf("XHDR failed: ng: '%s' %d %s", groupName, code, message)
+		return highest, capped, fmt.Errorf("XHDR failed: ng: '%s' %d %s", groupName, code, message)
 	}
 
 	// Read multiline response line by line and send to channel immediately.
 	// Every error return leaves the response unread: the pool wrapper
 	// force-closes the connection on any error.
 	var lineCount int64
+	var records int64 // usable records streamed, for capped
 	for {
 		// Check for shutdown signal between reads
 		if c.WantShutdown(shutdownChan) {
 			log.Printf("XHdrStreamed: Worker received shutdown signal, stopping")
-			return fmt.Errorf("shutdown requested")
+			return highest, capped, fmt.Errorf("shutdown requested")
 		}
 
 		line, err := c.TextConn.ReadLine()
 		if err != nil {
 			// a cut-off stream is an error, not a complete result
 			log.Printf("[ERROR] XHdrStreamed read error ng: '%s' err='%v'", groupName, err)
-			return fmt.Errorf("XHDR stream ng '%s': %w", groupName, err)
+			return highest, capped, fmt.Errorf("XHDR stream ng '%s': %w", groupName, err)
 		}
 
 		// Check for end marker
@@ -709,7 +754,7 @@ func (c *BackendConn) XHdrStreamedBatch(groupName, field string, start, end int6
 
 		lineCount++
 		if lineCount > maxLines {
-			return fmt.Errorf("%w: XHDR returned more lines than requested (%d) ng '%s'", ErrResponseTooLarge, maxLines, groupName)
+			return highest, capped, fmt.Errorf("%w: XHDR returned more lines than requested (%d) ng '%s'", ErrResponseTooLarge, maxLines, groupName)
 		}
 
 		// Parse the header line
@@ -724,14 +769,21 @@ func (c *BackendConn) XHdrStreamedBatch(groupName, field string, start, end int6
 
 		if c.WantShutdown(shutdownChan) {
 			log.Printf("XHdrStreamed: Worker received shutdown signal, stopping")
-			return fmt.Errorf("shutdown requested")
+			return highest, capped, fmt.Errorf("shutdown requested")
 		}
 
 		xhdrChan <- header
+		if header.ArticleNum > highest {
+			highest = header.ArticleNum
+		}
+		records++
 	}
 
+	// an unbroken run of numbers from the start of the request: the shape of a capped reply
+	capped = records > 0 && highest == start+records-1
+
 	// Don't close channel here - let the main function handle it
-	return nil
+	return highest, capped, nil
 }
 
 // ListGroup retrieves article numbers for a specific group
