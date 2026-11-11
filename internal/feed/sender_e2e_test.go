@@ -14,6 +14,7 @@ package feed
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -251,6 +252,41 @@ func TestFeedStreamTakethis400EndsConnection(t *testing.T) {
 	sndCheckResult(t, res, 1, c2, 0, OutcomeDefer)
 	if res[1].Err == "" {
 		t.Error("the article behind the 400 came back without a reason")
+	}
+}
+
+// TestFeedIHave400EndsConnection: the IHAVE fallback stops at a 400 as well. The peer takes
+// the first article, answers the second IHAVE "400 going away" and would happily read a third
+// command; the transport must defer the second and the third article and return an error, so
+// the sender drops the connection instead of feeding into a peer that is going away. A 400
+// after the article (instead of the 335) takes the same branch and then counts the octets that
+// were already on the wire; the fake peer cannot answer that way (Faults do not reach the
+// final IHAVE reply), so only this position is on the wire here.
+func TestFeedIHave400EndsConnection(t *testing.T) {
+	e1, e2, e3 := "<fe2e-e1@test.invalid>", "<fe2e-e2@test.invalid>", "<fe2e-e3@test.invalid>"
+	s := fakeserver.NewPeer(t, fakeserver.Options{
+		Deadline: sndWait,
+		Faults:   fakeserver.Faults{OverrideLine: map[string][]string{"IHAVE " + e2: {"400 going away"}}},
+	}, &fakeserver.PeerOptions{NoStream: true})
+	tr := sndDialReal(t, s, nil)
+	if tr.Mode() != "ihave" {
+		t.Fatalf("Mode = %q, want ihave", tr.Mode())
+	}
+	res, offered, err := tr.Send(sndOutgoing(e1, e2, e3))
+	if err == nil {
+		t.Fatal("Send: no error after a 400, so the sender would keep the dead connection")
+	}
+	if offered != 2 {
+		t.Errorf("offered = %d, want the 2 IHAVEs that were answered", offered)
+	}
+	sndCheckResult(t, res, 0, e1, 235, OutcomeDone)
+	sndCheckResult(t, res, 1, e2, 400, OutcomeDefer)
+	sndCheckResult(t, res, 2, e3, 0, OutcomeDefer)
+	if !strings.Contains(res[2].Err, "400") {
+		t.Errorf("the article behind the 400 came back with %q, want the 400 as its reason", res[2].Err)
+	}
+	if n := s.Count("IHAVE"); n != 2 {
+		t.Errorf("the peer saw %d IHAVE(s), want 2: nothing may be offered after the 400", n)
 	}
 }
 
