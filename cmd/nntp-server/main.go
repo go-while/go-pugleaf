@@ -276,7 +276,17 @@ func main() {
 		feedEnq = feed.NewEnqueuer(q, db, feed.EnqueuerConfig{})
 		feedEnq.Start()
 		database.SetFeedHook(feedEnq.Hook())
-		feedSender, err = feed.NewSender(feed.Config{Queue: q, Peers: db, Articles: db, Hostname: processor.LocalNNTPHostname, Stats: peerStats})
+		feedSender, err = feed.NewSender(feed.Config{Queue: q, Peers: db, Articles: db, Hostname: processor.LocalNNTPHostname, Stats: peerStats,
+			// a web post a peer took is out: mark its post_queue entry, so it does not stay pending
+			// when no provider posts it
+			Delivered: func(ids []string) {
+				n, err := db.MarkPostQueueDelivered(ids)
+				if err != nil {
+					log.Printf("[FEED] %v", err)
+				} else if n > 0 {
+					log.Printf("[FEED] %d web post(s) delivered to a peer: marked in the post queue", n)
+				}
+			}})
 		if err != nil {
 			log.Fatalf("[FEED] %v", err)
 		}

@@ -105,6 +105,10 @@ type Config struct {
 	// Stats counts the outgoing traffic per peer and hour (plan peering-stats); nil counts
 	// nothing (peerstats.Nop). The per-peer counters of Stats/feed_stats are kept as well.
 	Stats peerstats.Collector
+	// Delivered is called after each run with the message-ids a peer took (235/239) or
+	// already had (435/438), so the caller can mark a local web post as out (post_queue);
+	// nil: nothing. It runs on the sender's goroutine and must not block for long.
+	Delivered func(messageIDs []string)
 
 	PollInterval   time.Duration
 	ReloadInterval time.Duration
@@ -877,8 +881,9 @@ func (pf *peerFeed) sendRun(t Transport, out []Outgoing, attempts map[string]int
 	res, offered, err := t.Send(out)
 	pf.record(out, res, offered, err == nil, cs)
 	var (
-		done     []string
-		deferred []deferItem
+		done      []string
+		deferred  []deferItem
+		delivered []string
 	)
 	for i, r := range res {
 		id := r.MessageID
@@ -893,9 +898,16 @@ func (pf *peerFeed) sendRun(t Transport, out []Outgoing, attempts map[string]int
 			done = append(done, id)
 		default:
 			done = append(done, id)
+			switch r.Code {
+			case 235, 239, 435, 438: // the peer has the article now
+				delivered = append(delivered, id)
+			}
 		}
 	}
 	pf.finish(done, deferred, attempts)
+	if len(delivered) > 0 && pf.s.cfg.Delivered != nil {
+		pf.s.cfg.Delivered(delivered)
+	}
 	return err == nil, err
 }
 
