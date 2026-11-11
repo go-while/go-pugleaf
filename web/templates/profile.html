@@ -207,16 +207,30 @@
         {{if .NNTPUser}}
         <div class="card mt-3">
             <div class="card-header">
-                <h5 class="card-title mb-0">📰 NNTP Account</h5>
-                <p>
-                    <li>Local NNTP Server Address:</li>
-                    {{.LocalNNTPServerAddr}}
-                </p>
+                <h5 class="card-title mb-0">📰 Newsreader (NNTP) Account</h5>
             </div>
             <div class="card-body">
+                <div class="alert alert-info small">
+                    Your newsreader login is <strong>separate from your website login</strong>.
+                    In your newsreader (Thunderbird, SeaMonkey, slrn, tin, ...) use the
+                    <strong>NNTP username and NNTP password</strong> below, not your web username and password.
+                </div>
                 <dl class="row">
-                    <dt class="col-sm-4">Username:</dt>
+                    {{if .LocalNNTPServerAddr}}
+                    <dt class="col-sm-4">Server:</dt>
+                    <dd class="col-sm-8"><code>{{.LocalNNTPServerAddr}}</code></dd>
+                    {{end}}
+
+                    <dt class="col-sm-4">NNTP username:</dt>
                     <dd class="col-sm-8"><code>{{.NNTPUser.Username}}</code></dd>
+
+                    <dt class="col-sm-4">NNTP password:</dt>
+                    <dd class="col-sm-8">
+                        <span class="text-muted">not shown here.</span>
+                        Click <em>Create new NNTP password</em> below: the new password is shown once,
+                        at the top of this page. Copy it into your newsreader; the previous NNTP password
+                        stops working.
+                    </dd>
 
                     <dt class="col-sm-4">Status:</dt>
                     <dd class="col-sm-8">
@@ -233,10 +247,16 @@
                             <span class="badge bg-success">Allowed</span>
                         {{else}}
                             <span class="badge bg-secondary">Read-Only</span>
+                            <div class="small text-muted mt-1">
+                                This NNTP account can read but not post. The server refuses a post with
+                                "440 posting not permitted", which some newsreaders show as a connection
+                                failure. Ask an administrator to allow posting for your NNTP account.
+                                Posting on the website is not affected.
+                            </div>
                         {{end}}
                     </dd>
 
-                    <dt class="col-sm-4">Max Conns:</dt>
+                    <dt class="col-sm-4">Max. connections:</dt>
                     <dd class="col-sm-8">{{.NNTPUser.MaxConns}}</dd>
 
                     {{if .NNTPUser.LastLogin}}
@@ -251,7 +271,7 @@
                     <input type="hidden" name="reset_nntp_password" value="true">
                     <div class="d-grid">
                         <button type="submit" class="btn btn-outline-warning">
-                            🔄 Reset NNTP Password
+                            🔄 Create new NNTP password
                         </button>
                     </div>
                 </form>

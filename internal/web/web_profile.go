@@ -127,7 +127,7 @@ func (s *WebServer) profileUpdate(c *Context) {
 		// Invalidate auth cache for this user
 		s.DB.InvalidateNNTPUserAuth(nntpUser.Username)
 
-		session.SetSuccess(fmt.Sprintf("NNTP password reset successfully. New password: %s", newNNTPPassword))
+		session.SetSuccess(fmt.Sprintf("New NNTP password: %s (for NNTP username %s). Copy it into your newsreader now: it is not shown again, and the previous NNTP password no longer works.", newNNTPPassword, nntpUser.Username))
 		log.Printf("User %d reseted NNTP password", user.ID)
 		c.Redirect(http.StatusSeeOther, "/profile")
 		return
