@@ -10,7 +10,6 @@ package nntp
 // Identifiers use the sess/TestSess/FuzzSess prefixes (contract K2).
 
 import (
-	"bufio"
 	"bytes"
 	"crypto/ecdsa"
 	"crypto/tls"
@@ -1123,22 +1122,6 @@ func sessFuzzServer(f *testing.F) *hServer {
 	return hs
 }
 
-// sessDialRaw connects without tracking (fuzz inputs close their own conns).
-func sessDialRaw(addr string, d time.Duration) (*client.Conn, error) {
-	conn, err := net.DialTimeout("tcp", addr, d)
-	if err != nil {
-		return nil, err
-	}
-	c := &client.Conn{Conn: conn, R: bufio.NewReader(conn), Deadline: d, Strict: true}
-	g, err := c.ReadLine()
-	if err != nil {
-		_ = conn.Close()
-		return nil, fmt.Errorf("greeting: %w", err)
-	}
-	c.Greeting = g
-	return c, nil
-}
-
 func FuzzSessCommandLine(f *testing.F) {
 	for _, s := range []string{
 		"", " ", "\t", "foo", "quit", "QUIT now", "MODE", "MODE READER", "mode stream", "MODE FOO",
@@ -1162,7 +1145,8 @@ func FuzzSessCommandLine(f *testing.F) {
 		if sessFuzzSkip[verb] {
 			t.Skip("verb reads more than one line or creates group DBs")
 		}
-		c, err := sessDialRaw(hs.Addr, hDeadline)
+		// client.TryDial: no tb and no tracking, the fuzz inputs close their own conns
+		c, err := client.TryDial(hs.Addr, hDeadline)
 		if err != nil {
 			t.Fatalf("dial: %v", err)
 		}

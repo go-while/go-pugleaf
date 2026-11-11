@@ -149,33 +149,30 @@ func psServer(t *testing.T, proc ArticleProcessor, reg *PeerRegistry) (*hServer,
 	return hs, col
 }
 
-// psArticle is the wire form of one article (CRLF lines and the terminator).
-func psArticle(group, id string) string {
-	return "Path: peer.ps.invalid!not-for-mail\r\n" +
+// psArticleRaw is one article as the kit transfer commands take it: CRLF line ends, not
+// dot-stuffed, no terminator.
+func psArticleRaw(group, id string) []byte {
+	return []byte("Path: peer.ps.invalid!not-for-mail\r\n" +
 		"From: Tester <tester@test.invalid>\r\n" +
 		"Newsgroups: " + group + "\r\n" +
 		"Subject: ps\r\n" +
 		"Date: " + time.Now().UTC().Format(time.RFC1123Z) + "\r\n" +
 		"Message-ID: " + id + "\r\n" +
 		"\r\n" +
-		"a body line\r\n" +
-		".\r\n"
+		"a body line\r\n")
 }
 
-// psIHave sends IHAVE and, after a 335, the article; it returns the final status.
+// psArticle is psArticleRaw in the form a client sends after IHAVE or TAKETHIS: dot-stuffed
+// and with the terminating ".\r\n" (kit client.StuffBytes).
+func psArticle(group, id string) string {
+	return string(client.StuffBytes(psArticleRaw(group, id)))
+}
+
+// psIHave sends IHAVE and, after a 335, the article; it returns the final status (or the
+// first reply when the article was refused before the transfer).
 func psIHave(t *testing.T, c *client.Conn, group, id string) (int, string) {
 	t.Helper()
-	code, line := c.Cmd("IHAVE %s", id)
-	if code != 335 {
-		return code, line
-	}
-	if err := c.Send(psArticle(group, id)); err != nil {
-		t.Fatalf("send IHAVE article: %v", err)
-	}
-	code, line, err := c.ReadStatus()
-	if err != nil {
-		t.Fatalf("IHAVE reply: %v (%q)", err, line)
-	}
+	code, line, _ := c.Ihave(id, psArticleRaw(group, id))
 	return code, line
 }
 
