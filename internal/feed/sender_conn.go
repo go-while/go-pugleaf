@@ -268,8 +268,17 @@ func (t *streamTransport) Send(arts []Outgoing) ([]Result, int, error) {
 			wanted = append(wanted, i)
 		case 438, 435: // the peer has it
 			res[i] = Result{MessageID: id, Code: code, Outcome: OutcomeDone}
-		case 431, 400: // try again later
+		case 431: // try again later
 			res[i] = Result{MessageID: id, Code: code, Outcome: OutcomeDefer, Err: fmt.Sprintf("CHECK %d", code)}
+		case 400:
+			// The peer is going away (RFC 3977 3.2.1, RFC 4644 2.3): nothing more may be
+			// offered on this connection. This article and every later one of the batch come
+			// back later, and the error tells the sender to close the connection and redial
+			// with its backoff instead of writing into a dead one.
+			res[i] = Result{MessageID: id, Code: code, Outcome: OutcomeDefer, Err: fmt.Sprintf("CHECK %d", code)}
+			err := fmt.Errorf("feed: peer %s: CHECK %s answered 400: the peer is going away", t.peerName, id)
+			t.fail(res, checked[n:], err)
+			return res, offered, err
 		case 439, 437: // refused by id
 			res[i] = Result{MessageID: id, Code: code, Outcome: OutcomeDone}
 		default:
@@ -321,8 +330,15 @@ func (t *streamTransport) Send(arts []Outgoing) ([]Result, int, error) {
 			res[i] = Result{MessageID: id, Code: code, Outcome: OutcomeDone, Transferred: true}
 		case 438, 435: // the peer got it meanwhile
 			res[i] = Result{MessageID: id, Code: code, Outcome: OutcomeDone, Transferred: true}
-		case 431, 436, 400:
+		case 431, 436:
 			res[i] = Result{MessageID: id, Code: code, Outcome: OutcomeDefer, Transferred: true, Err: fmt.Sprintf("TAKETHIS %d", code)}
+		case 400:
+			// As in the CHECK loop: the peer is going away, so the rest of the batch is
+			// deferred and the connection is dropped by the sender.
+			res[i] = Result{MessageID: id, Code: code, Outcome: OutcomeDefer, Transferred: true, Err: fmt.Sprintf("TAKETHIS %d", code)}
+			err := fmt.Errorf("feed: peer %s: TAKETHIS %s answered 400: the peer is going away", t.peerName, id)
+			t.fail(res, taken[n:], err)
+			return res, offered, err
 		default:
 			err := denied(code, fmt.Errorf("feed: peer %s: TAKETHIS %s answered %d", t.peerName, id, code))
 			t.fail(res, taken[n:], err)
