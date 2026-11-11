@@ -36,11 +36,14 @@ type fe2eFixture struct {
 	q     *SQLiteQueue
 	peers *sndPeerSource
 	arts  *sndArticles
+	clock *sndClock
 }
 
-// fe2eSender wires a sender to the fake peer srv. The retry backoff is as short as the queue
-// can express (next_attempt has a one-second granularity), so a test that waits for the second
-// connection does not wait for a real backoff.
+// fe2eSender wires a sender to the fake peer srv. The sender and the queue share one frozen
+// clock, so the stored times never depend on when the test runs: a deferred item's
+// next_attempt is the backoff below on top of that fixed "now", and the queue stores seconds,
+// so it is due again on the next claim. No test here needs the clock to move; one that does
+// has to advance it itself.
 func fe2eSender(t *testing.T, tune func(*Config)) *fe2eFixture {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "feed-queue.sq3")
@@ -53,12 +56,14 @@ func fe2eSender(t *testing.T, tune func(*Config)) *fe2eFixture {
 			t.Errorf("queue Close: %v", err)
 		}
 	})
-	f := &fe2eFixture{q: q, peers: &sndPeerSource{}, arts: newSndArticles()}
+	f := &fe2eFixture{q: q, peers: &sndPeerSource{}, arts: newSndArticles(), clock: newSndClock()}
+	q.now = f.clock.Now
 	cfg := Config{
 		Queue:          q,
 		Peers:          f.peers,
 		Articles:       f.arts,
 		Hostname:       sndIdentity,
+		Clock:          f.clock,
 		PollInterval:   time.Millisecond,
 		ReloadInterval: time.Hour, // the peer list is read once, by Start
 		StatsInterval:  time.Hour, // the counters are flushed by Stop
@@ -422,7 +427,7 @@ func TestFeedSenderSmallBatchWindow(t *testing.T) {
 				}
 				return n == 0
 			})
-			f.s.Stop()
+			fe2eStop(t, f.s)
 
 			if n := s.Count("CHECK"); n != len(ids) {
 				t.Errorf("the peer saw %d CHECK(s), want %d", n, len(ids))
