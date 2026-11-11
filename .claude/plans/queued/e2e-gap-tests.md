@@ -48,7 +48,16 @@ D1 and D4: go-while asked to mirror INN after checking with inn-1 (room `inn-`).
   `X: ` empty passes the parse); whitespace inside a non-system field name → 437 "Space before colon".
 - nnrpd (POST): header line > 998 → "Header line too long"; `IsValidHeaderField` needs exactly `": "` and a
   valid non-empty body.
-So INN = strict POST, relay-lax peers, but colon + whitespace required for peers too. Pending inn-1's confirm.
+So INN = strict POST, relay-lax peers, but colon + whitespace required for peers too.
+inn-1 confirmed 2026-11-11 (innd/art.c @ 6843efceb) and added: required fields (Date, From, Message-ID,
+Newsgroups, Path, Subject; missing or duplicate → 437); Message-ID valid and ≤ 250 octets; Date must parse
+(parsedate_rfc5322_lax), Injection-Date too if present; age/future limits are optional config only (artcutoff,
+DATE_FUZZ); do NOT reject 8-bit bytes or control characters other than NUL on the relay path.
+**Proposed D1/D4 (mirror innd, needs go-while's OK):** peer intake drops the 998 limit, accepts bare CR and bare
+LF inside header lines (logged with a counter, stored verbatim), accepts colon + SP or HTAB and an empty value,
+keeps NUL / missing or duplicate required fields / Message-ID / Date-parse rejects. POST mirrors nnrpd: ≤ 998,
+exactly `": "`, non-empty value. Open sub-question: go-pugleaf's 72h-stale / 24h-future Date check on peers is
+stricter than innd's default (optional there) — keep or make it a setting.
 
 | # | Question | Today | Recommendation |
 |---|---|---|---|
