@@ -366,7 +366,7 @@ func importPlanned(inputs []plannedInput, opts *runOptions, sink articleSink, st
 				default:
 				}
 				o := &outcomes[i]
-				in := inputs[i]
+				in := statPlanned(inputs[i]) // the file is looked at on disk only now
 				if !in.Supported {
 					if err := track.recordPlanned(in); err != nil {
 						track.trackErr(fmt.Sprintf("input %q", in.Path), err)

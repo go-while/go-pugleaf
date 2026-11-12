@@ -479,11 +479,13 @@ not the same:
 Supported names are the ones the importer reads anyway (`.mbox`, `.bag`, `.mbox.gz`, `.mbox.zip`,
 `.mbox.7z`, `.usenet`, `.usenet.xz`, `.usenet.7z`, and the disc images `.iso`, `.cdr`, `.sqsh`,
 `.img`), decided by the file's base name. A `.done` name is not an input, for an image either.
-Every scan logs what it found and what it did with it:
+A scan reads iafetch's database only and looks at no file on disk: each file is checked (exists,
+size as recorded) when a worker reaches it, so the first import starts right after the scan and a
+missing file only shows up as `pending` in the totals. Every scan logs what it found and what it did
+with it:
 
 ```
-[MBOX-IMPORT] scan 1: 2613 planned input(s): supported=2495 pending=3 unsupported=115
-[MBOX-IMPORT] scan 1: pending missing=3
+[MBOX-IMPORT] scan 1: 2613 planned input(s): supported=2498 pending=0 unsupported=115
 [MBOX-IMPORT] scan 1: unsupported txt=38 xml=5 unsupported-suffix=72
 [MBOX-IMPORT] scan 1 done: imported=2495 already-imported=0 pending=3 unsupported=115 held-by-another-run=0 md5-stopped=0 input-errors=0 read=… stored=… present=… errors=0
 ```
