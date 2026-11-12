@@ -203,13 +203,13 @@ func TestMboxDiscUnpack(t *testing.T) {
 
 	for _, c := range []struct {
 		name  string
-		build func() string
+		build func(t *testing.T) string
 	}{
-		{"iso", func() string { return dcMakeISO(t, tree, filepath.Join(dir, "spool.iso")) }},
-		{"sqsh", func() string { return dcMakeSquashfs(t, tree, filepath.Join(dir, "spool.sqsh")) }},
+		{"iso", func(t *testing.T) string { return dcMakeISO(t, tree, filepath.Join(dir, "spool.iso")) }},
+		{"sqsh", func(t *testing.T) string { return dcMakeSquashfs(t, tree, filepath.Join(dir, "spool.sqsh")) }},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			image := c.build()
+			image := c.build(t)
 			tmp := t.TempDir()
 			opts := &runOptions{sevenZip: "7z", tmpDir: tmp}
 			fsys, release, err := openSpool(image, spoolDisc, opts, nil)
@@ -263,13 +263,13 @@ func TestMboxDiscDangerousLink(t *testing.T) {
 
 	for _, c := range []struct {
 		name  string
-		build func() string
+		build func(t *testing.T) string
 	}{
-		{"iso", func() string { return dcMakeISO(t, tree, filepath.Join(dir, "links.iso")) }},
-		{"sqsh", func() string { return dcMakeSquashfs(t, tree, filepath.Join(dir, "links.sqsh")) }},
+		{"iso", func(t *testing.T) string { return dcMakeISO(t, tree, filepath.Join(dir, "links.iso")) }},
+		{"sqsh", func(t *testing.T) string { return dcMakeSquashfs(t, tree, filepath.Join(dir, "links.sqsh")) }},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			image := c.build()
+			image := c.build(t)
 			tmp := t.TempDir()
 			var buf bytes.Buffer
 			log.SetOutput(&buf)
@@ -320,6 +320,7 @@ func TestMboxDiscUnpackResult(t *testing.T) {
 		{"warnings", 1, "WARNING: cannot read something\n", false, true},
 		{"refused link", 2, dangerous, false, true},
 		{"refused links, partial write", 2, dangerous + "ERROR: Dangerous link path was ignored : a : ../b", false, true},
+		{"refused link, older 7-Zip wording", 2, "ERROR: Dangerous symbolic link path was ignored : SPOOL/alt/test/link : ../../../other/9\n", false, true},
 		{"refused link, nothing extracted", 2, dangerous, true, false},
 		{"refused link and a real error", 2, dangerous + "ERRORS:\nUnexpected end of archive\n", false, false},
 		{"cannot open the archive", 2, "ERROR: x.iso\nCannot open the file as archive\n", true, false},
