@@ -122,6 +122,39 @@ type BackendConn struct {
 	// raw (NNTP) stream and the wire stream; they differ only with COMPRESS
 	// DEFLATE (nntp-client-compress.go).
 	counters byteCounters
+
+	// sock is the socket Connect dialed, with its own mutex: CloseNow closes it
+	// without taking c.mux, which a running command holds.
+	sockMux sync.Mutex
+	sock    net.Conn
+}
+
+// setSock remembers the dialed socket for CloseNow.
+func (c *BackendConn) setSock(s net.Conn) {
+	c.sockMux.Lock()
+	c.sock = s
+	c.sockMux.Unlock()
+}
+
+// CloseNow marks the connection unusable (ForceCloseConn) and closes its socket
+// without taking the connection's lock, so a Read or Write that is blocked
+// inside a command returns at once instead of after the idle deadline. It is the
+// close of a caller that cannot wait: ForceCloseConn alone hands the connection
+// to a goroutine that first has to take c.mux, which the running command holds
+// (PostArticleContext does the same two steps for its context).
+//
+// It is safe to call it from another goroutine while a command runs and more
+// than once; the command then fails with a closed-connection error. The socket
+// closed here is the one Connect dialed, under the COMPRESS DEFLATE layer when
+// one was put on top, so closing it ends the connection either way.
+func (c *BackendConn) CloseNow() {
+	c.sockMux.Lock()
+	s := c.sock
+	c.sockMux.Unlock()
+	c.ForceCloseConn() // never hand it out again; its goroutine waits for c.mux
+	if s != nil {
+		_ = s.Close()
+	}
 }
 
 // TxBytesRaw returns the octets this connection sent as the NNTP layer wrote
@@ -317,6 +350,7 @@ func (c *BackendConn) Connect() error {
 
 	// Until the connection is ready, every Read/Write (greeting, AUTHINFO) is
 	// bounded by ConnectTimeout; the idle timeouts are set at the end.
+	c.setSock(conn) // for CloseNow, which must not wait for c.mux
 	dc := newDeadlineConn(conn, c.Backend.ConnectTimeout, c.Backend.ConnectTimeout)
 	maxLine := c.Backend.MaxResponseLineBytes // < 0: unlimited (setMaxLine treats <= 0 as no cap)
 	if maxLine == 0 {

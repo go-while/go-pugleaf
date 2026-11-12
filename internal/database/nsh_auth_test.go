@@ -262,6 +262,33 @@ func TestNSHAuthWebUserIDLookup(t *testing.T) {
 	if auto.MaxConns != DefaultNNTPUserMaxConns {
 		t.Fatalf("CreateNNTPUserForWebUser maxconns = %d, want %d", auto.MaxConns, DefaultNNTPUserMaxConns)
 	}
+	// It may post when the web user may post (no_posting = 0) ...
+	if web2.NoPosting != 0 {
+		t.Fatalf("precondition: w1APIUser no_posting = %d, want 0", web2.NoPosting)
+	}
+	if !auto.Posting {
+		t.Fatal("automatic NNTP account of a web user that may post is read-only, want posting")
+	}
+	// ... and stays read-only for a web user with no_posting = 1.
+	web3 := w1APIUser(t)
+	if _, err := RetryableExec(db.GetMainDB(), "UPDATE users SET no_posting = 1 WHERE id = ?", web3.ID); err != nil {
+		t.Fatalf("set no_posting: %v", err)
+	}
+	if err := db.CreateNNTPUserForWebUser(web3.ID); err != nil {
+		t.Fatalf("CreateNNTPUserForWebUser(no_posting): %v", err)
+	}
+	ro, err := db.GetNNTPUserByWebUserID(web3.ID)
+	if err != nil {
+		t.Fatalf("GetNNTPUserByWebUserID(no_posting): %v", err)
+	}
+	t.Cleanup(func() {
+		if err := db.DeleteNNTPUser(ro.ID); err != nil {
+			t.Logf("cleanup DeleteNNTPUser(%d): %v", ro.ID, err)
+		}
+	})
+	if ro.Posting {
+		t.Fatal("automatic NNTP account of a no_posting web user may post, want read-only")
+	}
 }
 
 // TestNSHAuthAnyState (A-ops-9): an inactive user is invisible to the login lookup

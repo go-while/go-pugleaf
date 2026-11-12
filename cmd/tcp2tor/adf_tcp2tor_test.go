@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"strconv"
@@ -11,21 +12,30 @@ import (
 	"testing"
 	"time"
 
+	testkit "github.com/go-while/nntp-testkit"
+	"github.com/go-while/nntp-testkit/fakeserver"
 	"golang.org/x/net/proxy"
 )
 
 // testWait is the hang guard for events a test expects (Serve returning, a connection closing, a
 // forwarded dial). It only stops a hung test; a passing test never waits on it. Override with
-// PUGLEAF_TEST_DEADLINE (a Go duration, e.g. 120s). Plan test-timing-hardening D3.
-var testWait = testWaitFromEnv(60 * time.Second)
+// PUGLEAF_TEST_DEADLINE (a Go duration, e.g. 120s). Plan test-timing-hardening D3. It is
+// testkit.Deadline(), so the kit's own hang guards (fakeserver) use the same value.
+var testWait = testDeadline()
 
-func testWaitFromEnv(def time.Duration) time.Duration {
-	if v := os.Getenv("PUGLEAF_TEST_DEADLINE"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil && d > 0 {
-			return d
+// testDeadline hands PUGLEAF_TEST_DEADLINE to the kit, which reads only NNTP_TEST_DEADLINE
+// (testkit.EnvDeadline), and returns the kit's hang guard. An NNTP_TEST_DEADLINE set by the
+// caller wins. The mapping lives in this initialiser, not in a TestMain, because testWait is a
+// package variable: Go evaluates those before TestMain would run. Plan e2e-gap-tests wave 3.
+func testDeadline() time.Duration {
+	if os.Getenv(testkit.EnvDeadline) == "" {
+		if v := os.Getenv("PUGLEAF_TEST_DEADLINE"); v != "" {
+			if err := os.Setenv(testkit.EnvDeadline, v); err != nil {
+				fmt.Fprintln(os.Stderr, "[TCP2TOR-TEST] Setenv "+testkit.EnvDeadline+":", err)
+			}
 		}
 	}
-	return def
+	return testkit.Deadline()
 }
 
 // adfTorWithin runs fn in a goroutine and returns its error, or fails the test when fn has not
@@ -53,17 +63,20 @@ func adfTorIsTimeout(err error) bool {
 	return errors.As(err, &ne) && ne.Timeout()
 }
 
-// adfTorSilentProxy starts a listener on 127.0.0.1:0 that accepts connections and never writes,
-// standing in for a SOCKS5 proxy that hangs during the handshake. Everything is closed in cleanup.
+// adfTorSilentProxy is the kit's stalling server (fakeserver Options.RawStall: it accepts and
+// never writes), standing in for a SOCKS5 proxy that hangs during the handshake. The kit closes
+// the listener and every connection when the test ends.
 func adfTorSilentProxy(t *testing.T) *ProxyConfig {
 	t.Helper()
-	cfg, _ := adfTorSilentProxyConns(t)
-	return cfg
+	s := fakeserver.New(t, fakeserver.Options{RawStall: true, Deadline: testWait})
+	return &ProxyConfig{SocksHost: s.Host(), SocksPort: s.Port()}
 }
 
 // adfTorSilentProxyConns is adfTorSilentProxy that also hands every accepted connection to the
 // returned channel (buffered; connections beyond its capacity are not reported), so a test can
 // wait until a dialer is inside the SOCKS5 handshake and watch that connection being closed.
+// It stays a hand-written listener: the kit's RawStall server does not hand out the
+// connections it accepted.
 func adfTorSilentProxyConns(t *testing.T) (*ProxyConfig, <-chan net.Conn) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

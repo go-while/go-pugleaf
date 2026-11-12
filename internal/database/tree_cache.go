@@ -3,6 +3,7 @@ package database
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -100,8 +101,15 @@ func (db *Database) BuildThreadTree(groupDB *GroupDB, threadRoot int64) (*Thread
 	// Get overview data for all articles to access References headers
 	overviews := make(map[int64]*models.Overview)
 	for _, artNum := range allArticles {
-		if overview, err := db.GetOverviewByArticleNum(groupDB, artNum); err == nil {
+		overview, err := db.GetOverviewByArticleNum(groupDB, artNum)
+		if err == nil {
 			overviews[artNum] = overview
+			continue
+		}
+		// A missing child is left out; the root decides: no row is "not found" (the web
+		// page answers 404), any other error is a real failure.
+		if artNum == threadRoot && !errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("root article %d: %w", threadRoot, err)
 		}
 	}
 
@@ -135,7 +143,7 @@ func (db *Database) BuildThreadTree(groupDB *GroupDB, threadRoot int64) (*Thread
 func buildTreeFromOverviews(threadRoot int64, ov map[int64]*models.Overview) (*ThreadTree, error) {
 	rootOv, ok := ov[threadRoot]
 	if !ok {
-		return nil, fmt.Errorf("root article %d not found in overviews (may be missing from DB)", threadRoot)
+		return nil, fmt.Errorf("root article %d: %w", threadRoot, ErrArticleNotFound)
 	}
 
 	nums := make([]int64, 0, len(ov))

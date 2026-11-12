@@ -128,7 +128,7 @@
                             </small>
                             </code>
                             <br>
-                            <span class="text-muted">Set the maximum size limit for articles posted via web interface</span>
+                            <span class="text-muted">Largest article for web posts and for nntp-server (POST, and peers without their own limit); nntp-server follows it live unless it runs with -maxartsize</span>
                         </td>
                         <td>
                             <form action="/admin/settings" method="post" class="d-flex gap-1">
@@ -157,6 +157,47 @@
                                 <input type="number" class="form-control form-control-sm" name="{{.FormFieldMaxCrossPosts}}"
                                         placeholder="9"
                                         value="{{.MaxCrossPosts}}" min="1" max="{{.MaxCrossPostsLimit}}" style="min-width: 100px;">
+                                <button type="submit" class="btn btn-outline-secondary btn-sm">
+                                    <i class="bi bi-gear"></i>
+                                </button>
+                            </form>
+                        </td>
+                    </tr>
+
+                    <!-- Peer intake Date limits (INN artcutoff / DATE_FUZZ) -->
+                    <tr>
+                        <td>
+                            <strong>⏳ Peer article age limit:</strong>
+                            <code>{{if .PeerDateMaxAgeHours}}{{.PeerDateMaxAgeHours}} hours{{else}}off{{end}}</code>
+                            <br>
+                            <span class="text-muted">An article a peer feeds us (IHAVE/TAKETHIS) whose Date (or Injection-Date) is older is rejected, like INN's artcutoff (default 240 = 10 days, 0 = no cutoff, at most {{.PeerDateHoursLimit}} hours; the NNTP server picks a change up within 5 minutes). A node that receives archive transfers should set 0; a date refusal (too old or in the future) is never remembered, so raising the limit brings those articles back.</span>
+                        </td>
+                        <td>
+                            <form action="/admin/settings" method="post" class="d-flex gap-1">
+                                <input type="hidden" name="setting" value="{{.FormFieldPeerDateMaxAge}}">
+                                <input type="number" class="form-control form-control-sm" name="{{.FormFieldPeerDateMaxAge}}"
+                                        placeholder="240"
+                                        value="{{.PeerDateMaxAgeHours}}" min="0" max="{{.PeerDateHoursLimit}}" style="min-width: 100px;">
+                                <button type="submit" class="btn btn-outline-secondary btn-sm">
+                                    <i class="bi bi-gear"></i>
+                                </button>
+                            </form>
+                        </td>
+                    </tr>
+
+                    <tr>
+                        <td>
+                            <strong>⏭️ Peer article future limit:</strong>
+                            <code>{{if .PeerDateMaxFutureHours}}{{.PeerDateMaxFutureHours}} hours{{else}}off{{end}}</code>
+                            <br>
+                            <span class="text-muted">An article a peer feeds us that is dated further in the future is rejected, like INN's DATE_FUZZ (0 = no limit, at most {{.PeerDateHoursLimit}} hours)</span>
+                        </td>
+                        <td>
+                            <form action="/admin/settings" method="post" class="d-flex gap-1">
+                                <input type="hidden" name="setting" value="{{.FormFieldPeerDateMaxFuture}}">
+                                <input type="number" class="form-control form-control-sm" name="{{.FormFieldPeerDateMaxFuture}}"
+                                        placeholder="24"
+                                        value="{{.PeerDateMaxFutureHours}}" min="0" max="{{.PeerDateHoursLimit}}" style="min-width: 100px;">
                                 <button type="submit" class="btn btn-outline-secondary btn-sm">
                                     <i class="bi bi-gear"></i>
                                 </button>
@@ -384,6 +425,63 @@
                                 </div>
                             </td>
                         </tr>
+                        <tr>
+                            <td>
+                                <strong>Fix Newsgroup Activity (FNA), all newsgroups</strong>
+                                <br>
+                                <span class="text-muted">Sets the last activity of every newsgroup with articles to its
+                                    newest visible article, e.g. after importing old articles. Runs in the background;
+                                    the groups tab keeps a per-group FNA button, and
+                                    <code>-update-newsgroups-activity N</code> does the same offline.</span>
+                            </td>
+                            <td>
+                                <form method="POST" action="/admin/maintenance/start" class="d-inline">
+                                    <input type="hidden" name="job" value="FNA">
+                                    <button type="submit" class="btn btn-outline-primary btn-sm text-nowrap"
+                                            {{if .Maintenance.Running}}disabled{{end}}>
+                                        <i class="bi bi-clock me-1"></i>FNA all groups
+                                    </button>
+                                </form>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>
+                                <strong>Fix Thread Activity (FTA), all newsgroups</strong>
+                                <br>
+                                <span class="text-muted">Sets the last activity of every thread to its newest visible
+                                    article, in every newsgroup with articles. Runs in the background; the groups tab
+                                    keeps a per-group FTA button.</span>
+                            </td>
+                            <td>
+                                <form method="POST" action="/admin/maintenance/start" class="d-inline">
+                                    <input type="hidden" name="job" value="FTA">
+                                    <button type="submit" class="btn btn-outline-info btn-sm text-nowrap"
+                                            {{if .Maintenance.Running}}disabled{{end}}>
+                                        <i class="bi bi-arrow-clockwise me-1"></i>FTA all groups
+                                    </button>
+                                </form>
+                            </td>
+                        </tr>
+                        {{if .Maintenance.Kind}}
+                        <tr>
+                            <td>
+                                <strong>{{.Maintenance.Kind}} {{if .Maintenance.Running}}running{{else if .Maintenance.Stopped}}stopped{{else}}finished{{end}}</strong>
+                                <br>
+                                <span class="text-muted">{{.Maintenance.Processed}} / {{.Maintenance.Total}} newsgroups,
+                                    {{.Maintenance.Updated}} updated, {{.Maintenance.Failed}} failed;
+                                    started {{.Maintenance.Started.Format "2006-01-02 15:04:05"}}{{if not .Maintenance.Running}},
+                                    ended {{.Maintenance.Finished.Format "2006-01-02 15:04:05"}}{{end}}
+                                    (reload the page for the current numbers)</span>
+                            </td>
+                            <td>
+                                {{if .Maintenance.Running}}
+                                <form method="POST" action="/admin/maintenance/stop" class="d-inline">
+                                    <button type="submit" class="btn btn-outline-danger btn-sm">Stop</button>
+                                </form>
+                                {{end}}
+                            </td>
+                        </tr>
+                        {{end}}
                     </tbody>
                 </table>
             </div>

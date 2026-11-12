@@ -1,10 +1,14 @@
 package main
 
 import (
+	"database/sql"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/go-while/go-pugleaf/internal/database"
+	"github.com/go-while/go-pugleaf/internal/models"
 )
 
 func TestAdfRecoverResolveDataDir(t *testing.T) {
@@ -103,5 +107,124 @@ func TestAdfRecoverShouldRewrite(t *testing.T) {
 				t.Fatalf("shouldRewrite(%v, %v, %v) = %v, want %v", tc.ok, tc.reparsed, stored, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestAdfRecoverReorderRebuildsThreads drives -reorder-by-datesent end to end on a scratch
+// data root (adfOptOpenDB, below t.TempDir()): it renumbers a group's articles by date_sent
+// into the .new database and rebuilds that database's threads with RebuildThreadsFromScratch
+// (internal/database/db_rescan.go). This is the optional test of slice "rebuild" of
+// .claude/plans/wip/thread-orphan-followups.md: the follow-up whose References name an
+// article of another group is a thread root here, and the parent/child pairs are the new
+// article numbers.
+func TestAdfRecoverReorderRebuildsThreads(t *testing.T) {
+	db := adfOptOpenDB(t)
+	const group = "adf.recover.reorder"
+	if err := db.InsertNewsgroup(&models.Newsgroup{Name: group, Active: true}); err != nil {
+		t.Fatalf("InsertNewsgroup %s: %v", group, err)
+	}
+	gdb, err := db.GetGroupDB(group)
+	if err != nil {
+		t.Fatalf("GetGroupDB %s: %v", group, err)
+	}
+	// The source numbers are in the wrong order on purpose: article 1 is the newest.
+	arts := []struct {
+		num            int64
+		mid, refs, day string
+	}{
+		{1, "<reply@adf-reorder>", "<root@adf-reorder>", "2024-02-01"},
+		{2, "<root@adf-reorder>", "", "2024-01-01"},
+		{3, "<orphan@adf-reorder>", "<elsewhere@other.group>", "2024-03-01"},
+	}
+	for _, art := range arts {
+		if _, err := gdb.DB.Exec(
+			`INSERT INTO articles (article_num, message_id, subject, from_header, date_sent, date_string, "references", bytes, lines, path, headers_json, body_text, downloaded)
+			 VALUES (?, ?, 'adf reorder', 'tester@adf.invalid', ?, ?, ?, 1, 1, 'not-for-mail', '', 'body', 1)`,
+			art.num, art.mid, art.day+" 10:00:00", art.day, art.refs,
+		); err != nil {
+			gdb.Return()
+			t.Fatalf("insert article %d: %v", art.num, err)
+		}
+	}
+	gdb.Return() // reorderSingleNewsgroup opens (and force-closes) the source itself
+
+	processed, err := reorderSingleNewsgroup(db, group, false)
+	if err != nil {
+		t.Fatalf("reorderSingleNewsgroup(%s): %v", group, err)
+	}
+	if processed != int64(len(arts)) {
+		t.Fatalf("reordered %d articles, want %d", processed, len(arts))
+	}
+
+	// Reopen the .new database the reorder wrote and read what the rebuild put there.
+	destDB, destPath, err := db.GetGroupDBWithSuffix(group, "new")
+	if err != nil {
+		t.Fatalf("GetGroupDBWithSuffix(%s, new): %v", group, err)
+	}
+	defer func() {
+		if err := database.CloseGroupDBDirectly(destDB); err != nil {
+			t.Errorf("close %s: %v", destPath, err)
+		}
+	}()
+
+	nums := make(map[string]int64, len(arts))
+	rows, err := destDB.Query("SELECT message_id, article_num FROM articles")
+	if err != nil {
+		t.Fatalf("select articles of %s: %v", destPath, err)
+	}
+	for rows.Next() {
+		var mid string
+		var num int64
+		if err := rows.Scan(&mid, &num); err != nil {
+			rows.Close()
+			t.Fatalf("scan article: %v", err)
+		}
+		nums[mid] = num
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate articles: %v", err)
+	}
+	// Renumbered by date_sent: the root, then its reply, then the orphan follow-up.
+	for mid, want := range map[string]int64{
+		"<root@adf-reorder>":   1,
+		"<reply@adf-reorder>":  2,
+		"<orphan@adf-reorder>": 3,
+	} {
+		if nums[mid] != want {
+			t.Fatalf("article_num of %s = %d, want %d (all: %v)", mid, nums[mid], want, nums)
+		}
+	}
+
+	type threadRow struct {
+		root, parent, child int64
+		depth               int
+	}
+	var got []threadRow
+	rows, err = destDB.Query("SELECT root_article, parent_article, child_article, depth FROM threads ORDER BY child_article")
+	if err != nil {
+		t.Fatalf("select threads of %s: %v", destPath, err)
+	}
+	for rows.Next() {
+		var row threadRow
+		var parent sql.NullInt64
+		if err := rows.Scan(&row.root, &parent, &row.child, &row.depth); err != nil {
+			rows.Close()
+			t.Fatalf("scan threads row: %v", err)
+		}
+		row.parent = parent.Int64 // NULL -> 0
+		got = append(got, row)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate threads: %v", err)
+	}
+	want := []threadRow{
+		{root: 1, parent: 0, child: 1, depth: 0}, // the root
+		{root: 1, parent: 1, child: 2, depth: 1}, // its reply
+		{root: 3, parent: 0, child: 3, depth: 0}, // the follow-up of another group's thread
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("threads rows = %v, want %v", got, want)
 	}
 }

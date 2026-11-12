@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/go-while/go-pugleaf/internal/common"
 	"github.com/go-while/go-pugleaf/internal/models"
 	"github.com/go-while/go-pugleaf/internal/nntp"
+	"github.com/go-while/go-pugleaf/internal/processor"
 )
 
 // skipReason says why an article of the input was not handed to the processor.
@@ -24,10 +26,16 @@ const (
 	skipTooManyHeaders
 	skipNoNewsgroups
 	skipBadGroup
+	skipTooBig
+	skipLast = skipTooBig // the last reason, for loops over all of them
 )
 
 // maxHeaderLines is the most header lines (continuations included) an article may have.
 const maxHeaderLines = 256
+
+// defaultMaxArticleSize is the default of -max-article-size (mbox2nntp's cap: text
+// articles are mostly under 16 KB, servers rarely take one over 256 KB).
+const defaultMaxArticleSize = 1 << 20
 
 // bodyChunkSize is the read size of readBody; longer lines are joined from several reads.
 const bodyChunkSize = 64 * 1024
@@ -54,6 +62,8 @@ func (r skipReason) String() string {
 		return "no-newsgroups"
 	case skipBadGroup:
 		return "bad-group"
+	case skipTooBig:
+		return "too-big"
 	}
 	return "unknown"
 }
@@ -65,25 +75,32 @@ func isspace(b byte) bool {
 }
 
 // readBody reads a message body into lines without line endings; isBinary is set (and the
-// body left out) when keepBinary is false and a line starts with "=ybegin". It reads r in
-// 64 KiB chunks, joins a line split over several reads, strips CR and LF at the line end
-// and removes trailing empty lines. r is always read to its end.
-func readBody(r io.Reader, keepBinary bool) (body []string, isBinary bool) {
+// body left out) when keepBinary is false and a line starts with "=ybegin". tooBig is set
+// (and the body left out) when the body holds more than maxBytes bytes (maxBytes < 0: no
+// limit), so a huge article never sits in memory whole. It reads r in 64 KiB chunks, joins
+// a line split over several reads, strips CR and LF at the line end and removes trailing
+// empty lines. r is always read to its end.
+func readBody(r io.Reader, keepBinary bool, maxBytes int) (body []string, isBinary, tooBig bool) {
 	buffer := make([]byte, bodyChunkSize)
 	var part []byte // the start of a line not yet ended by '\n'
+	size := 0       // body bytes read so far, line endings included
 	addLine := func(line string) {
 		if !keepBinary && !isBinary && strings.HasPrefix(line, "=ybegin") {
 			isBinary = true
 			body = nil
 		}
-		if !isBinary {
+		if !isBinary && !tooBig {
 			body = append(body, strings.TrimRight(line, "\r\n"))
 		}
 	}
 	for {
 		n, err := r.Read(buffer)
 		chunk := buffer[:n]
-		for len(chunk) > 0 {
+		if size += n; maxBytes >= 0 && size > maxBytes && !tooBig {
+			tooBig = true
+			body, part = nil, nil
+		}
+		for len(chunk) > 0 && !tooBig {
 			i := bytes.IndexByte(chunk, '\n')
 			if i < 0 {
 				part = append(part, chunk...)
@@ -106,7 +123,7 @@ func readBody(r io.Reader, keepBinary bool) (body []string, isBinary bool) {
 			break
 		}
 	}
-	return removeFinalEmptyLines(body), isBinary
+	return removeFinalEmptyLines(body), isBinary, tooBig
 }
 
 // removeFinalEmptyLines drops empty lines at the end of body (mbox2nntp's
@@ -161,6 +178,47 @@ func repairMessageID(msgid string) string {
 	return msgid
 }
 
+// firstMessageID cuts a field holding several IDs, "<a@b> <c@d>" or "<a@b><c@d>", to the
+// first (mbox2nntp's lax GetMessageID, v0.3.2).
+func firstMessageID(msgid string) string {
+	if strings.HasPrefix(msgid, "<") {
+		if j := strings.IndexByte(msgid, '>'); j > 0 && strings.HasPrefix(strings.TrimLeft(msgid[j+1:], " \t"), "<") {
+			return msgid[:j+1]
+		}
+	}
+	return msgid
+}
+
+// mboxrdFormatField names the header field mbox2nntp's exporters (uatexport, ncexport,
+// v0.3.0+) end each article's header with: the article is quoted mboxrd, header and body.
+const mboxrdFormatField = "X-Mbox2nntp-Format"
+
+// isMboxrdQuoted reports whether head holds "X-Mbox2nntp-Format: mboxrd" (mbox2nntp's
+// mboxout.IsQuoted). Old archive mboxes are not quoted: in them a ">From " line is part
+// of the article as posted, so only an article with this field is unquoted.
+func isMboxrdQuoted(head []string) bool {
+	for _, l := range head {
+		if name, value, ok := strings.Cut(l, ":"); ok &&
+			strings.EqualFold(strings.TrimSpace(name), mboxrdFormatField) &&
+			strings.EqualFold(strings.TrimSpace(value), "mboxrd") {
+			return true
+		}
+	}
+	return false
+}
+
+// mboxrdUnquote undoes the exporters' quote of one line: a '>' before a line that, with
+// any number of '>' taken off, starts "From " or "#! rnews " (mbox2nntp's mboxout.Unquote).
+func mboxrdUnquote(l string) string {
+	if strings.HasPrefix(l, ">") {
+		t := strings.TrimLeft(l[1:], ">")
+		if strings.HasPrefix(t, "From ") || strings.HasPrefix(t, "#! rnews ") {
+			return l[1:]
+		}
+	}
+	return l
+}
+
 // laxMessageID reports whether msgid starts with '<', ends with '>' and holds no
 // whitespace or control byte (mbox2nntp's -lax-msgid default, without spaces).
 func laxMessageID(msgid string) bool {
@@ -176,10 +234,19 @@ func laxMessageID(msgid string) bool {
 }
 
 // messageIDFromHeaders finds the article's message-id (lax repairs as in mbox2nntp; strict
-// requires common.ValidMessageID and applies no repair).
+// requires common.ValidMessageID and applies no repair). An early B-news article without a
+// Message-ID field but with "Article-I.D.: site.n" gets <bnews.site.n> (bnewsMessageID).
+// Neither that form nor the <anews....> of an A-news article (anewsHeader) holds an "@", so
+// -strict-msgid refuses both as bad-msgid.
 func messageIDFromHeaders(head []string, strict bool) (msgid string, reason skipReason) {
 	value, found := headerField(head, "Message-ID")
 	if !found || value == "" {
+		if id, ok := bnewsMessageID(head); ok {
+			if strict && !common.ValidMessageID(id) {
+				return "", skipBadMessageID
+			}
+			return id, skipNone
+		}
 		return "", skipNoMessageID
 	}
 	if strict {
@@ -188,6 +255,7 @@ func messageIDFromHeaders(head []string, strict bool) (msgid string, reason skip
 		}
 		return value, skipNone
 	}
+	value = firstMessageID(value)
 	value = repairMessageID(value)
 	if !laxMessageID(value) {
 		return "", skipBadMessageID
@@ -244,13 +312,18 @@ func hasNonBlankContinuation(head []string, i int) bool {
 
 // rewriteHead turns the stored header lines into the ones handed to the processor
 // (mbox2nntp's rewriteHead without the Path prefix: the processor prefixes the local
-// hostname). Per line: NUL, backspace, tab and CR become spaces; Xref, Expires and stray
+// hostname). Per line: NUL, backspace, tab and CR become spaces; Xref, Expires,
+// X-Mbox2nntp-Format and stray
 // "From " lines are dropped with their continuations, so are lines without a colon (or
 // with a field name that is not RFC 5322 ftext) and orphan or blank continuations;
 // a header with an empty value and no continuation is dropped; "Key:value" and
 // "Key :value" become "Key: value"; every Message-ID header is replaced by one
 // "Message-ID: <msgid>" line at the position of the first (appended when there is none).
-// More than maxHeaderLines lines, no Subject or no Date skip the article.
+// More than maxHeaderLines lines skip the article. An article without a Subject header gets
+// one from the "Title:" field of early B-news (1981-83, as on the utzoo tapes), else it is
+// skipped as no-subject; an article without a Date header gets one from a B-news date field
+// when it has a readable one (fallbackDateLine), else it is skipped as no-date. The Title and
+// date fields stay in the header block.
 func rewriteHead(msgid string, head []string) (newhead []string, reason skipReason) {
 	if len(head) > maxHeaderLines {
 		return nil, skipTooManyHeaders
@@ -306,7 +379,7 @@ func rewriteHead(msgid string, head []string) (newhead []string, reason skipReas
 			continue
 		}
 		switch strings.ToLower(key) {
-		case "xref", "expires":
+		case "xref", "expires", "x-mbox2nntp-format":
 			continue
 		case "message-id":
 			if !hasMsgID {
@@ -329,15 +402,72 @@ func rewriteHead(msgid string, head []string) (newhead []string, reason skipReas
 	}
 
 	if !hasSubject {
-		return nil, skipNoSubject
+		title, _ := headerField(head, "Title")
+		title = strings.TrimSpace(cleanHeadline(title))
+		if title == "" {
+			return nil, skipNoSubject
+		}
+		newhead = append(newhead, "Subject: "+title)
 	}
 	if !hasDate {
-		return nil, skipNoDate
+		line, ok := fallbackDateLine(head)
+		if !ok {
+			return nil, skipNoDate
+		}
+		newhead = append(newhead, line)
 	}
 	if !hasMsgID {
 		newhead = append(newhead, "Message-ID: "+msgid)
 	}
 	return newhead, skipNone
+}
+
+// bnewsDateFields are the date fields a Date line is taken from when the article has none,
+// in this order: the "Posted:" and "Date-Received:" of the B-news era (the utzoo tapes carry
+// articles with only these), then the two injection dates of later software. The processor
+// has the same fallback (its fallbackDateHeaders), but it reads the article's header map,
+// which keeps none of these fields, so the importer writes the Date into the stored header
+// block instead.
+var bnewsDateFields = []string{"Posted", "Date-Received", "NNTP-Posting-Date", "Injection-Date"}
+
+// minArchiveYear is the first year an archive article can really carry (Usenet started in
+// 1980; the processor's minArchiveDate). An earlier fallback date is a broken clock, mostly
+// ctime(0) or ctime(-1), and is not written into the header block.
+const minArchiveYear = 1980
+
+// fallbackDateLine returns the "Date: ..." line of an article that has no Date header,
+// built from the first B-news date field whose value is a full date, as RFC 5322; ok is
+// false when there is none. Only ctime and the layouts of the processor's date parser are
+// accepted, never its brute-force reading: that one answers a prose value ("sometime in May
+// 1995") with an invented day and time, which would date the article by guesswork.
+func fallbackDateLine(head []string) (line string, ok bool) {
+	for _, name := range bnewsDateFields {
+		value, found := headerField(head, name)
+		if !found || value == "" {
+			continue
+		}
+		t, parsed := parseDateLayouts(cleanHeadline(value))
+		if !parsed || t.Year() < minArchiveYear {
+			continue
+		}
+		return "Date: " + t.Format(rfc5322DateLayout), true
+	}
+	return "", false
+}
+
+// parseDateLayouts parses a date by ctime and then by the processor's layouts (the parser
+// the stored Date header is read with later, minus its brute-force extraction).
+func parseDateLayouts(value string) (time.Time, bool) {
+	value = strings.Join(strings.Fields(value), " ")
+	if t, ok := parseCtime(value); ok {
+		return t, true
+	}
+	for _, layout := range processor.NNTPDateLayouts {
+		if t, err := time.Parse(layout, value); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
 }
 
 // firstNewsgroup returns the first group of the Newsgroups header (folded lines joined,

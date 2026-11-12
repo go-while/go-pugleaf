@@ -422,3 +422,30 @@ func TestIntakeDBLookupMsgId(t *testing.T) {
 		t.Errorf("closed group DB: (%v, %v), want (false, error)", ok, err)
 	}
 }
+
+// TestIntakeDBUpdatedAtFirstArticles: a new group's updated_at is its creation time (the
+// column default); the first batch of older articles (an archive import) replaces it with
+// the newest article date instead of keeping "now". Later batches only move it forward.
+func TestIntakeDBUpdatedAtFirstArticles(t *testing.T) {
+	db, _ := idbBatchDB(t)
+	name := w0Name("idb.updatedat.first")
+	idbInsertGroup(t, name)
+	const layout = "2006-01-02 15:04:05"
+	created := time.Now().UTC().Truncate(time.Second).Format(layout)
+	if _, err := RetryableExec(w0DB(t).mainDB, `UPDATE newsgroups SET updated_at = ?, message_count = 0 WHERE name = ?`, created, name); err != nil {
+		t.Fatalf("seed updated_at: %v", err)
+	}
+	task := db.Batch.GetOrCreateTasksMapKey(name)
+	old := time.Date(2020, 5, 6, 7, 8, 9, 0, time.UTC)
+	idbQueue(db.Batch, task, idbArticle(task, idbMsgID("first-old"), old, nil))
+	idbRun(t, db, task, nil)
+	if _, _, _, got := idbStats(t, name); got != old.Format(layout) {
+		t.Errorf("updated_at after the first (old) articles = %q, want %q: the creation time was kept", got, old.Format(layout))
+	}
+	older := time.Date(2019, 1, 1, 0, 0, 0, 0, time.UTC)
+	idbQueue(db.Batch, task, idbArticle(task, idbMsgID("first-older"), older, nil))
+	idbRun(t, db, task, nil)
+	if _, _, _, got := idbStats(t, name); got != old.Format(layout) {
+		t.Errorf("updated_at after an older second batch = %q, want %q unchanged", got, old.Format(layout))
+	}
+}

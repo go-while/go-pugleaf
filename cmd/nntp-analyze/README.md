@@ -69,12 +69,15 @@ Group selection (one of the two is required):
   -groups-file string  Active file with the newsgroups to analyze
 
 Server:
-  -host string         NNTP server hostname (default "81-171-22-215.pugleaf.net")
+  -host string         NNTP server hostname (default "archive.usenet.blueworldhosting.com")
   -port int            NNTP server port (default 563)
   -ssl                 Use SSL/TLS (default true; use -ssl=false for a plain-text port)
-  -username string     NNTP username (default "read")
-  -password string     NNTP password (default "only")
+  -username string     NNTP username (default empty: no AUTHINFO)
+  -password string     NNTP password (used with -username)
   -timeout int         Connect timeout in seconds (default 30), in every mode
+  -compress            Send COMPRESS DEFLATE (RFC 8054) after login (default true); a server
+                       that refuses it is read uncompressed. The run ends with an
+                       "NNTP traffic:" line (received, on the wire, saved share)
 
 Analysis:
   -force-refresh       Ignore the overview cache and fetch from the server again
@@ -110,9 +113,9 @@ Files and output:
 
 ## Server and defaults
 
-Without `-host`, the tool connects to `81-171-22-215.pugleaf.net:563` with TLS. This is the
-go-pugleaf project's public server, and the default `-username read` / `-password only` are its public
-read-only credentials. Pass `-host` (and the account of that server) to analyze another server.
+Without `-host`, the tool connects to `archive.usenet.blueworldhosting.com:563` with TLS: the public
+BlueWorldHosting archive, read-only and without a login (no default `-username`/`-password`). Pass
+`-host` (and `-username`/`-password` if that server needs a login) to analyze another server.
 The default port 563 is the TLS port: for a plain-text server on port 119 add `-ssl=false`.
 
 ## Output Format

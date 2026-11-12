@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/go-while/go-pugleaf/internal/config"
+	testkit "github.com/go-while/nntp-testkit"
 	"github.com/go-while/nntp-testkit/client"
 )
 
@@ -32,8 +33,13 @@ func TestBindListenAddr(t *testing.T) {
 // bindFreePort returns a port that was free on ip a moment ago (listener closed
 // again); ok is false only when the IPv6 loopback cannot be bound (no ::1 on this
 // host); a failure on 127.0.0.1 fails the test instead of skipping it.
+// The 127.0.0.1 case is testkit.FreePort (it also skips a port that something
+// else holds on 0.0.0.0 or [::]); the kit has no IPv6 form.
 func bindFreePort(t *testing.T, ip string) (port int, ok bool) {
 	t.Helper()
+	if ip == "127.0.0.1" {
+		return testkit.FreePort(t), true
+	}
 	l, err := net.Listen("tcp", net.JoinHostPort(ip, "0"))
 	if err != nil {
 		if ip == "::1" {
@@ -88,7 +94,7 @@ func TestBindStartOnAddr(t *testing.T) {
 			if err != nil {
 				t.Fatalf("dial %s: %v", addr, err)
 			}
-			c := hNewClient(t, conn, hDeadline)
+			c := client.New(t, conn)
 			greeting, err := c.ReadLine()
 			c.Close()
 			if err != nil {

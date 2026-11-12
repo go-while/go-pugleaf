@@ -152,6 +152,32 @@ func (d *Database) MarkPostQueueAsPostedToRemote(id int64) error {
 	return nil
 }
 
+// MarkPostQueueDelivered marks the pending post_queue entries of these message-ids as out:
+// the outgoing feed handed them to a peer (or the peer already had them), so the post has left
+// this server even when no provider posts it. Ids without an entry (relayed articles) are
+// ignored. It returns how many entries were marked.
+func (d *Database) MarkPostQueueDelivered(messageIDs []string) (int64, error) {
+	const chunk = 500 // stay well below SQLite's bound-parameter limit
+	var marked int64
+	for start := 0; start < len(messageIDs); start += chunk {
+		ids := messageIDs[start:min(start+chunk, len(messageIDs))]
+		args := make([]any, len(ids))
+		for i, id := range ids {
+			args[i] = id
+		}
+		query := `UPDATE post_queue SET posted_to_remote = 1, in_processing = 0
+			WHERE posted_to_remote = 0 AND message_id IN (?` + strings.Repeat(",?", len(ids)-1) + `)`
+		res, err := RetryableExec(d.mainDB, query, args...)
+		if err != nil {
+			return marked, fmt.Errorf("mark post_queue delivered: %w", err)
+		}
+		if n, err := res.RowsAffected(); err == nil {
+			marked += n
+		}
+	}
+	return marked, nil
+}
+
 // RecordPostQueueFailure returns entry id to pending after a failed posting attempt and stores
 // errText as its last_error. countAttempt (every provider rejected the article with 441) also
 // increments attempts; a row reaching PostQueueMaxAttempts is parked. Connection and pool

@@ -764,3 +764,59 @@ func TestAdfBatchDeleteSpamRowsForArticles(t *testing.T) {
 		t.Errorf("other group: %d spam rows, %d user flags left, want 3 and 3", left, fuQueriesSpamFlagCount(t, otherID))
 	}
 }
+
+// TestAdfBatchDividerKicks: BatchDivider wakes the orchestrators without blocking. Every
+// maxDBbatch-th queued article pings kickVolume (orchestrator 1 flushes the small groups),
+// and a group whose BATCHchan is full pings kickFull (orchestrator 2 writes it); a pending
+// ping is never doubled and never blocks the divider.
+func TestAdfBatchDividerKicks(t *testing.T) {
+	logs := fuBatchCaptureLog(t)
+	s := adfBatchNewStopDB(t)
+	sq := s.db.Batch
+	sq.maxDBbatch = 4 // set before the divider starts
+	s.start(sq.BatchDivider)
+
+	name := w0Name("adfbatch.kicks")
+	ptr := sq.GetNewsgroupPointer(name)
+	feed := func(n int) {
+		for i := 0; i < n; i++ {
+			a := adfBatchArticle(&BatchTasks{Newsgroup: ptr}, adfBatchMsgID())
+			a.NewsgroupsPtr = nil
+			a.ProcessQueue = make(chan *string, 16)
+			sq.BatchCaptureOverviewForLater(ptr, a)
+		}
+	}
+	waitKick := func(ch chan struct{}, what string) {
+		t.Helper()
+		select {
+		case <-ch:
+		case <-time.After(testWait):
+			t.Fatalf("no %s ping. Last log lines:\n%s", what, logs.tail(12))
+		}
+	}
+	feed(3)
+	select {
+	case <-sq.kickVolume:
+		t.Fatal("kickVolume before maxDBbatch articles were queued")
+	case <-sq.kickFull:
+		t.Fatal("kickFull before the group's channel was full")
+	case <-time.After(50 * time.Millisecond): // a slow machine only makes this pass more easily
+	}
+	feed(1) // the 4th article: total queued = maxDBbatch and the group's channel is full
+	waitKick(sq.kickVolume, "kickVolume")
+	waitKick(sq.kickFull, "kickFull")
+
+	// kick never blocks and keeps at most one pending ping
+	kick(sq.kickFull)
+	kick(sq.kickFull)
+	if n := len(sq.kickFull); n != 1 {
+		t.Errorf("kickFull holds %d pings, want 1", n)
+	}
+	<-sq.kickFull
+
+	task := sq.GetOrCreateTasksMapKey(name)
+	fuBatchRun(t, s.db, task, adfBatchWait, logs)
+	if q := adfBatchQueued(sq); q != 0 {
+		t.Errorf("queued = %d after the batch, want 0", q)
+	}
+}

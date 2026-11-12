@@ -43,7 +43,7 @@ func readAllMessages(t *testing.T, src *source) []testMessage {
 		if err != nil {
 			t.Fatalf("ReadMessage: %v", err)
 		}
-		body, _ := readBody(msg.BodyReader(), true)
+		body, _, _ := readBody(msg.BodyReader(), true, -1)
 		out = append(out, testMessage{head: msg.Headers(), body: body})
 	}
 }
@@ -93,7 +93,7 @@ func TestMboxInExpandInputs(t *testing.T) {
 	single := filepath.Join(dir, "readme.txt") // a file argument is taken as given
 	missing := filepath.Join(dir, "missing.mbox")
 
-	files, errs := expandInputs([]string{dir, missing, single})
+	files, errs := expandInputs([]string{dir, missing, single}, false)
 	want := []string{
 		filepath.Join(dir, "a.mbox.gz"),
 		filepath.Join(dir, "b.mbox"),
@@ -106,6 +106,16 @@ func TestMboxInExpandInputs(t *testing.T) {
 	}
 	if len(errs) != 1 || !errors.Is(errs[0], os.ErrNotExist) || !strings.Contains(errs[0].Error(), "missing.mbox") {
 		t.Errorf("errs: %v", errs)
+	}
+
+	// -spool: the directory itself is the input, its mbox files are not scanned for
+	files, errs = expandInputs([]string{dir, missing, single}, true)
+	want = []string{dir, single}
+	if !reflect.DeepEqual(files, want) {
+		t.Errorf("-spool files:\n got %q\nwant %q", files, want)
+	}
+	if len(errs) != 1 || !errors.Is(errs[0], os.ErrNotExist) {
+		t.Errorf("-spool errs: %v", errs)
 	}
 }
 
@@ -290,7 +300,7 @@ func TestMboxInUnread(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	readBody(msg.BodyReader(), false)
+	readBody(msg.BodyReader(), false, -1)
 	if !src.Unread() {
 		t.Error("Unread false on a stream abandoned after the first message")
 	}

@@ -262,9 +262,10 @@ func TestAuthFailureDelay(t *testing.T) {
 	}
 }
 
-// TestAuthPostingGates: posting commands need authentication and permission.
-// A fake processor makes POST/IHAVE/TAKETHIS reachable; CheckMessageID answers
-// "duplicate" so an allowed IHAVE/TAKETHIS stops at 435/439 right after the gate.
+// TestAuthPostingGates: POST needs authentication and nntp_users.posting; the feed
+// commands need a peer and nothing else (plan nntp-peering). A fake processor makes
+// POST/IHAVE/TAKETHIS reachable; CheckMessageID answers "duplicate" so an allowed
+// IHAVE/TAKETHIS stops at 435/439 right after the gate.
 func TestAuthPostingGates(t *testing.T) {
 	proc := &hFakeProcessor{checkFn: func(string) int { return history.CaseDupes }}
 	hs := newTestServer(t, hServerOpts{Proc: proc})
@@ -286,8 +287,9 @@ func TestAuthPostingGates(t *testing.T) {
 		return code, line
 	}
 
-	// RFC 3977 §3.2.1 and RFC 4643 §2.1: a command that needs authentication
-	// gives 480 before the client has authenticated.
+	// RFC 3977 §3.2.1 and RFC 4643 §2.1: a command that needs authentication gives 480
+	// before the client has authenticated. This server has no peers, so the feed commands
+	// answer 502: no login of any kind would help (plan nntp-peering).
 	t.Run("unauthenticated", func(t *testing.T) {
 		c := hs.dial(t)
 		code, line := c.Cmd("POST")
@@ -295,17 +297,41 @@ func TestAuthPostingGates(t *testing.T) {
 			t.Errorf("POST: %v", err)
 		}
 		code, line = c.Cmd("IHAVE %s", authMessageID("gates"))
-		if err := client.ExpectCode(code, line, 480); err != nil {
+		if err := client.ExpectCode(code, line, 502); err != nil {
 			t.Errorf("IHAVE: %v", err)
 		}
 		code, line = takethis(t, c, "gates")
-		if err := client.ExpectCode(code, line, 480); err != nil {
+		if err := client.ExpectCode(code, line, 502); err != nil {
 			t.Errorf("TAKETHIS: %v", err)
 		}
 	})
 
-	// RFC 3977 §3.2.1: an authenticated client without permission for a
-	// command gets 502 (IHAVE has no specific "not permitted" code).
+	// A peer with a login whose hosts hold this address: the feed commands answer 480
+	// (the login is still missing), and the reply of TAKETHIS carries the message-id
+	// (A-nntp-rfc-8, RFC 4644 §2.5.2).
+	t.Run("peer-login-pending", func(t *testing.T) {
+		reg, _, _ := hPeerLogin(t, "127.0.0.1")
+		hsp := newTestServer(t, hServerOpts{Proc: proc, Peers: reg})
+		c := hsp.dial(t)
+		code, line := c.Cmd("IHAVE %s", authMessageID("gates"))
+		if err := client.ExpectCode(code, line, 480); err != nil {
+			t.Errorf("IHAVE: %v", err)
+		}
+		id := authMessageID("gates")
+		if err := c.Send("TAKETHIS " + id + "\r\nMessage-ID: " + id + "\r\n\r\nbody\r\n.\r\n"); err != nil {
+			t.Fatalf("send TAKETHIS: %v", err)
+		}
+		code, line, err := c.ReadStatus()
+		if err != nil {
+			t.Fatalf("TAKETHIS reply: %v (%q)", err, line)
+		}
+		if f := strings.Fields(line); code != 480 || len(f) < 2 || f[1] != id {
+			t.Errorf("TAKETHIS: %q, want 480 %s", line, id)
+		}
+	})
+
+	// RFC 3977 §3.2.1: a client without permission for a command gets 502 (IHAVE has no
+	// specific "not permitted" code). A user is never a peer, whatever its posting right.
 	t.Run("no-posting-ihave", func(t *testing.T) {
 		c := hs.dial(t)
 		authMustLogin(t, c, reader, readerPass)
@@ -326,20 +352,28 @@ func TestAuthPostingGates(t *testing.T) {
 		}
 	})
 
-	// Control: a user with posting permission gets past every gate.
-	// RFC 3977 §6.3.1.2: POST → 340; §6.3.2.2: IHAVE of an unwanted article → 435;
-	// RFC 4644 §2.5.2: TAKETHIS of an unwanted article → 439.
-	t.Run("posting-allowed", func(t *testing.T) {
+	// A user with posting permission may POST (RFC 3977 §6.3.1.2: 340) and may not feed:
+	// since plan nntp-peering, posting=1 is no transfer permission any more.
+	t.Run("posting-user-may-not-feed", func(t *testing.T) {
 		c := hs.dial(t)
 		authMustLogin(t, c, poster, posterPass)
 		code, line := c.Cmd("IHAVE %s", authMessageID("gates"))
-		if err := client.ExpectCode(code, line, 435); err != nil {
+		if err := client.ExpectCode(code, line, 502); err != nil {
 			t.Errorf("IHAVE: %v", err)
 		}
 		code, line = takethis(t, c, "gates")
-		if err := client.ExpectCode(code, line, 439); err != nil {
+		if err := client.ExpectCode(code, line, 502); err != nil {
 			t.Errorf("TAKETHIS: %v", err)
 		}
+		code, line = c.Cmd("MODE STREAM")
+		if err := client.ExpectCode(code, line, 502); err != nil {
+			t.Errorf("MODE STREAM: %v", err)
+		}
+		code, line = c.Cmd("CHECK %s", authMessageID("gates"))
+		if err := client.ExpectCode(code, line, 502); err != nil {
+			t.Errorf("CHECK: %v", err)
+		}
+		// but POST still works
 		code, line = c.Cmd("POST")
 		if err := client.ExpectCode(code, line, 340); err != nil {
 			t.Fatalf("POST: %v", err)
@@ -350,6 +384,86 @@ func TestAuthPostingGates(t *testing.T) {
 		}
 		if _, line, err := c.ReadStatus(); err != nil {
 			t.Fatalf("POST result: %v (%q)", err, line)
+		}
+		// CAPABILITIES must not offer what this connection may not use (RFC 3977 §3.3.2,
+		// RFC 4644 §2.1).
+		capsM, caps := c.Capabilities()
+		for _, l := range []string{"IHAVE", "STREAMING"} {
+			if _, listed := capsM[l]; listed {
+				t.Errorf("posting user: %s advertised in %q", l, caps)
+			}
+		}
+		if _, listed := capsM["POST"]; !listed {
+			t.Errorf("posting user: POST missing from %q", caps)
+		}
+	})
+
+	// A peer matched by its address may feed without any AUTHINFO: IHAVE of an unwanted
+	// article → 435 (RFC 3977 §6.3.2.2), TAKETHIS → 439 (RFC 4644 §2.5.2), MODE STREAM
+	// → 203. It may not POST: a peer is not a posting user.
+	t.Run("peer-by-address", func(t *testing.T) {
+		reg, _ := hPeerIP("")
+		hsp := newTestServer(t, hServerOpts{Proc: proc, Peers: reg})
+		c := hsp.dial(t)
+		code, line := c.Cmd("MODE STREAM")
+		if err := client.ExpectCode(code, line, 203); err != nil {
+			t.Errorf("MODE STREAM: %v", err)
+		}
+		code, line = c.Cmd("IHAVE %s", authMessageID("gates"))
+		if err := client.ExpectCode(code, line, 435); err != nil {
+			t.Errorf("IHAVE: %v", err)
+		}
+		code, line = takethis(t, c, "gates")
+		if err := client.ExpectCode(code, line, 439); err != nil {
+			t.Errorf("TAKETHIS: %v", err)
+		}
+		code, line = c.Cmd("POST")
+		if err := client.ExpectCode(code, line, 480); err != nil {
+			t.Errorf("POST on a peer connection: %v", err)
+		}
+		capsM, caps := c.Capabilities()
+		for _, l := range []string{"IHAVE", "STREAMING"} {
+			if _, listed := capsM[l]; !listed {
+				t.Errorf("peer connection: %s missing from %q", l, caps)
+			}
+		}
+	})
+
+	// A peer with a login becomes a peer connection only after AUTHINFO USER/PASS, and
+	// the reply shape of a failed peer login is the one of a failed user login (481).
+	t.Run("peer-login", func(t *testing.T) {
+		reg, peer, pass := hPeerLogin(t, "127.0.0.1")
+		hsp := newTestServer(t, hServerOpts{Proc: proc, Peers: reg})
+
+		c := hsp.dial(t)
+		code, line := authLogin(t, c, peer.InUsername, "definitely-not-the-password")
+		if err := client.ExpectCode(code, line, 481); err != nil {
+			t.Fatalf("peer login with a wrong password: %v", err)
+		}
+		code, line = c.Cmd("IHAVE %s", authMessageID("gates"))
+		if err := client.ExpectCode(code, line, 480); err != nil {
+			t.Errorf("IHAVE after a failed peer login: %v", err)
+		}
+
+		c2 := hsp.dial(t)
+		code, line = authLogin(t, c2, peer.InUsername, pass)
+		if err := client.ExpectCode(code, line, 281); err != nil {
+			t.Fatalf("peer login: %v", err)
+		}
+		code, line = c2.Cmd("IHAVE %s", authMessageID("gates"))
+		if err := client.ExpectCode(code, line, 435); err != nil {
+			t.Errorf("IHAVE after the peer login: %v", err)
+		}
+		// a peer login grants no POST (RFC 3977 §6.3.1.2: 480, as for any connection
+		// without a user login)
+		code, line = c2.Cmd("POST")
+		if err := client.ExpectCode(code, line, 480); err != nil {
+			t.Errorf("POST after the peer login: %v", err)
+		}
+		// RFC 4643 §2.3.2: no second AUTHINFO after a successful login
+		code, line = c2.Cmd("AUTHINFO USER %s", peer.InUsername)
+		if err := client.ExpectCode(code, line, 502); err != nil {
+			t.Errorf("second AUTHINFO after the peer login: %v", err)
 		}
 	})
 }

@@ -1113,7 +1113,8 @@ func (proc *Processor) AnalyzeMode(testGrp string, forceRefresh bool, maxAnalyze
 
 // AnalyzeModeStandalone is a wrapper for backward compatibility that creates its own pool.
 // dataDir is the -data root (overview cache below <dataDir>/cache), outDir the export directory.
-func AnalyzeModeStandalone(host *string, port *int, username *string, password *string, ssl *bool, timeout *int,
+// compress sends COMPRESS DEFLATE after login (a refusal keeps the connection plain).
+func AnalyzeModeStandalone(host *string, port *int, username *string, password *string, ssl *bool, timeout *int, compress *bool,
 	testGrp *string, forceRefresh *bool, maxAnalyzeArticles *int64,
 	startDate *string, endDate *string, exportFormat *string, validateCache *bool,
 	clearCache *bool, cacheStats *bool, dataDir *string, outDir *string) error {
@@ -1137,6 +1138,7 @@ func AnalyzeModeStandalone(host *string, port *int, username *string, password *
 		Password:       *password,
 		MaxConns:       5,
 		ConnectTimeout: time.Duration(*timeout) * time.Second,
+		Compress:       compress != nil && *compress,
 		//ReadTimeout:    60 * time.Second,
 		//WriteTimeout:   30 * time.Second,
 	}
@@ -1146,6 +1148,7 @@ func AnalyzeModeStandalone(host *string, port *int, username *string, password *
 	// Create connection pool
 	pool := nntp.NewPool(backendConfig)
 	defer pool.ClosePool()
+	defer PrintPoolTraffic(pool) // runs before ClosePool
 
 	// Create processor (minimal setup for analysis only)
 	proc := &Processor{
@@ -1277,6 +1280,26 @@ func formatNumber(n int64) string {
 		return fmt.Sprintf("%.1fM", float64(n)/1000000)
 	}
 	return fmt.Sprintf("%.1fB", float64(n)/1000000000)
+}
+
+// PrintPoolTraffic prints what the pool's connections received and sent; with
+// COMPRESS DEFLATE on it adds the octets that crossed the socket and how much
+// deflate saved on the received stream.
+func PrintPoolTraffic(pool *nntp.Pool) {
+	if pool == nil || pool.Backend == nil {
+		return
+	}
+	st := pool.Stats()
+	if !pool.Backend.Compress || st.RxBytesWire == st.RxBytesRaw {
+		fmt.Printf("NNTP traffic: rx %s tx %s (uncompressed)\n", formatBytes(st.RxBytesRaw), formatBytes(st.TxBytesRaw))
+		return
+	}
+	saved := 0.0
+	if st.RxBytesRaw > 0 && st.RxBytesWire < st.RxBytesRaw {
+		saved = float64(st.RxBytesRaw-st.RxBytesWire) / float64(st.RxBytesRaw) * 100
+	}
+	fmt.Printf("NNTP traffic: rx %s (wire %s, COMPRESS DEFLATE saved %.1f%%) tx %s\n",
+		formatBytes(st.RxBytesRaw), formatBytes(st.RxBytesWire), saved, formatBytes(st.TxBytesRaw))
 }
 
 // formatBytes formats byte counts in human readable format

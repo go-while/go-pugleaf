@@ -65,6 +65,10 @@ func TestToolsTestCountGroupsInCSV(t *testing.T) {
 		"1":       1,
 		"1,2":     2,
 		"12,3,44": 3,
+		// a remembered reject is no group (plan nntp-peering)
+		"r20399":      0,
+		"r20399,12":   1,
+		"12,r20399,3": 2,
 	}
 	for in, want := range cases {
 		if got := countGroupsInCSV(in); got != want {

@@ -48,13 +48,43 @@ func maxArticleDrainBytes(limit int64) int64 {
 	return d
 }
 
-// MaxArticleBytes is the article size limit of this server: Config.NNTP.MaxArtSize,
-// or DefaultMaxArticleBytes when that is <= 0 or there is no config.
+// MaxArticleBytes is the article size limit of this server: the value of the size source
+// (SetArticleSizeSource) when it has one, else Config.NNTP.MaxArtSize, or
+// DefaultMaxArticleBytes when that is <= 0 or there is no config.
 func (s *NNTPServer) MaxArticleBytes() int64 {
-	if s != nil && s.Config != nil && s.Config.NNTP.MaxArtSize > 0 {
+	if s == nil {
+		return DefaultMaxArticleBytes
+	}
+	if fn := s.artSize.Load(); fn != nil {
+		if n, ok := (*fn)(); ok && n > 0 {
+			return n
+		}
+	}
+	if s.Config != nil && s.Config.NNTP.MaxArtSize > 0 {
 		return int64(s.Config.NNTP.MaxArtSize)
 	}
 	return DefaultMaxArticleBytes
+}
+
+// SetArticleSizeSource makes MaxArticleBytes follow fn (nntp-server: the admin setting
+// "Article Size Limit" when -maxartsize is not given). fn is called for every article, so it
+// must be cheap (the config cache); when it reports false, Config.NNTP.MaxArtSize applies.
+// nil removes the source.
+func (s *NNTPServer) SetArticleSizeSource(fn func() (int64, bool)) {
+	if fn == nil {
+		s.artSize.Store(nil)
+		return
+	}
+	s.artSize.Store(&fn)
+}
+
+// feedArticleBytes is the size limit of an article a peer feeds on this connection (IHAVE,
+// TAKETHIS): the peer's in_max_size when it has one, else the server limit.
+func (c *ClientConnection) feedArticleBytes() int64 {
+	if c.peer != nil && c.peer.InMaxSize > 0 {
+		return c.peer.InMaxSize
+	}
+	return c.server.MaxArticleBytes()
 }
 
 // readCommandLine reads one command line without its CR/LF. It returns
@@ -81,19 +111,23 @@ func (c *ClientConnection) readCommandLine() (string, error) {
 
 // readArticleBlock reads a dot-terminated article (RFC 3977 §3.1.1), undoes the
 // dot-stuffing and splits it at the first empty line into head and body lines.
-// Every byte including CRLF counts against maxBytes (<= 0: DefaultMaxArticleBytes);
-// 1024 head lines and 16384 lines are a secondary bound. An article over either
-// bound is read up to its terminator and discarded (ErrArticleTooLarge, the
-// connection stays usable); past maxArticleDrainBytes(maxBytes) it stops at once
-// with ErrArticleDrainLimit. The read deadline is refreshed before every line, so
-// a slow but steady upload is not cut off.
+// Every byte including CRLF counts against maxBytes (<= 0: DefaultMaxArticleBytes)
+// except the terminator and the stuffing dots this function strips, so the limit
+// measures the article as it is stored and fed on (common.WireArticleSize), the same
+// octets as a peer's in_max_size and a group's max_art_size (plan e2e-gap-tests,
+// item (c)); maxArticleDrainBytes keeps counting the raw wire volume. 1024 head lines
+// and 16384 lines are a secondary bound. An article over either bound is read up to
+// its terminator and discarded (ErrArticleTooLarge, the connection stays usable);
+// past maxArticleDrainBytes(maxBytes) it stops at once with ErrArticleDrainLimit.
+// The read deadline is refreshed before every line, so a slow but steady upload is
+// not cut off.
 func (c *ClientConnection) readArticleBlock(maxBytes int64) (headLines, bodyLines []string, err error) {
 	const maxHead, maxLines = 1024, 16384
 	if maxBytes <= 0 {
 		maxBytes = DefaultMaxArticleBytes
 	}
 	drainLimit := maxArticleDrainBytes(maxBytes)
-	var total int64
+	var total, stuffing int64 // raw wire octets, and the stuffing dots stripped from them
 	tooLarge := false
 	inHeaders := true
 	headCount, lineCount := 0, 0
@@ -104,9 +138,18 @@ func (c *ClientConnection) readArticleBlock(maxBytes int64) (headLines, bodyLine
 		}
 		var raw, last []byte
 		long := false // the line spanned more than one buffer fill
+		first := true // the chunk that starts this line
 		for {
 			chunk, rerr := c.textConn.R.ReadSlice('\n')
 			total += int64(len(chunk))
+			if first {
+				first = false
+				// the second dot of a stuffed line is stripped below, so it does not
+				// count against maxBytes (INN counts the Bytes of the article as stored)
+				if len(chunk) >= 2 && chunk[0] == '.' && chunk[1] == '.' {
+					stuffing++
+				}
+			}
 			if total > drainLimit {
 				return nil, nil, ErrArticleDrainLimit
 			}
@@ -118,7 +161,7 @@ func (c *ClientConnection) readArticleBlock(maxBytes int64) (headLines, bodyLine
 				return nil, nil, fmt.Errorf("failed to read article line: %w", rerr)
 			}
 			long = true
-			if total > maxBytes {
+			if total-stuffing > maxBytes {
 				tooLarge = true
 			}
 			if tooLarge {
@@ -132,7 +175,7 @@ func (c *ClientConnection) readArticleBlock(maxBytes int64) (headLines, bodyLine
 		if !long && (bytes.Equal(last, []byte(".\r\n")) || bytes.Equal(last, []byte(".\n"))) {
 			break
 		}
-		if total > maxBytes {
+		if total-stuffing > maxBytes {
 			tooLarge = true
 		}
 		if tooLarge {

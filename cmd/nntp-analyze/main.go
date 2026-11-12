@@ -117,12 +117,13 @@ func showUsageExamples() {
 	fmt.Println("  ./nntp-analyze -group alt.test -clear-cache      (deletes the cache file)")
 	fmt.Println()
 	fmt.Println("Server Configuration (defaults: -host " + defaultHost + " -port 563 -ssl=true):")
-	fmt.Println("  The default -host is the go-pugleaf project's public server;")
-	fmt.Println("  the default -username/-password (" + defaultUsername + "/" + defaultPassword + ") are its public read-only credentials.")
+	fmt.Println("  The default -host is the public BlueWorldHosting archive, read-only and without a login (no -username/-password).")
 	fmt.Println("  ./nntp-analyze -group alt.test -host news.server.com -port 563")
 	fmt.Println("  ./nntp-analyze -group alt.test -host news.server.com -port 119 -ssl=false")
 	fmt.Println("  ./nntp-analyze -group alt.test -username user -password pass")
 	fmt.Println("  -timeout N sets the connect timeout in seconds (default 30) for every mode.")
+	fmt.Println("  COMPRESS DEFLATE (RFC 8054) is on by default; a server without it is read uncompressed.")
+	fmt.Println("  ./nntp-analyze -group alt.test -compress=false   (never send COMPRESS)")
 	fmt.Println()
 	fmt.Println("Files:")
 	fmt.Println("  Overview cache: <-data>/cache/<-host without port>/<sha256 of group>.overview (default -data ./data)")
@@ -147,12 +148,13 @@ func showUsageExamples() {
 
 var appVersion = "-unset-"
 
-// Defaults of the server flags (decision D-O2: the default stays the project's public
-// server with its public read-only account; the usage text says so).
+// Defaults of the server flags (decision D-O2: the default is a public read-only server, the
+// usage text says so). The project's former public server 81-171-22-215.pugleaf.net is gone;
+// the BlueWorldHosting archive reads without a login.
 const (
-	defaultHost      = "81-171-22-215.pugleaf.net"
-	defaultUsername  = "read"
-	defaultPassword  = "only"
+	defaultHost      = "archive.usenet.blueworldhosting.com"
+	defaultUsername  = ""
+	defaultPassword  = ""
 	defaultOutSubdir = "analyze-out"
 )
 
@@ -179,12 +181,13 @@ func main() {
 
 	// Command line flags for NNTP server connection
 	var (
-		host       = flag.String("host", defaultHost, "NNTP hostname; the default is the go-pugleaf project's public server")
+		host       = flag.String("host", defaultHost, "NNTP hostname; the default is the public BlueWorldHosting archive (read-only, no login)")
 		port       = flag.Int("port", 563, "NNTP port (563 is TLS: use -ssl=false for a plain-text port such as 119)")
-		username   = flag.String("username", defaultUsername, "NNTP username; the default is the public read-only account of the default -host")
-		password   = flag.String("password", defaultPassword, "NNTP password; the default is the public read-only account of the default -host")
+		username   = flag.String("username", defaultUsername, "NNTP username (empty: no AUTHINFO; the default -host needs none)")
+		password   = flag.String("password", defaultPassword, "NNTP password (used with -username)")
 		ssl        = flag.Bool("ssl", true, "Use SSL/TLS connection")
 		timeout    = flag.Int("timeout", 30, "Connection timeout in seconds")
+		compress   = flag.Bool("compress", true, "Send COMPRESS DEFLATE (RFC 8054) after login; a server that refuses it is read uncompressed (-compress=false: never ask)")
 		group      = flag.String("group", "", "Newsgroup to analyze: a name, '$all' or 'prefix.*' (the last two read the group list from the databases in -data); -group or -groups-file is required")
 		groupsFile = flag.String("groups-file", "", "Path to an active file with the newsgroups to analyze (format: 'groupname high low status' per line); used instead of -group")
 
@@ -226,7 +229,7 @@ func main() {
 
 	// Handle groups from active file
 	if *groupsFile != "" {
-		if err := analyzeGroupsFromFile(*groupsFile, host, port, username, password, ssl, timeout,
+		if err := analyzeGroupsFromFile(*groupsFile, host, port, username, password, ssl, timeout, compress,
 			forceRefresh, maxAnalyzeArticles, startDate, endDate,
 			exportFormat, validateCache, clearCache, cacheStats, dataDir, outDir); err != nil {
 			log.Fatalf("Analysis of groups from file failed: %v", err)
@@ -236,7 +239,7 @@ func main() {
 
 	// Handle case for analyzing all groups
 	if *group == "$all" || strings.HasSuffix(*group, "*") {
-		if err := analyzeAllGroups(group, host, port, username, password, ssl, timeout,
+		if err := analyzeAllGroups(group, host, port, username, password, ssl, timeout, compress,
 			forceRefresh, maxAnalyzeArticles, startDate, endDate,
 			exportFormat, validateCache, clearCache, cacheStats, dataDir, outDir); err != nil {
 			log.Fatalf("Analysis of all groups failed: %v", err)
@@ -245,7 +248,7 @@ func main() {
 	}
 
 	// Run analysis for single group
-	if err := processor.AnalyzeModeStandalone(host, port, username, password, ssl, timeout, group,
+	if err := processor.AnalyzeModeStandalone(host, port, username, password, ssl, timeout, compress, group,
 		forceRefresh, maxAnalyzeArticles, startDate, endDate,
 		exportFormat, validateCache, clearCache, cacheStats, dataDir, &outDir); err != nil {
 		log.Fatalf("Analysis failed: %v", err)
@@ -253,8 +256,8 @@ func main() {
 }
 
 // analyzeBackendConfig is the shared pool configuration of the '$all'/'prefix.*' and
-// -groups-file modes: 5 connections and -timeout as the connect timeout.
-func analyzeBackendConfig(host string, port int, username, password string, ssl bool, timeoutSec int) *nntp.BackendConfig {
+// -groups-file modes: 5 connections, -timeout as the connect timeout and -compress.
+func analyzeBackendConfig(host string, port int, username, password string, ssl bool, timeoutSec int, compress bool) *nntp.BackendConfig {
 	return &nntp.BackendConfig{
 		Host:           host,
 		Port:           port,
@@ -263,13 +266,14 @@ func analyzeBackendConfig(host string, port int, username, password string, ssl 
 		Password:       password,
 		MaxConns:       5,
 		ConnectTimeout: time.Duration(timeoutSec) * time.Second,
+		Compress:       compress,
 		//ReadTimeout:    60 * time.Second,
 		//WriteTimeout:   30 * time.Second,
 	}
 }
 
 // analyzeAllGroups performs analysis on all newsgroups found in the database using a shared connection pool
-func analyzeAllGroups(group *string, host *string, port *int, username *string, password *string, ssl *bool, timeout *int,
+func analyzeAllGroups(group *string, host *string, port *int, username *string, password *string, ssl *bool, timeout *int, compress *bool,
 	forceRefresh *bool, maxAnalyzeArticles *int64, startDate *string, endDate *string,
 	exportFormat *string, validateCache *bool, clearCache *bool, cacheStats *bool, dataDir *string, outDir string) error {
 
@@ -314,13 +318,14 @@ func analyzeAllGroups(group *string, host *string, port *int, username *string, 
 	}
 
 	// Create NNTP connection configuration (-timeout applies here too)
-	backendConfig := analyzeBackendConfig(*host, *port, *username, *password, *ssl, *timeout)
+	backendConfig := analyzeBackendConfig(*host, *port, *username, *password, *ssl, *timeout, *compress)
 
 	fmt.Printf("Creating shared NNTP connection pool for %s:%d (SSL: %v)\n", *host, *port, *ssl)
 
 	// Create shared connection pool - this will be reused for all groups
 	pool := nntp.NewPool(backendConfig)
-	defer pool.ClosePool() // Only close when ALL analysis is done
+	defer pool.ClosePool()                 // Only close when ALL analysis is done
+	defer processor.PrintPoolTraffic(pool) // runs before ClosePool
 
 	// Create processor instance that will be reused for all groups.
 	// The overview cache lives below -data (A-tools-7).
@@ -442,7 +447,7 @@ func analyzeAllGroups(group *string, host *string, port *int, username *string, 
 }
 
 // analyzeGroupsFromFile performs analysis on newsgroups listed in an active file
-func analyzeGroupsFromFile(filePath string, host *string, port *int, username *string, password *string, ssl *bool, timeout *int,
+func analyzeGroupsFromFile(filePath string, host *string, port *int, username *string, password *string, ssl *bool, timeout *int, compress *bool,
 	forceRefresh *bool, maxAnalyzeArticles *int64, startDate *string, endDate *string,
 	exportFormat *string, validateCache *bool, clearCache *bool, cacheStats *bool, dataDir *string, outDir string) error {
 
@@ -462,13 +467,14 @@ func analyzeGroupsFromFile(filePath string, host *string, port *int, username *s
 	}
 
 	// Create NNTP connection configuration
-	backendConfig := analyzeBackendConfig(*host, *port, *username, *password, *ssl, *timeout)
+	backendConfig := analyzeBackendConfig(*host, *port, *username, *password, *ssl, *timeout, *compress)
 
 	fmt.Printf("Creating shared NNTP connection pool for %s:%d (SSL: %v)\n", *host, *port, *ssl)
 
 	// Create shared connection pool - this will be reused for all groups
 	pool := nntp.NewPool(backendConfig)
-	defer pool.ClosePool() // Only close when ALL analysis is done
+	defer pool.ClosePool()                 // Only close when ALL analysis is done
+	defer processor.PrintPoolTraffic(pool) // runs before ClosePool
 
 	// Create processor instance that will be reused for all groups.
 	// The overview cache lives below -data (A-tools-7).

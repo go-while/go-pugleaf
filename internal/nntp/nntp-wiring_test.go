@@ -23,6 +23,7 @@ type wiringTestProcessor struct {
 	processErr    error
 	processed     []*models.Article
 	checked       []string
+	rejected      []string
 	findArticle   *models.Article
 	findErr       error
 	findCalls     int
@@ -39,6 +40,12 @@ func (p *wiringTestProcessor) ProcessIncomingArticle(article *models.Article) (i
 // ProcessPostedArticle implements ArticleProcessor (no commit wait in the fake).
 func (p *wiringTestProcessor) ProcessPostedArticle(article *models.Article, stop <-chan struct{}, timeout time.Duration) (int, error) {
 	return p.ProcessIncomingArticle(article)
+}
+
+func (p *wiringTestProcessor) RememberReject(messageID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.rejected = append(p.rejected, messageID)
 }
 
 func (p *wiringTestProcessor) CheckMessageID(messageID string) int {
@@ -62,9 +69,17 @@ func (p *wiringTestProcessor) processedArticles() []*models.Article {
 	return append([]*models.Article(nil), p.processed...)
 }
 
-// wiringTestConn wires a ClientConnection to the test side of a net.Pipe.
-// proc may be nil (read-only server).
-func wiringTestConn(t *testing.T, proc ArticleProcessor, authenticated bool) (*ClientConnection, *textproto.Conn) {
+// wiringTestPeer is the peer of a feed connection in these tests. net.Pipe has no
+// host:port address, so the registry cannot match it: the peer is set on the connection
+// directly, exactly as resolvePeer would (plan nntp-peering).
+func wiringTestPeer() *models.Peer {
+	return &models.Peer{ID: 1, Name: "wiring-peer", PathToken: "wiring.peer.invalid", InPatterns: "*", Enabled: true}
+}
+
+// wiringTestConn wires a ClientConnection to the test side of a net.Pipe. proc may be nil
+// (read-only server); peer makes it a peer connection, which is what the feed commands
+// IHAVE, CHECK and TAKETHIS need.
+func wiringTestConn(t *testing.T, proc ArticleProcessor, peer bool) (*ClientConnection, *textproto.Conn) {
 	t.Helper()
 	serverEnd, clientEnd := net.Pipe()
 	server := &NNTPServer{
@@ -77,7 +92,9 @@ func wiringTestConn(t *testing.T, proc ArticleProcessor, authenticated bool) (*C
 		server.Processor = proc
 	}
 	c := NewClientConnection(serverEnd, server, false)
-	c.authenticated = authenticated
+	if peer {
+		c.peer = wiringTestPeer()
+	}
 	client := textproto.NewConn(clientEnd)
 	t.Cleanup(func() {
 		serverEnd.Close()
@@ -251,17 +268,46 @@ func TestWiringIHaveInvalidMessageID(t *testing.T) {
 	}
 }
 
-func TestWiringIHaveNotAuthenticated(t *testing.T) {
+// TestWiringIHaveNotAPeer (plan nntp-peering): IHAVE on a connection that is no peer is
+// refused with 502 (no peer login could help here: the server has no peer registry) and the
+// history is never asked.
+func TestWiringIHaveNotAPeer(t *testing.T) {
 	proc := &wiringTestProcessor{checkResult: history.CasePass}
 	c, client := wiringTestConn(t, proc, false)
-	done := wiringTestRun(t, func() error { return c.handleIHave([]string{"<unauth@example.org>"}) })
+	done := wiringTestRun(t, func() error { return c.handleIHave([]string{"<nopeer@example.org>"}) })
+	if code, line := wiringTestReadCode(t, client); code != 502 {
+		t.Fatalf("got %q, want 502", line)
+	}
+	wiringTestWait(t, done, "IHAVE")
+	if len(proc.checked) != 0 {
+		t.Fatalf("CheckMessageID must not be called for a non-peer")
+	}
+}
+
+// TestWiringFeedLoginPending (plan nntp-peering): while an enabled peer with a login could
+// still match this connection, the feed commands answer 480, not 502.
+func TestWiringFeedLoginPending(t *testing.T) {
+	proc := &wiringTestProcessor{checkResult: history.CasePass}
+	c, client := wiringTestConn(t, proc, false)
+	// no hosts: the peer matches any address, so a login is always possible
+	c.server.Peers = NewPeerRegistry(&wiringPeerStore{peers: []*models.Peer{
+		{ID: 2, Name: "login-peer", PathToken: "login.peer.invalid", InUsername: "login-peer-in", InPatterns: "*", Enabled: true},
+	}})
+	done := wiringTestRun(t, func() error { return c.handleIHave([]string{"<pending@example.org>"}) })
 	if code, line := wiringTestReadCode(t, client); code != 480 {
 		t.Fatalf("got %q, want 480", line)
 	}
 	wiringTestWait(t, done, "IHAVE")
-	if len(proc.checked) != 0 {
-		t.Fatalf("CheckMessageID must not be called before auth")
-	}
+	wiringTestNoExtraReply(t, c, client)
+}
+
+// wiringPeerStore is a PeerStore with a fixed peer list and no login check.
+type wiringPeerStore struct{ peers []*models.Peer }
+
+func (s *wiringPeerStore) GetEnabledPeers() ([]*models.Peer, error) { return s.peers, nil }
+
+func (s *wiringPeerStore) AuthenticatePeer(string, string) (*models.Peer, error) {
+	return nil, database.ErrPeerAuth
 }
 
 func TestWiringTakeThis(t *testing.T) {
@@ -271,7 +317,7 @@ func TestWiringTakeThis(t *testing.T) {
 	cases := []struct {
 		name          string
 		noProcessor   bool
-		noAuth        bool
+		noPeer        bool
 		args          []string
 		check         int
 		articleMsgID  string
@@ -292,7 +338,7 @@ func TestWiringTakeThis(t *testing.T) {
 		{"processing-temporary", false, false, []string{msgid}, history.CasePass, msgid, history.CaseRetry, temporary, 400, true, true},
 		{"processing-rejected", false, false, []string{msgid}, history.CasePass, msgid, history.CaseError, rejected, 439, true, false},
 		{"no-processor", true, false, []string{msgid}, history.CasePass, msgid, history.CasePass, nil, 500, false, false},
-		{"not-authenticated", false, true, []string{msgid}, history.CasePass, msgid, history.CasePass, nil, 480, false, false},
+		{"not-a-peer", false, true, []string{msgid}, history.CasePass, msgid, history.CasePass, nil, 502, false, false},
 		{"invalid-message-id", false, false, []string{"not-an-id"}, history.CasePass, msgid, history.CasePass, nil, 439, false, false},
 		{"missing-argument", false, false, nil, history.CasePass, msgid, history.CasePass, nil, 501, false, false},
 		{"two-arguments", false, false, []string{msgid, "extra"}, history.CasePass, msgid, history.CasePass, nil, 501, false, false},
@@ -304,7 +350,7 @@ func TestWiringTakeThis(t *testing.T) {
 			if tc.noProcessor {
 				ap = nil
 			}
-			c, client := wiringTestConn(t, ap, !tc.noAuth)
+			c, client := wiringTestConn(t, ap, !tc.noPeer)
 			done := wiringTestRun(t, func() error { return c.handleTakeThis(tc.args) })
 			// streaming: the article follows the command without waiting.
 			// net.Pipe is unbuffered, so the write only completes if the server consumes the article.

@@ -689,6 +689,9 @@ func teardownDB(db *database.Database) error {
 	case <-timer.C:
 		log.Printf("[WEB]: Background tasks did not stop within %v, shutting down database anyway", webShutdownWait)
 	}
+	// The last batches are committed: stop queueing web posts for the peers before the
+	// database goes (the enqueuer reads the peers table while it writes what it holds).
+	stopWebFeed()
 	return db.Shutdown()
 }
 

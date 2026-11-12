@@ -27,7 +27,10 @@ var (
 	numOffsetRe      = regexp.MustCompile(`(?:^|\s)([+-])(\d{2}):?(\d{2})\b`)
 	gmtOffsetRe      = regexp.MustCompile(`(?i)\b(?:GMT|UTC)\s*([+-])\s*(\d{1,2})(?::?(\d{2}))?\b`)
 	// "91May07 11:07 pm": YYMonDD as written by some BBS gateways
-	yyMonDDRe     = regexp.MustCompile(`^(\d{2})([A-Za-z]{3})(\d{2})\b`)
+	yyMonDDRe = regexp.MustCompile(`^(\d{2})([A-Za-z]{3})(\d{2})\b`)
+	// an RFC 5322 §4.3 obs-year (two or three digits) in the year position: after the
+	// month name, before the time ("28 May 104 11:01:32", "28 May 60 11:01:32")
+	obsYearRe     = regexp.MustCompile(`(?i)\b((?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?[-\s]+)(\d{2,3})([-\s]+\d{1,2}:)`)
 	letterDigitRe = regexp.MustCompile(`([A-Za-z])(\d)|(\d)([A-Za-z])`)
 	// everything up to the time and an optional zone/offset: what remains of a date line
 	// that carries trailing junk ("<br>", " ,", "From: ...", a JIS escape)
@@ -636,6 +639,7 @@ func normalizeDateString(dateStr string) string {
 	if m := yyMonDDRe.FindStringSubmatch(dateStr); m != nil {
 		dateStr = m[3] + " " + m[2] + " " + m[1] + dateStr[len(m[0]):]
 	}
+	dateStr = rewriteObsYear(dateStr)
 	for _, z := range zoneLongNames {
 		if i := strings.Index(strings.ToLower(dateStr), strings.ToLower(z.name)); i >= 0 {
 			dateStr = dateStr[:i] + z.offset + dateStr[i+len(z.name):]
@@ -664,6 +668,40 @@ func normalizeDateString(dateStr string) string {
 	return dateStr
 }
 
+// rewriteObsYear expands an RFC 5322 §4.3 obsolete year in the year position of a date to
+// four digits, but only in the two readings the layouts get wrong: a three-digit year is an
+// offset from 1900 ("28 May 104" = 2004) and Go's "06" layout cannot read it at all, and a
+// two-digit year 50..68 is 19xx while that layout pivots at 69 and reads it as 20xx. Every
+// other two-digit year (00..49 and 69..99 already agree with RFC 5322) is left untouched,
+// so no date that parses today changes its reading. A misread year matters: it trips the
+// 72 h stale / 24 h future check of peer intake and 437s an otherwise valid article.
+//
+// A three-digit year is only expanded up to next year: "199" (2099) or "999" is a broken
+// field, not a date, and stays unreadable, so a bulk article keeps falling back to its other
+// date headers instead of being filed with, and then refused for, a far-future date.
+func rewriteObsYear(dateStr string) string {
+	m := obsYearRe.FindStringSubmatchIndex(dateStr)
+	if m == nil {
+		return dateStr
+	}
+	y, err := strconv.Atoi(dateStr[m[4]:m[5]])
+	if err != nil {
+		return dateStr
+	}
+	switch {
+	case m[5]-m[4] == 3:
+		if y+1900 > time.Now().UTC().Year()+1 {
+			return dateStr
+		}
+		y += 1900
+	case y >= 50 && y <= 68:
+		y += 1900
+	default:
+		return dateStr
+	}
+	return dateStr[:m[4]] + strconv.Itoa(y) + dateStr[m[5]:]
+}
+
 // fallbackDateHeaders are tried, in order, when the Date header is missing or unreadable
 // on a bulk-mode (archive) article: the B-news "Posted:" and "Date-Received:" of the utzoo
 // era, then the trace dates of later software. Each value goes through the same parser.
@@ -675,9 +713,14 @@ var fallbackDateHeaders = []string{"posted", "date-received", "nntp-posting-date
 // them like an unreadable Date and prefers a fallback header (Date-Received is usually sane).
 var minArchiveDate = time.Date(1980, 1, 1, 0, 0, 0, 0, time.UTC)
 
-// archiveDateUsable reports whether t is a parsed date from the Usenet era.
+// archiveDateUsable reports whether t is a parsed date from the Usenet era: not zero, not
+// before 1980, and not further ahead than the future margin ProcessArticle allows. A
+// far-future Date (a broken clock, or a year a mailer wrote as "2099") is as unusable as a
+// pre-Usenet one: without the upper bound bulk intake would file the article with a date
+// threading.go then refuses as "date in the future" and remembers as a reject, although the
+// article carries a sane Date-Received or Posted.
 func archiveDateUsable(t time.Time) bool {
-	return !t.IsZero() && !t.Before(minArchiveDate)
+	return !t.IsZero() && !t.Before(minArchiveDate) && !t.After(time.Now().UTC().Add(MaxFutureDate))
 }
 
 // fallbackDate returns the first usable secondary date header and its name, or the zero

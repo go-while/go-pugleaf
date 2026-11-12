@@ -832,27 +832,9 @@ func (hc *HierarchyCache) scanHierarchyTreeRows(rows *sql.Rows, who string) ([]*
 			// Parse the updated_at timestamp - try RFC3339 format first (with Z timezone)
 			if parsedTime, err := time.Parse(time.RFC3339, updatedAt.String); err == nil {
 				group.UpdatedAt = parsedTime
-				// Debug specific groups
-				if group.Name == "adobe.photoshop.windows" || group.Name == "adobe.photoshop.macintosh" || group.Name == "adobe.acrobat.windows" {
-					log.Printf("DEBUG hierarchy_cache.go: Group=%s, UpdatedAt string='%s', parsed=%v", group.Name, updatedAt.String, parsedTime)
-				}
 			} else if parsedTime, err := time.Parse("2006-01-02 15:04:05", updatedAt.String); err == nil {
 				// Fallback to MySQL format if RFC3339 fails
 				group.UpdatedAt = parsedTime
-				// Debug specific groups
-				if group.Name == "adobe.photoshop.windows" || group.Name == "adobe.photoshop.macintosh" || group.Name == "adobe.acrobat.windows" {
-					log.Printf("DEBUG hierarchy_cache.go: Group=%s, UpdatedAt string='%s', parsed=%v (MySQL format)", group.Name, updatedAt.String, parsedTime)
-				}
-			} else {
-				// Debug parsing errors
-				if group.Name == "adobe.photoshop.windows" || group.Name == "adobe.photoshop.macintosh" || group.Name == "adobe.acrobat.windows" {
-					log.Printf("DEBUG hierarchy_cache.go: Group=%s, FAILED to parse UpdatedAt='%s', error=%v", group.Name, updatedAt.String, err)
-				}
-			}
-		} else {
-			// Debug when updated_at is NULL
-			if group.Name == "adobe.photoshop.windows" || group.Name == "adobe.photoshop.macintosh" || group.Name == "adobe.acrobat.windows" {
-				log.Printf("DEBUG hierarchy_cache.go: Group=%s, UpdatedAt is NULL/invalid", group.Name)
 			}
 		}
 

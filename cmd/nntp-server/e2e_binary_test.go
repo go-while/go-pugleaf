@@ -20,6 +20,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/go-while/nntp-testkit/client"
 )
 
 // e2eReport (the step lines) is defined in e2e_xref_test.go, which builds without the e2e tag.
@@ -51,8 +53,8 @@ func TestE2EBinary(t *testing.T) {
 		r.fail("N01", "greeting 200", err.Error())
 		t.FailNow()
 	}
-	defer c.close()
-	if code, _ := e2eParseCode(c.Greeting); code == 200 {
+	defer c.Close()
+	if code, _ := client.ParseCode(c.Greeting); code == 200 {
 		r.pass("N01", "greeting 200")
 	} else {
 		r.fail("N01", "greeting 200", fmt.Sprintf("%q", c.Greeting))
@@ -60,11 +62,11 @@ func TestE2EBinary(t *testing.T) {
 
 	// N02: CAPABILITIES starts with VERSION 2 (RFC 3977 §5.2.2)
 	r.check("N02", "CAPABILITIES starts with VERSION 2", func() error {
-		code, line, err := c.tryCmd("CAPABILITIES")
+		code, line, err := c.TryCmd("CAPABILITIES")
 		if err != nil || code != 101 {
 			return fmt.Errorf("code=%d line=%q err=%v", code, line, err)
 		}
-		caps, err := c.tryDotLines()
+		caps, err := c.TryReadDotLines()
 		if err != nil {
 			return err
 		}
@@ -76,7 +78,7 @@ func TestE2EBinary(t *testing.T) {
 
 	// N03: AUTHINFO USER/PASS → 281 (RFC 4643 §2.3)
 	r.check("N03", "AUTHINFO 281", func() error {
-		code, line, err := c.tryAuth(user, pass)
+		code, line, err := c.TryLogin(user, pass)
 		if err != nil || code != 281 {
 			return fmt.Errorf("code=%d line=%q err=%v", code, line, err)
 		}
@@ -85,7 +87,7 @@ func TestE2EBinary(t *testing.T) {
 
 	// N04: POST with all headers → 240 (RFC 3977 §6.3.1)
 	r.check("N04", "POST 240", func() error {
-		code, line, err := c.tryPost(e2eWire(e2eHead(id, group, "E2E binary post", e2eNow()), body))
+		code, line, err := e2ePost(c, e2eArticle(e2eHead(id, group, "E2E binary post", e2eNow()), body))
 		if err != nil || code != 240 {
 			return fmt.Errorf("code=%d line=%q err=%v", code, line, err)
 		}
@@ -97,7 +99,7 @@ func TestE2EBinary(t *testing.T) {
 	r.check("N05", "GROUP "+group+" 211 1 1 1 after the async commit", func() error {
 		var last string
 		err := e2eWaitFor(testWait, func() error {
-			code, line, err := c.tryCmd("GROUP %s", group)
+			code, line, err := c.TryCmd("GROUP %s", group)
 			if err != nil {
 				return err
 			}
@@ -116,11 +118,11 @@ func TestE2EBinary(t *testing.T) {
 
 	// N06: XOVER 1- → exactly 1 overview line (RFC 2980 §2.8)
 	r.check("N06", "XOVER 1- one line", func() error {
-		code, line, err := c.tryCmd("XOVER 1-")
+		code, line, err := c.TryCmd("XOVER 1-")
 		if err != nil || code != 224 {
 			return fmt.Errorf("code=%d line=%q err=%v", code, line, err)
 		}
-		lines, err := c.tryDotLines()
+		lines, err := c.TryReadDotLines()
 		if err != nil {
 			return err
 		}
@@ -132,11 +134,11 @@ func TestE2EBinary(t *testing.T) {
 
 	// N07: ARTICLE 1 → 220 1 <id> and the posted body (RFC 3977 §6.2.1)
 	r.check("N07", "ARTICLE 1 body matches", func() error {
-		code, line, err := c.tryCmd("ARTICLE 1")
+		code, line, err := c.TryCmd("ARTICLE 1")
 		if err != nil || code != 220 || !strings.HasPrefix(line, "220 1 "+id) {
 			return fmt.Errorf("code=%d line=%q err=%v", code, line, err)
 		}
-		lines, err := c.tryDotLines()
+		lines, err := c.TryReadDotLines()
 		if err != nil {
 			return err
 		}
@@ -146,7 +148,7 @@ func TestE2EBinary(t *testing.T) {
 
 	// N08: STAT <id> → 223 (RFC 3977 §6.2.4)
 	r.check("N08", "STAT <id> 223", func() error {
-		code, line, err := c.tryCmd("STAT %s", id)
+		code, line, err := c.TryCmd("STAT %s", id)
 		if err != nil || code != 223 || !strings.Contains(line, id) {
 			return fmt.Errorf("code=%d line=%q err=%v", code, line, err)
 		}
@@ -158,7 +160,7 @@ func TestE2EBinary(t *testing.T) {
 		var last string
 		var stop error // a definite wrong answer ends the polling
 		err := e2eWaitFor(testWait, func() error {
-			code, line, err := c.tryCmd("IHAVE %s", id)
+			code, line, err := c.TryCmd("IHAVE %s", id)
 			if err != nil {
 				stop = err
 				return nil
@@ -171,8 +173,8 @@ func TestE2EBinary(t *testing.T) {
 				return fmt.Errorf("got %q", line)
 			case 335:
 				// wanted again: send the article to keep the stream in sync, then fail
-				_ = c.send(e2eWire(e2eHead(id, group, "E2E binary post", e2eNow()), body))
-				_, l2, _ := c.readStatus()
+				_ = c.Send(e2eWire(e2eHead(id, group, "E2E binary post", e2eNow()), body))
+				_, l2, _ := c.ReadStatus()
 				stop = fmt.Errorf("got %q (then %q) for a stored article", line, l2)
 				return nil
 			}
@@ -190,10 +192,10 @@ func TestE2EBinary(t *testing.T) {
 
 	// N10: TAKETHIS a new id → 239 <id> (RFC 4644 §2.5)
 	r.check("N10", "TAKETHIS new id 239", func() error {
-		if err := c.send("TAKETHIS " + id10 + "\r\n" + e2eWire(e2eHead(id10, group, "E2E binary takethis", e2eNow()), []string{"takethis"})); err != nil {
+		if err := c.Send("TAKETHIS " + id10 + "\r\n" + e2eWire(e2eHead(id10, group, "E2E binary takethis", e2eNow()), []string{"takethis"})); err != nil {
 			return err
 		}
-		code, line, err := c.readStatus()
+		code, line, err := c.ReadStatus()
 		if err != nil || code != 239 || !strings.HasPrefix(line, "239 "+id10) {
 			return fmt.Errorf("code=%d line=%q err=%v", code, line, err)
 		}
@@ -202,7 +204,7 @@ func TestE2EBinary(t *testing.T) {
 
 	// N11: QUIT → 205 (RFC 3977 §5.4)
 	r.check("N11", "QUIT 205", func() error {
-		code, line, err := c.tryCmd("QUIT")
+		code, line, err := c.TryCmd("QUIT")
 		if err != nil || code != 205 {
 			return fmt.Errorf("code=%d line=%q err=%v", code, line, err)
 		}
@@ -241,8 +243,8 @@ func TestE2EBinaryIntake(t *testing.T) {
 		}
 		return fmt.Errorf("got %q, want %v", line, want)
 	}
-	modeReader := func(c *e2eClient) error {
-		code, line, err := c.tryCmd("MODE READER")
+	modeReader := func(c *client.Conn) error {
+		code, line, err := c.TryCmd("MODE READER")
 		if e := statusIs(code, line, err, 200, 201); e != nil {
 			return fmt.Errorf("MODE READER on the same connection: %v", e)
 		}
@@ -258,15 +260,15 @@ func TestE2EBinaryIntake(t *testing.T) {
 		r.fail("N40", "connect", err.Error())
 		t.FailNow()
 	}
-	defer c.close()
-	if code, line, err := c.tryAuth(user, pass); err != nil || code != 281 {
+	defer c.Close()
+	if code, line, err := c.TryLogin(user, pass); err != nil || code != 281 {
 		r.fail("N40", "AUTHINFO 281", fmt.Sprintf("code=%d line=%q err=%v", code, line, err))
 		t.FailNow()
 	}
 
 	// N40: POST to a group that does not exist → 441 (RFC 5537 §3.5: no group is created)
 	r.check("N40", "POST to "+nosuch+" 441", func() error {
-		code, line, err := c.tryPost(e2eWire(e2eHead(newID("n40"), nosuch, "E2E N40 unknown group", e2eNow()), []string{"n40"}))
+		code, line, err := e2ePost(c, e2eArticle(e2eHead(newID("n40"), nosuch, "E2E N40 unknown group", e2eNow()), []string{"n40"}))
 		return statusIs(code, line, err, 441)
 	}())
 
@@ -274,13 +276,13 @@ func TestE2EBinaryIntake(t *testing.T) {
 	// plus Injection-Date and Injection-Info (RFC 5537 §3.5 steps 5/6/10/11)
 	var head42 []string
 	r.check("N42", "POST without Message-ID/Date 240, injected headers", func() error {
-		code, line, err := c.tryPost(e2eWire(e2eHead("", gen, "E2E N42 generated headers", ""), []string{"n42"}))
+		code, line, err := e2ePost(c, e2eArticle(e2eHead("", gen, "E2E N42 generated headers", ""), []string{"n42"}))
 		if e := statusIs(code, line, err, 240); e != nil {
 			return e
 		}
 		var last string
 		if err := e2eWaitFor(testWait, func() error {
-			code, line, err := c.tryCmd("GROUP %s", gen)
+			code, line, err := c.TryCmd("GROUP %s", gen)
 			if err != nil {
 				return err
 			}
@@ -292,11 +294,11 @@ func TestE2EBinaryIntake(t *testing.T) {
 		}); err != nil {
 			return fmt.Errorf("GROUP %s: %v (last %q)", gen, err, last)
 		}
-		code, line, err = c.tryCmd("HEAD 1")
+		code, line, err = c.TryCmd("HEAD 1")
 		if e := statusIs(code, line, err, 221); e != nil {
 			return fmt.Errorf("HEAD 1: %v", e)
 		}
-		hdrs, err := c.tryDotLines()
+		hdrs, err := c.TryReadDotLines()
 		if err != nil {
 			return err
 		}
@@ -330,21 +332,21 @@ func TestE2EBinaryIntake(t *testing.T) {
 	// N44: IHAVE of an article with two Subject headers → 335 then 437
 	r.check("N44", "IHAVE two Subject headers 335 then 437", func() error {
 		id := newID("n44")
-		code, line, err := c.tryCmd("IHAVE %s", id)
+		code, line, err := c.TryCmd("IHAVE %s", id)
 		if e := statusIs(code, line, err, 335); e != nil {
 			return fmt.Errorf("IHAVE: %v", e)
 		}
 		head := append(e2eHead(id, gen, "E2E N44 first subject", e2eNow()), "Subject: E2E N44 second subject")
-		if err := c.send(e2eWire(head, []string{"n44"})); err != nil {
+		if err := c.Send(e2eWire(head, []string{"n44"})); err != nil {
 			return err
 		}
-		code, line, err = c.readStatus()
+		code, line, err = c.ReadStatus()
 		return statusIs(code, line, err, 437)
 	}())
 
 	// N45: POST of a 64 KiB article → 441, the connection stays usable
 	r.check("N45", "POST 64 KiB 441, then MODE READER", func() error {
-		code, line, err := c.tryPost(e2eWire(e2eHead(newID("n45"), gen, "E2E N45 big", e2eNow()), big))
+		code, line, err := e2ePost(c, e2eArticle(e2eHead(newID("n45"), gen, "E2E N45 big", e2eNow()), big))
 		if e := statusIs(code, line, err, 441); e != nil {
 			return e
 		}
@@ -356,14 +358,14 @@ func TestE2EBinaryIntake(t *testing.T) {
 		id1, id2 := newID("n46a"), newID("n46b")
 		stream := "TAKETHIS " + id1 + "\r\n" + e2eWire(e2eHead(id1, gen, "E2E N46 big", e2eNow()), big) +
 			"TAKETHIS " + id2 + "\r\n" + e2eWire(e2eHead(id2, gen, "E2E N46 small", e2eNow()), []string{"n46"})
-		if err := c.send(stream); err != nil {
+		if err := c.Send(stream); err != nil {
 			return err
 		}
 		for _, w := range []struct {
 			code int
 			id   string
 		}{{439, id1}, {239, id2}} {
-			code, line, err := c.readStatus()
+			code, line, err := c.ReadStatus()
 			if e := statusIs(code, line, err, w.code); e != nil {
 				return e
 			}
@@ -376,21 +378,21 @@ func TestE2EBinaryIntake(t *testing.T) {
 
 	// N47: IHAVE with a malformed message-id → 501 (RFC 3977 §3.2.1)
 	r.check("N47", "IHAVE not-a-message-id 501", func() error {
-		code, line, err := c.tryCmd("IHAVE not-a-message-id")
+		code, line, err := c.TryCmd("IHAVE not-a-message-id")
 		return statusIs(code, line, err, 501)
 	}())
 
 	// N48: POST to a moderated group without Approved → 441 (RFC 5537 §3.7 step 5)
 	r.check("N48", "POST to "+mod+" without Approved 441", func() error {
-		code, line, err := c.tryPost(e2eWire(e2eHead(newID("n48"), mod, "E2E N48 moderated", e2eNow()), []string{"n48"}))
+		code, line, err := e2ePost(c, e2eArticle(e2eHead(newID("n48"), mod, "E2E N48 moderated", e2eNow()), []string{"n48"}))
 		return statusIs(code, line, err, 441)
 	}())
 
 	// N49: POST with a header line ".." (un-stuffed ".") → 441, the connection stays usable
 	r.check("N49", "POST with a \"..\" header line 441, then MODE READER", func() error {
 		head := e2eHead(newID("n49"), gen, "E2E N49 dot header", e2eNow())
-		head = append(head[:2], append([]string{"."}, head[2:]...)...) // sent as ".." by e2eWire
-		code, line, err := c.tryPost(e2eWire(head, []string{"n49"}))
+		head = append(head[:2], append([]string{"."}, head[2:]...)...) // sent as ".." (client.StuffBytes)
+		code, line, err := e2ePost(c, e2eArticle(head, []string{"n49"}))
 		if e := statusIs(code, line, err, 441); e != nil {
 			return e
 		}

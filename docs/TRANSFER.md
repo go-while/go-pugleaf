@@ -5,6 +5,18 @@ modes: **streaming** (CHECK/TAKETHIS, RFC 4644) and **IHAVE** (RFC 3977 §6.3.2)
 for peers without streaming. The mode is decided once per run, logged once, and named in the
 end-of-run summary (`Summary: mode=streaming|ihave | total: ... `).
 
+## The target has to know us as a peer
+
+The receiving server decides whether we may feed at all. Since plan `nntp-peering` a go-pugleaf
+target accepts IHAVE, CHECK, TAKETHIS and MODE STREAM only on a **peer connection**, so it needs
+a row in its own `peers` table for the sending host: either `hosts` with our address (then no
+AUTHINFO is needed) or an `in_username`/`in_password` that this run sends with
+`-username`/`-password`. An `nntp_users` row with `posting=1` is not enough any more — it only
+permits POST. Without such a row `MODE STREAM` and `IHAVE` answer `502` (or `480` while a peer
+login would still be accepted) and the run stops with exit code 1, logging
+`peer has neither streaming nor IHAVE (or refuses it): stopping`. The same holds for any INN-like
+target: our address has to be in its `incoming.conf`.
+
 ## Streaming (default)
 
 The pool gets its connections with `MODE STREAM` (`nntp.MODE_STREAM_MV`). Per batch the tool

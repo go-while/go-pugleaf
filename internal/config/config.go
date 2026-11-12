@@ -75,10 +75,41 @@ const DefaultMaxCrossPosts = 9
 // each article's ProcessQueue from the configured value, so this is only a sanity bound.
 const MaxCrossPostsLimit = 99
 
+// CFG_KEY_HISTORY_REJECT_DAYS is how many days a rejected message-id stays in history (INN
+// "remembertrash"), so peers stop offering it again. 0 keeps rejects as long as history; a
+// missing, invalid or negative value reads as DefaultHistoryRejectDays.
+const CFG_KEY_HISTORY_REJECT_DAYS string = "HistoryRejectDays"
+
+// DefaultHistoryRejectDays is the HistoryRejectDays used when the key is missing or invalid.
+const DefaultHistoryRejectDays = 30
+
+// CFG_KEY_PEERDATEMAXAGE is how many hours old the Date (or Injection-Date) of an article a
+// peer feeds us (IHAVE/TAKETHIS) may be before intake refuses it, like INN's artcutoff.
+// 0 = no past cutoff; a missing, invalid, negative or out-of-range value reads as
+// DefaultPeerDateMaxAgeHours. The NNTP server reads it through the config cache.
+const CFG_KEY_PEERDATEMAXAGE string = "PeerArticleMaxAgeHours"
+
+// CFG_KEY_PEERDATEMAXFUTURE is how many hours a peer's article may lie in the future before
+// intake refuses it, like INN's DATE_FUZZ. 0 = no future limit; a missing, invalid, negative
+// or out-of-range value reads as DefaultPeerDateMaxFutureHours.
+const CFG_KEY_PEERDATEMAXFUTURE string = "PeerArticleMaxFutureHours"
+
+// Defaults of the two peer Date limits (hours), used when the key is missing or invalid.
+// The past cutoff is INN's artcutoff default of 10 days (go-while, 2026-11-11).
+const (
+	DefaultPeerDateMaxAgeHours    = 240
+	DefaultPeerDateMaxFutureHours = 24
+)
+
+// PeerDateHoursLimit is the largest peer Date limit the admin page accepts (one year).
+const PeerDateHoursLimit = 24 * 365
+
 // Admin settings form field names
 const FORM_FIELD_HOSTNAME string = "local_nntp_hostname"
 const FORM_FIELD_WEBPOSTSIZE string = "web_post_size"
 const FORM_FIELD_MAXCROSSPOSTS string = "max_crossposts"
+const FORM_FIELD_PEERDATEMAXAGE string = "peer_date_max_age_hours"
+const FORM_FIELD_PEERDATEMAXFUTURE string = "peer_date_max_future_hours"
 const FORM_FIELD_ABUSEMAIL string = "abuse_mail"
 const FORM_FIELD_WEBLOCALNNTP string = "web_local_nntp_server_addr_info"
 const FORM_FIELD_REVERSEPROXY string = "reverse_proxy_addr"
@@ -184,23 +215,6 @@ var DefaultProviders = []Provider{
 		MaxConns:     100,
 		Enabled:      false,
 		Priority:     97,
-		MaxArtSize:   32768,
-		ProxyEnabled: false,
-		ProxyType:    "socks5",
-		ProxyHost:    "127.0.0.1",
-		ProxyPort:    9050,
-	},
-	{
-		Grp:          "Archive",
-		Name:         "pugleaf Archive",
-		Host:         "81-171-22-215.pugleaf.net",
-		Username:     "pugleaf",
-		Password:     "rslight",
-		Port:         563,
-		SSL:          true,
-		MaxConns:     50,
-		Enabled:      false,
-		Priority:     98,
 		MaxArtSize:   32768,
 		ProxyEnabled: false,
 		ProxyType:    "socks5",
@@ -552,7 +566,7 @@ var DefaultProviders = []Provider{
 	{
 		Grp:        "Backup",
 		Name:       "BlueWorldHosting Archive",
-		Host:       "news.blueworldhosting.com",
+		Host:       "archive.usenet.blueworldhosting.com",
 		Username:   "",
 		Password:   "",
 		Port:       563,
@@ -560,6 +574,21 @@ var DefaultProviders = []Provider{
 		MaxConns:   3,
 		Enabled:    false,
 		Priority:   199,
+		MaxArtSize: 32768,
+	},
+	{
+		// news.blueworldhosting.com is BlueWorldHosting's smaller public server; the archive is
+		// archive.usenet.blueworldhosting.com (the entry above).
+		Grp:        "Pub",
+		Name:       "BlueWorldHosting",
+		Host:       "news.blueworldhosting.com",
+		Username:   "",
+		Password:   "",
+		Port:       563,
+		SSL:        true,
+		MaxConns:   3,
+		Enabled:    false,
+		Priority:   200,
 		MaxArtSize: 32768,
 	},
 }

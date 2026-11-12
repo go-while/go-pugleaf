@@ -15,18 +15,7 @@ import (
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
-	"github.com/go-while/nntp-testkit/client"
 )
-
-// flNntpdbExpect runs one command and fails unless it answers want.
-func flNntpdbExpect(t *testing.T, c *client.Conn, want int, format string, args ...interface{}) string {
-	t.Helper()
-	code, line := c.Cmd(format, args...)
-	if code != want {
-		t.Fatalf("%s: got %q, want %d", fmt.Sprintf(format, args...), line, want)
-	}
-	return line
-}
 
 // flNntpdbSetActive changes the active flag of a group (what the web admin page does).
 func flNntpdbSetActive(t *testing.T, group string, active bool) {
@@ -44,29 +33,29 @@ func TestFlNntpdbDeactivatedGroupDropsSelection(t *testing.T) {
 	g := hGroup(t, "flnntpdb.deact", 3, nil)
 	c := hs.dial(t)
 
-	flNntpdbExpect(t, c, 211, "GROUP %s", g)
-	flNntpdbExpect(t, c, 223, "STAT 2")
-	flNntpdbExpect(t, c, 224, "XOVER 1-3")
+	c.ExpectCmd(211, "GROUP %s", g)
+	c.ExpectCmd(223, "STAT 2")
+	c.ExpectCmd(224, "XOVER 1-3")
 	if lines := c.ReadDotLines(); len(lines) != 3 {
 		t.Fatalf("XOVER before the deactivation: %d lines, want 3", len(lines))
 	}
 
 	flNntpdbSetActive(t, g, false)
-	flNntpdbExpect(t, c, 412, "STAT 1") // number form
+	c.ExpectCmd(412, "STAT 1") // number form
 	// the selection is gone for good, not only refused once
 	for _, cmd := range []string{"STAT", "HEAD", "NEXT", "LAST", "XOVER 1-3", "OVER 1-3", "XHDR Subject 1-3", "HDR Subject 1-3", "LISTGROUP"} {
-		flNntpdbExpect(t, c, 412, "%s", cmd)
+		c.ExpectCmd(412, "%s", cmd)
 	}
-	flNntpdbExpect(t, c, 411, "GROUP %s", g)
+	c.ExpectCmd(411, "GROUP %s", g)
 
 	flNntpdbSetActive(t, g, true)
-	flNntpdbExpect(t, c, 211, "GROUP %s", g)
-	flNntpdbExpect(t, c, 223, "STAT 3")
+	c.ExpectCmd(211, "GROUP %s", g)
+	c.ExpectCmd(223, "STAT 3")
 
 	// LISTGROUP without an argument on a group deactivated since it was selected: 412 too
 	flNntpdbSetActive(t, g, false)
-	flNntpdbExpect(t, c, 412, "LISTGROUP")
-	flNntpdbExpect(t, c, 412, "STAT 3")
+	c.ExpectCmd(412, "LISTGROUP")
+	c.ExpectCmd(412, "STAT 3")
 }
 
 // TestFlNntpdbDeletedGroupDropsSelection: a group deleted from the main database behaves like
@@ -75,12 +64,12 @@ func TestFlNntpdbDeletedGroupDropsSelection(t *testing.T) {
 	hs := newTestServer(t, hServerOpts{})
 	g := hGroup(t, "flnntpdb.del", 2, nil)
 	c := hs.dial(t)
-	flNntpdbExpect(t, c, 211, "GROUP %s", g)
+	c.ExpectCmd(211, "GROUP %s", g)
 	if _, err := hTestDB(t).GetMainDB().Exec("DELETE FROM newsgroups WHERE name = ?", g); err != nil {
 		t.Fatalf("delete newsgroup %s: %v", g, err)
 	}
-	flNntpdbExpect(t, c, 412, "ARTICLE 1")
-	flNntpdbExpect(t, c, 412, "NEXT")
+	c.ExpectCmd(412, "ARTICLE 1")
+	c.ExpectCmd(412, "NEXT")
 }
 
 // flNntpdbBreakFullRow makes the full article row of num unreadable (bytes holds text, so the
@@ -115,19 +104,19 @@ func TestFlNntpdbStatByMessageIDLean(t *testing.T) {
 	c := hs.dial(t)
 
 	// (b) no group selected: found through the processor, re-read in its group
-	if line := flNntpdbExpect(t, c, 223, "STAT %s", msgid); line != "223 0 "+msgid+" Article exists" {
+	if line := c.ExpectCmd(223, "STAT %s", msgid); line != "223 0 "+msgid+" Article exists" {
 		t.Errorf("STAT outside the group: %q", line)
 	}
-	flNntpdbExpect(t, c, 403, "ARTICLE %s", msgid)
+	c.ExpectCmd(403, "ARTICLE %s", msgid)
 
 	// (a) the current group
-	flNntpdbExpect(t, c, 211, "GROUP %s", g)
-	if line := flNntpdbExpect(t, c, 223, "STAT %s", msgid); line != "223 2 "+msgid+" Article exists" {
+	c.ExpectCmd(211, "GROUP %s", g)
+	if line := c.ExpectCmd(223, "STAT %s", msgid); line != "223 2 "+msgid+" Article exists" {
 		t.Errorf("STAT in the current group: %q", line)
 	}
-	flNntpdbExpect(t, c, 403, "HEAD %s", msgid)
+	c.ExpectCmd(403, "HEAD %s", msgid)
 	// STAT does not change the current article (RFC 3977 6.2.4.2 for the message-id form)
-	if line := flNntpdbExpect(t, c, 223, "STAT"); line != "223 1 "+hMessageID(g, 1)+" Article exists" {
+	if line := c.ExpectCmd(223, "STAT"); line != "223 1 "+hMessageID(g, 1)+" Article exists" {
 		t.Errorf("current article after STAT <message-id>: %q, want article 1", line)
 	}
 }

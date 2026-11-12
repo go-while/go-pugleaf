@@ -1,609 +1,129 @@
 package nntp
 
+// Tests of the peer subscription list (plan nntp-peering, slice peer-acl):
+// ParsePeerPatterns and MatchNewsgroupPatterns with the INN newsfeeds(5) semantics
+// (last match wins per newsgroup, "!" excludes one newsgroup, "@" poisons the article).
+//
+// Identifiers use the pat / TestPat prefix.
+
 import (
-	"bufio"
-	"os"
-	"path/filepath"
-	"sort"
 	"strings"
 	"testing"
 )
 
-// parseActiveFile reads the tracked active_files/ninja-nl.active file and extracts newsgroup names.
-// By default it returns at most 20 000 groups, sampled evenly across the whole file: the file is
-// sorted, so its first 20 000 lines end inside alt.* and would hold no control.*, junk or gmane.*
-// group for TestRealNewsgroupsWithDefaultPatterns. Set PUGLEAF_PEERING_REALDATA=1 to use every group.
-func parseActiveFile(t *testing.T) []string {
-	t.Helper()
-	const maxGroups = 20000
-	activeFile := filepath.Join("..", "..", "active_files", "ninja-nl.active")
-	realData := os.Getenv("PUGLEAF_PEERING_REALDATA") == "1"
-
-	file, err := os.Open(activeFile)
-	if err != nil {
-		t.Fatalf("cannot open active file %s: %v", activeFile, err)
-	}
-	defer file.Close()
-
-	var newsgroups []string
-	scanner := bufio.NewScanner(file)
-
-	// Skip header lines until we find the first newsgroup
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "fed@") ||
-			strings.HasPrefix(line, "Trying") || strings.HasPrefix(line, "Connected") ||
-			strings.HasPrefix(line, "Escape") || strings.HasPrefix(line, "200 ") ||
-			strings.HasPrefix(line, "list") || strings.HasPrefix(line, "215 ") {
-			continue
-		}
-
-		// Parse newsgroup line format: "group high low status"
-		fields := strings.Fields(line)
-		if len(fields) >= 4 {
-			newsgroups = append(newsgroups, fields[0])
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		t.Fatalf("Error reading active file: %v", err)
-	}
-	if len(newsgroups) == 0 {
-		t.Fatalf("no newsgroups found in active file %s", activeFile)
-	}
-
-	total := len(newsgroups)
-	if !realData && total > maxGroups {
-		stride := (total + maxGroups - 1) / maxGroups
-		sampled := make([]string, 0, maxGroups)
-		for i := 0; i < total; i += stride {
-			sampled = append(sampled, newsgroups[i])
-		}
-		t.Logf("Loaded %d of %d newsgroups from active file (every %d., PUGLEAF_PEERING_REALDATA=1 for all)",
-			len(sampled), total, stride)
-		return sampled
-	}
-
-	t.Logf("Loaded %d newsgroups from active file", len(newsgroups))
-	return newsgroups
-}
-
-// peeringUnmatched returns the newsgroups of parseActiveFile that no pattern of
-// DefaultBinaryExcludePatterns rejects, sorted. It is computed in-process for every
-// caller, so no test depends on a file an earlier test wrote.
-func peeringUnmatched(t *testing.T) []string {
-	t.Helper()
-	var unmatched []string
-	for _, group := range parseActiveFile(t) {
-		result := MatchNewsgroupPatterns(group, []string{"*"}, []string{}, DefaultBinaryExcludePatterns)
-		if result.Action != "reject" {
-			unmatched = append(unmatched, group)
-		}
-	}
-	sort.Strings(unmatched)
-	return unmatched
-}
-
-// peeringLines joins groups into newline-terminated lines for the output files.
-func peeringLines(groups []string) string {
-	if len(groups) == 0 {
-		return ""
-	}
-	return strings.Join(groups, "\n") + "\n"
-}
-
-func TestBasicPatternMatching(t *testing.T) {
-	// Test basic wildcard matching
-	testCases := []struct {
-		newsgroup       string
-		sendPatterns    []string
-		excludePatterns []string
-		rejectPatterns  []string
-		expectedAction  string
+func TestPatParse(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want []string
 	}{
-		{
-			newsgroup:       "comp.lang.go",
-			sendPatterns:    []string{"comp.*"},
-			excludePatterns: []string{},
-			rejectPatterns:  []string{},
-			expectedAction:  "send",
-		},
-		{
-			newsgroup:       "alt.sex.stories",
-			sendPatterns:    []string{"*"},
-			excludePatterns: []string{},
-			rejectPatterns:  []string{"@alt.sex.*"},
-			expectedAction:  "reject",
-		},
-		{
-			newsgroup:       "comp.test",
-			sendPatterns:    []string{"comp.*"},
-			excludePatterns: []string{"!*.test"},
-			rejectPatterns:  []string{},
-			expectedAction:  "exclude",
-		},
-		{
-			newsgroup:       "alt.music",
-			sendPatterns:    []string{"comp.*"},
-			excludePatterns: []string{},
-			rejectPatterns:  []string{},
-			expectedAction:  "no-send",
-		},
-	}
-
-	for _, tc := range testCases {
-		result := MatchNewsgroupPatterns(tc.newsgroup, tc.sendPatterns, tc.excludePatterns, tc.rejectPatterns)
-		if result.Action != tc.expectedAction {
-			t.Errorf("Newsgroup %s: expected action %s, got %s (explanation: %s)",
-				tc.newsgroup, tc.expectedAction, result.Action, result.Explanation)
+		{"", nil},
+		{"*", []string{"*"}},
+		{"comp.*,!comp.lang.*,@*.binaries.*", []string{"comp.*", "!comp.lang.*", "@*.binaries.*"}},
+		{" comp.* , , !junk ", []string{"comp.*", "!junk"}},
+		{"a\tb\nc\r,d", []string{"a", "b", "c", "d"}},
+		{"!,@,,", nil}, // a bare prefix is not a pattern
+	} {
+		got := ParsePeerPatterns(tc.in)
+		if strings.Join(got, "|") != strings.Join(tc.want, "|") {
+			t.Errorf("ParsePeerPatterns(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
 }
 
-func TestDefaultPatterns(t *testing.T) {
-	// Test that our default patterns exist and work
-	if len(DefaultNoSendPatterns) == 0 {
-		t.Error("DefaultNoSendPatterns should not be empty")
-	}
-
-	if len(DefaultBinaryExcludePatterns) == 0 {
-		t.Error("DefaultBinaryExcludePatterns should not be empty")
-	}
-
-	if len(DefaultSexExcludePatterns) == 0 {
-		t.Error("DefaultSexExcludePatterns should not be empty")
-	}
-
-	t.Logf("DefaultNoSendPatterns: %v", DefaultNoSendPatterns)
-	t.Logf("DefaultBinaryExcludePatterns: %v", DefaultBinaryExcludePatterns[:3]) // Show first 3
-	t.Logf("DefaultSexExcludePatterns: %v", DefaultSexExcludePatterns)
-
-	// Test some known groups
-	testCases := []struct {
-		newsgroup   string
-		patterns    []string
-		shouldMatch bool
-		description string
+// TestPatOneGroup: one newsgroup against a pattern list; the last pattern that matches it
+// decides (INN newsfeeds(5)).
+func TestPatOneGroup(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		patterns string
+		group    string
+		accept   bool
+		poisoned bool
 	}{
-		{"control.cancel", DefaultNoSendPatterns, true, "control group should be excluded"},
-		{"junk.test", DefaultNoSendPatterns, true, "junk group should be excluded"},
-		{"comp.lang.go", DefaultNoSendPatterns, false, "comp group should not be excluded"},
-		{"alt.sex.stories", DefaultSexExcludePatterns, true, "sex group should be excluded"},
-		{"alt.music", DefaultSexExcludePatterns, false, "music group should not be excluded"},
-	}
-
-	for _, tc := range testCases {
-		// For exclude patterns, we test them as excludePatterns
-		result := MatchNewsgroupPatterns(tc.newsgroup, []string{"*"}, tc.patterns, []string{})
-		matched := (result.Action == "exclude")
-
-		if matched != tc.shouldMatch {
-			t.Errorf("%s: expected match=%v, got %v (action: %s)",
-				tc.description, tc.shouldMatch, matched, result.Action)
+		{"all", "*", "comp.lang.go", true, false},
+		{"none", "", "comp.lang.go", false, false},
+		{"no-match", "comp.*", "alt.test", false, false},
+		{"exact", "comp.lang.go", "comp.lang.go", true, false},
+		{"prefix-is-no-match", "comp", "comp.lang.go", false, false},
+		{"star", "comp.*", "comp.lang.go", true, false},
+		{"question", "comp.lang.g?", "comp.lang.go", true, false},
+		{"question-one-rune-only", "comp.lang.g?", "comp.lang.goo", false, false},
+		{"excluded", "comp.*,!comp.lang.*", "comp.lang.go", false, false},
+		{"re-included-after-exclude", "comp.*,!comp.lang.*,comp.lang.go", "comp.lang.go", true, false},
+		{"poison", "*,@*.binaries.*", "alt.binaries.cd", false, true},
+		{"poison-overridden-by-a-later-pattern", "@*.binaries.*,alt.binaries.cd", "alt.binaries.cd", true, false},
+		{"poison-after-an-include", "alt.*,@alt.binaries.*", "alt.binaries.cd", false, true},
+		{"only-exclusions", "!*", "alt.test", false, false},
+	} {
+		res := MatchNewsgroupPatterns(tc.patterns, []string{tc.group})
+		if res.Accept() != tc.accept || res.Poisoned != tc.poisoned {
+			t.Errorf("%s: %q vs %q = %+v, want accept=%v poisoned=%v",
+				tc.name, tc.patterns, tc.group, res, tc.accept, tc.poisoned)
 		}
 	}
 }
 
-func TestRealNewsgroupsWithDefaultPatterns(t *testing.T) {
-	newsgroups := parseActiveFile(t)
-	if len(newsgroups) == 0 {
-		t.Skip("No newsgroups loaded, skipping test")
-	}
-
-	// Test default patterns against real newsgroups
-	excludeMatches := 0
-	sexMatches := 0
-	binaryMatches := 0
-
-	// Sample matches for debugging
-	excludeSamples := []string{}
-	sexSamples := []string{}
-	binarySamples := []string{}
-
-	for _, group := range newsgroups {
-		// Test exclude patterns
-		result := MatchNewsgroupPatterns(group, []string{"*"}, DefaultNoSendPatterns, []string{})
-		if result.Action == "exclude" {
-			excludeMatches++
-			if len(excludeSamples) < 10 {
-				excludeSamples = append(excludeSamples, group+" ("+result.Pattern+")")
-			}
-		}
-
-		// Test sex patterns (as reject patterns)
-		result = MatchNewsgroupPatterns(group, []string{"*"}, []string{}, DefaultSexExcludePatterns)
-		if result.Action == "reject" {
-			sexMatches++
-			if len(sexSamples) < 10 {
-				sexSamples = append(sexSamples, group+" ("+result.Pattern+")")
-			}
-		}
-
-		// Test binary patterns (as reject patterns)
-		result = MatchNewsgroupPatterns(group, []string{"*"}, []string{}, DefaultBinaryExcludePatterns)
-		if result.Action == "reject" {
-			binaryMatches++
-			if len(binarySamples) < 10 {
-				binarySamples = append(binarySamples, group+" ("+result.Pattern+")")
-			}
-		}
-	}
-
-	t.Logf("Testing %d real newsgroups:", len(newsgroups))
-	t.Logf("  DefaultNoSendPatterns excluded: %d groups", excludeMatches)
-	t.Logf("  Sample excludes: %v", excludeSamples)
-	t.Logf("  DefaultSexExcludePatterns rejected: %d groups", sexMatches)
-	t.Logf("  Sample sex rejects: %v", sexSamples)
-	t.Logf("  DefaultBinaryExcludePatterns rejected: %d groups", binaryMatches)
-	t.Logf("  Sample binary rejects: %v", binarySamples)
-
-	// Basic sanity checks
-	if excludeMatches == 0 {
-		t.Error("Expected some matches for DefaultNoSendPatterns")
-	}
-	if sexMatches == 0 {
-		t.Error("Expected some matches for DefaultSexExcludePatterns")
-	}
-}
-
-func TestPatternValidation(t *testing.T) {
-	testCases := []struct {
-		patterns     []string
-		expectErrors bool
+// TestPatCrosspost: a crossposted article is wanted when one of its newsgroups is, and
+// refused as soon as one of them is poisoned ("@").
+func TestPatCrosspost(t *testing.T) {
+	const patterns = "comp.*,alt.*,!alt.flame,@*.binaries.*"
+	for _, tc := range []struct {
+		name     string
+		groups   []string
+		wanted   []string
+		poisoned bool
 	}{
-		{[]string{"comp.*", "rec.*", "!*.test"}, false},
-		{[]string{"", "comp.*"}, true}, // empty pattern
-		{[]string{"comp.**.*"}, true},  // double wildcard
-		{[]string{"comp.*", "rec.*"}, false},
-	}
-
-	for i, tc := range testCases {
-		errors := ValidatePatterns(tc.patterns)
-		hasErrors := len(errors) > 0
-
-		if hasErrors != tc.expectErrors {
-			t.Errorf("Test case %d: expected errors=%v, got errors=%v (%v)",
-				i, tc.expectErrors, hasErrors, errors)
+		{"both wanted", []string{"comp.lang.go", "alt.test"}, []string{"comp.lang.go", "alt.test"}, false},
+		{"one wanted", []string{"comp.lang.go", "misc.test"}, []string{"comp.lang.go"}, false},
+		{"excluded group dropped", []string{"alt.flame", "alt.test"}, []string{"alt.test"}, false},
+		{"only excluded", []string{"alt.flame"}, nil, false},
+		{"none wanted", []string{"misc.test"}, nil, false},
+		{"poisoned wins", []string{"comp.lang.go", "alt.binaries.cd"}, nil, true},
+		{"poisoned first", []string{"alt.binaries.cd", "comp.lang.go"}, nil, true},
+		{"no groups", nil, nil, false},
+	} {
+		res := MatchNewsgroupPatterns(patterns, tc.groups)
+		if res.Poisoned != tc.poisoned {
+			t.Errorf("%s: poisoned=%v, want %v", tc.name, res.Poisoned, tc.poisoned)
+		}
+		if strings.Join(res.Wanted, "|") != strings.Join(tc.wanted, "|") {
+			t.Errorf("%s: wanted %q, want %q", tc.name, res.Wanted, tc.wanted)
+		}
+		if res.Accept() != (!tc.poisoned && len(tc.wanted) > 0) {
+			t.Errorf("%s: Accept()=%v with wanted %q poisoned=%v", tc.name, res.Accept(), res.Wanted, res.Poisoned)
 		}
 	}
 }
 
-func TestPatternHelpers(t *testing.T) {
-	// Test GetPatternType
-	testCases := []struct {
-		pattern      string
-		expectedType string
+// TestPatPatternReported: the result names the pattern that decided, for the log line.
+func TestPatPatternReported(t *testing.T) {
+	res := MatchNewsgroupPatterns("comp.*,@*.binaries.*", []string{"comp.lang.go", "alt.binaries.cd"})
+	if !res.Poisoned || res.Pattern != "@*.binaries.*" {
+		t.Errorf("poisoned by %+v, want the @ pattern", res)
+	}
+	res = MatchNewsgroupPatterns("comp.*,alt.*", []string{"alt.test", "comp.lang.go"})
+	if !res.Accept() || res.Pattern != "alt.*" {
+		t.Errorf("accepted by %+v, want the pattern of the first wanted group", res)
+	}
+}
+
+// TestPatDefaultOutPatterns: the default out_patterns of the peers table (migration 0034)
+// behave as intended. The outgoing feed uses them from wave 2 on; the semantics are tested
+// here, where the matcher lives.
+func TestPatDefaultOutPatterns(t *testing.T) {
+	const patterns = "*,!control*,!junk"
+	for _, tc := range []struct {
+		group string
+		want  bool
 	}{
-		{"comp.*", "normal"},
-		{"!*.test", "exclude"},
-		{"@alt.sex.*", "reject"},
-	}
-
-	for _, tc := range testCases {
-		result := GetPatternType(tc.pattern)
-		if result != tc.expectedType {
-			t.Errorf("Pattern %s: expected type %s, got %s",
-				tc.pattern, tc.expectedType, result)
+		{"comp.lang.go", true},
+		{"control", false},
+		{"control.cancel", false},
+		{"junk", false},
+		{"junk.local", true}, // "!junk" is exact: only the group itself
+	} {
+		if got := MatchNewsgroupPatterns(patterns, []string{tc.group}).Accept(); got != tc.want {
+			t.Errorf("default out_patterns vs %q = %v, want %v", tc.group, got, tc.want)
 		}
 	}
-
-	// Test NormalizePattern
-	normalizeTests := []struct {
-		pattern  string
-		expected string
-	}{
-		{"comp.*", "comp.*"},
-		{"!*.test", "*.test"},
-		{"@alt.sex.*", "alt.sex.*"},
-	}
-
-	for _, tc := range normalizeTests {
-		result := NormalizePattern(tc.pattern)
-		if result != tc.expected {
-			t.Errorf("Pattern %s: expected normalized %s, got %s",
-				tc.pattern, tc.expected, result)
-		}
-	}
-}
-
-func TestArticleMatching(t *testing.T) {
-	// Test crossposted articles
-	testCases := []struct {
-		newsgroups      []string
-		sendPatterns    []string
-		excludePatterns []string
-		rejectPatterns  []string
-		expectedAction  string
-		description     string
-	}{
-		{
-			newsgroups:      []string{"comp.lang.go"},
-			sendPatterns:    []string{"comp.*"},
-			excludePatterns: []string{},
-			rejectPatterns:  []string{},
-			expectedAction:  "send",
-			description:     "Single allowed group",
-		},
-		{
-			newsgroups:      []string{"comp.lang.go", "rec.humor"},
-			sendPatterns:    []string{"comp.*", "rec.*"},
-			excludePatterns: []string{},
-			rejectPatterns:  []string{},
-			expectedAction:  "send",
-			description:     "Multiple allowed groups",
-		},
-		{
-			newsgroups:      []string{"comp.lang.go", "alt.sex.stories"},
-			sendPatterns:    []string{"*"},
-			excludePatterns: []string{},
-			rejectPatterns:  []string{"@alt.sex.*"},
-			expectedAction:  "reject",
-			description:     "One group causes rejection",
-		},
-		{
-			newsgroups:      []string{"alt.music", "alt.cooking"},
-			sendPatterns:    []string{"comp.*"},
-			excludePatterns: []string{},
-			rejectPatterns:  []string{},
-			expectedAction:  "no-send",
-			description:     "No matching send patterns",
-		},
-	}
-
-	for _, tc := range testCases {
-		result := MatchArticleForPeer(tc.newsgroups, tc.sendPatterns, tc.excludePatterns, tc.rejectPatterns)
-		if result.Action != tc.expectedAction {
-			t.Errorf("%s: expected action %s, got %s (explanation: %s)",
-				tc.description, tc.expectedAction, result.Action, result.Explanation)
-		}
-	}
-}
-
-func TestPerformanceWithRealData(t *testing.T) {
-	newsgroups := parseActiveFile(t)
-	if len(newsgroups) == 0 {
-		t.Skip("No newsgroups loaded, skipping performance test")
-	}
-
-	// Test with a realistic peer configuration
-	sendPatterns := []string{"*"}
-	excludePatterns := DefaultNoSendPatterns
-	rejectPatterns := append(DefaultSexExcludePatterns, DefaultBinaryExcludePatterns...)
-
-	matches := 0
-	for _, group := range newsgroups {
-		result := MatchNewsgroupPatterns(group, sendPatterns, excludePatterns, rejectPatterns)
-		if result.Action == "send" {
-			matches++
-		}
-	}
-
-	t.Logf("Performance test completed:")
-	t.Logf("  Processed %d newsgroups", len(newsgroups))
-	t.Logf("  %d would be sent to peer", matches)
-	t.Logf("  %d would be filtered out", len(newsgroups)-matches)
-
-	percentage := float64(matches) / float64(len(newsgroups)) * 100
-	t.Logf("  %.1f%% of groups would be sent", percentage)
-}
-
-func TestAllDefaultBinaryPatterns(t *testing.T) {
-	newsgroups := parseActiveFile(t)
-	if len(newsgroups) == 0 {
-		t.Skip("No newsgroups loaded, skipping test")
-	}
-
-	t.Logf("Testing ALL default binary exclude patterns against %d newsgroups:", len(newsgroups))
-
-	totalMatches := 0
-
-	// Test each pattern in DefaultBinaryExcludePatterns individually
-	for i, pattern := range DefaultBinaryExcludePatterns {
-		matches := 0
-		samples := []string{}
-
-		for _, group := range newsgroups {
-			result := MatchNewsgroupPatterns(group, []string{"*"}, []string{}, []string{pattern})
-			if result.Action == "reject" {
-				matches++
-				if len(samples) < 3 {
-					samples = append(samples, group)
-				}
-			}
-		}
-
-		t.Logf("Pattern %d: %s -> %d matches", i+1, pattern, matches)
-		if len(samples) > 0 {
-			t.Logf("    Samples: %v", samples)
-		}
-
-		totalMatches += matches
-	}
-
-	t.Logf("Total pattern matches: %d (with overlaps)", totalMatches)
-
-	// Groups no binary pattern rejects (the same list the unmatched-analysis tests use)
-	remainingGroups := peeringUnmatched(t)
-
-	t.Logf("Groups NOT matched by any binary pattern: %d", len(remainingGroups))
-	t.Logf("Binary patterns coverage: %.2f%% (%d out of %d groups blocked)",
-		float64(len(newsgroups)-len(remainingGroups))/float64(len(newsgroups))*100,
-		len(newsgroups)-len(remainingGroups), len(newsgroups))
-
-	// Write remaining unmatched groups to active.out in the test's temp dir
-	outputFile := filepath.Join(t.TempDir(), "active.out")
-	if err := os.WriteFile(outputFile, []byte(peeringLines(remainingGroups)), 0o600); err != nil {
-		t.Fatalf("Failed to write output file: %v", err)
-	}
-
-	t.Logf("Wrote %d unmatched groups to %s", len(remainingGroups), outputFile)
-
-	// Show some samples of what's NOT being caught
-	if len(remainingGroups) > 0 {
-		sampleCount := 10
-		if len(remainingGroups) < sampleCount {
-			sampleCount = len(remainingGroups)
-		}
-		t.Logf("Sample groups NOT caught by binary patterns: %v", remainingGroups[:sampleCount])
-	}
-}
-
-func TestSearchUnmatchedForBinaryGroups(t *testing.T) {
-	// Groups no binary pattern rejects, computed in-process
-	unmatchedGroups := peeringUnmatched(t)
-
-	t.Logf("Searching %d unmatched groups for potential binary groups...", len(unmatchedGroups))
-
-	// Search for common binary-related keywords
-	binaryKeywords := []string{
-		"bin", "binary", "binarie", "file", "download", "upload",
-		"torrent", "image", "picture", "video", "audio", "game",
-		"app", "software", "iso", "zip", "rar", "exe", "pdf",
-		"ebook", "book", "comic", "manga", "anime", "tv", "movie",
-		"music", "album", "song", "release", "rip", "cam", "ts",
-		"hdtv", "bluray", "dvdrip", "webrip", "x264", "x265",
-		"720p", "1080p", "4k", "uhd", "codec", "encode",
-	}
-
-	potentialBinary := make(map[string][]string)
-
-	for _, keyword := range binaryKeywords {
-		matches := []string{}
-		for _, group := range unmatchedGroups {
-			if strings.Contains(strings.ToLower(group), keyword) {
-				matches = append(matches, group)
-				if len(matches) >= 10 { // Limit samples
-					break
-				}
-			}
-		}
-		if len(matches) > 0 {
-			potentialBinary[keyword] = matches
-		}
-	}
-
-	t.Logf("Found potential binary groups by keyword:")
-	for keyword, matches := range potentialBinary {
-		t.Logf("  %s: %d matches, samples: %v", keyword, len(matches), matches[:min(len(matches), 3)])
-	}
-
-	// Also look for suspicious patterns
-	suspiciousPatterns := []string{
-		".*\\.files.*",    // .files.
-		".*\\.data.*",     // .data.
-		".*\\.share.*",    // .share.
-		".*\\.exchange.*", // .exchange.
-		".*alt\\..*",      // alt.* groups we might have missed
-		".*test.*",        // test groups
-		".*misc.*",        // misc groups might hide binaries
-	}
-
-	t.Logf("Checking suspicious patterns:")
-	for _, pattern := range suspiciousPatterns {
-		matches := 0
-		samples := []string{}
-
-		for _, group := range unmatchedGroups {
-			if matched, _ := filepath.Match(pattern, group); matched {
-				matches++
-				if len(samples) < 5 {
-					samples = append(samples, group)
-				}
-			}
-		}
-		if matches > 0 {
-			t.Logf("  %s: %d matches, samples: %v", pattern, matches, samples)
-		}
-	}
-}
-
-func TestAnalyzeUnmatchedGroupsToFiles(t *testing.T) {
-	// Groups no binary pattern rejects, computed in-process
-	unmatchedGroups := peeringUnmatched(t)
-
-	outDir := t.TempDir()
-	t.Logf("Analyzing %d unmatched groups and saving results to files in %s...", len(unmatchedGroups), outDir)
-
-	// Search for specific binary-related keywords and save to files
-	binaryKeywords := []string{
-		"torrent", "download", "upload", "file", "picture", "image",
-		"video", "audio", "music", "movie", "tv", "game", "app",
-		"software", "iso", "zip", "rar", "exe", "pdf", "ebook",
-		"warez", "crack", "serial", "patch", "rip", "cam", "hdtv",
-		"anime", "manga", "comic", "album", "song", "bin",
-	}
-
-	// Create output files for each keyword
-	for _, keyword := range binaryKeywords {
-		matches := []string{}
-		for _, group := range unmatchedGroups {
-			if strings.Contains(strings.ToLower(group), keyword) {
-				matches = append(matches, group)
-			}
-		}
-
-		if len(matches) > 0 {
-			filename := filepath.Join(outDir, "analysis_"+keyword+".txt")
-			if err := os.WriteFile(filename, []byte(peeringLines(matches)), 0o600); err != nil {
-				t.Errorf("Error writing %s: %v", filename, err)
-				continue
-			}
-
-			t.Logf("Keyword '%s': %d groups -> %s", keyword, len(matches), filename)
-		}
-	}
-
-	// Check for specific suspicious patterns
-	patterns := map[string]string{
-		"alt_sex":         "alt.sex",
-		"alt_picture":     "alt.picture",
-		"files_groups":    ".files.",
-		"download_groups": ".download",
-		"share_groups":    ".share",
-		"alt_misc":        "alt.*.misc",
-	}
-
-	for name, pattern := range patterns {
-		matches := []string{}
-
-		for _, group := range unmatchedGroups {
-			groupLower := strings.ToLower(group)
-			matched := false
-
-			if strings.Contains(pattern, "*") {
-				// Handle wildcard patterns like "alt.*.misc"
-				parts := strings.Split(pattern, "*")
-				if len(parts) == 2 {
-					matched = strings.HasPrefix(groupLower, strings.ToLower(parts[0])) &&
-						strings.HasSuffix(groupLower, strings.ToLower(parts[1]))
-				}
-			} else {
-				matched = strings.Contains(groupLower, strings.ToLower(pattern))
-			}
-
-			if matched {
-				matches = append(matches, group)
-			}
-		}
-
-		if len(matches) > 0 {
-			filename := filepath.Join(outDir, "analysis_pattern_"+name+".txt")
-			if err := os.WriteFile(filename, []byte(peeringLines(matches)), 0o600); err != nil {
-				t.Errorf("Error writing %s: %v", filename, err)
-				continue
-			}
-
-			t.Logf("Pattern '%s': %d groups -> %s", pattern, len(matches), filename)
-		}
-	}
-
-	t.Logf("Analysis complete! The analysis_*.txt files in %s list potential binary groups we missed.", outDir)
-	t.Logf("The directory is removed after the test; the counts above show whether we need additional patterns.")
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

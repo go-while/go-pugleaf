@@ -308,3 +308,40 @@ func TestFuBatchRetry2ThreadingFailureIsNotRetried(t *testing.T) {
 		t.Fatalf("batchProcessThreading returns %v instead of swallowing the failure of the threading write: the PHASE 2 call site in processNewsgroupBatch can now fail, so it needs a bounded loop like retry1's and the same bounded-drop test", err)
 	}
 }
+
+// TestFuBatchDisableThreading: with DBConfig.DisableThreading (nntp-server
+// -disable-webserver-post-threads) the batch commits the articles and writes no threads.
+func TestFuBatchDisableThreading(t *testing.T) {
+	logs := fuBatchCaptureLog(t)
+	db := fuBatchIsolatedDB(t)
+	const articles = 3
+	for _, disabled := range []bool{false, true} {
+		db.dbconfig.DisableThreading = disabled
+		group := w0Name("fubatch.nothreads")
+		task := fuBatchTask(t, db.Batch, group, articles)
+		fuBatchRun(t, db, task, testWait, logs)
+
+		groupDB, err := db.GetGroupDB(group)
+		if err != nil {
+			t.Fatalf("GetGroupDB(%s): %v", group, err)
+		}
+		var committed, threads int
+		if err := RetryableQueryRowScan(groupDB.DB, "SELECT COUNT(*) FROM articles", nil, &committed); err != nil {
+			t.Fatalf("count articles: %v", err)
+		}
+		if err := RetryableQueryRowScan(groupDB.DB, "SELECT COUNT(*) FROM threads", nil, &threads); err != nil {
+			t.Fatalf("count threads: %v", err)
+		}
+		groupDB.Return()
+		if committed != articles {
+			t.Errorf("DisableThreading=%v: articles committed = %d, want %d", disabled, committed, articles)
+		}
+		wantThreads := articles
+		if disabled {
+			wantThreads = 0
+		}
+		if threads != wantThreads {
+			t.Errorf("DisableThreading=%v: threads rows = %d, want %d", disabled, threads, wantThreads)
+		}
+	}
+}

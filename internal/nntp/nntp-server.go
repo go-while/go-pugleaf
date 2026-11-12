@@ -17,6 +17,7 @@ import (
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
+	"github.com/go-while/go-pugleaf/internal/peerstats"
 )
 
 // Forward declaration to avoid circular imports
@@ -32,6 +33,9 @@ type ArticleProcessor interface {
 	// CheckMessageID returns history.CasePass (wanted), history.CaseDupes (have it),
 	// history.CaseRetry (in progress) or history.CaseError for an offered message-id
 	CheckMessageID(messageID string) int
+	// RememberReject records messageID as rejected in the history index (a permanent refusal
+	// decided in the NNTP layer: Path loop, peer pattern), so peers stop offering it again.
+	RememberReject(messageID string)
 	// FindArticleByMessageID looks in currentGroup first, then in the groups from the history index.
 	// A definite miss returns an error wrapping ErrArticleNotFound (nntp-backend-pool.go).
 	FindArticleByMessageID(messageID, currentGroup string) (*models.Article, error)
@@ -101,14 +105,26 @@ type NNTPServer struct {
 	AuthManager *AuthManager
 	Stats       *ServerStats
 	Processor   ArticleProcessor // For handling incoming articles (POST/IHAVE/TAKETHIS)
-	shutdown    chan struct{}
-	wg          *sync.WaitGroup // Use external waitgroup for coordination
-	mu          sync.RWMutex
-	local430    *Local430     // Cache for 430 responses
-	postWait    atomic.Int64  // PostCommitWait in nanoseconds (SetPostCommitWait)
-	xref        xrefModeStore // Xref: header mode (SetXrefMode)
-	running     bool
-	bgOnce      sync.Once // starts the background goroutines once
+	// Peers decides which connections may feed (IHAVE/CHECK/TAKETHIS/MODE STREAM, plan
+	// nntp-peering). nil: no peers, so nothing may feed. It caches the peers table and
+	// starts no goroutine.
+	Peers *PeerRegistry
+	// peerStats counts what peers feed us (plan peering-stats); SetPeerStats installs the
+	// collector, PeerStats reads it. An atomic pointer, so it may be set while the server
+	// runs; nil means peerstats.Nop, which counts nothing.
+	peerStats atomic.Pointer[peerstats.Collector]
+	// artSize, when set (SetArticleSizeSource), gives the article size limit instead of
+	// Config.NNTP.MaxArtSize: nntp-server without -maxartsize follows the admin setting.
+	artSize atomic.Pointer[func() (int64, bool)]
+
+	shutdown chan struct{}
+	wg       *sync.WaitGroup // Use external waitgroup for coordination
+	mu       sync.RWMutex
+	local430 *Local430     // Cache for 430 responses
+	postWait atomic.Int64  // PostCommitWait in nanoseconds (SetPostCommitWait)
+	xref     xrefModeStore // Xref: header mode (SetXrefMode)
+	running  bool
+	bgOnce   sync.Once // starts the background goroutines once
 
 	// Same-process arrivals (POST/IHAVE/TAKETHIS) of the last ArrivalGrace: the by-message-id
 	// lookup tries their groups and caches no miss for them (plan post-430-window).
@@ -162,6 +178,7 @@ func NewNNTPServer(db *database.Database, cfg *config.ServerConfig, mainWG *sync
 		AuthManager: NewAuthManager(db),
 		Stats:       NewServerStats(),
 		Processor:   processor,
+		Peers:       NewPeerRegistry(db),
 		shutdown:    make(chan struct{}),
 		wg:          mainWG, // Use external waitgroup for coordination
 		local430:    &Local430{cache: make(map[string]time.Time), ttl: DefaultLocal430TTL},
@@ -558,6 +575,29 @@ func (s *NNTPServer) Stop() error {
 	}
 	log.Printf("[NNTP] stats: %s", s.Stats.Summary())
 	return nil
+}
+
+// SetPeerStats installs the collector of the incoming peer statistics (plan peering-stats);
+// nil switches the counting off again (peerstats.Nop).
+func (s *NNTPServer) SetPeerStats(c peerstats.Collector) {
+	if s == nil {
+		return
+	}
+	if c == nil {
+		c = peerstats.Nop
+	}
+	s.peerStats.Store(&c)
+}
+
+// PeerStats is the installed collector, peerstats.Nop when there is none.
+func (s *NNTPServer) PeerStats() peerstats.Collector {
+	if s == nil {
+		return peerstats.Nop
+	}
+	if p := s.peerStats.Load(); p != nil && *p != nil {
+		return *p
+	}
+	return peerstats.Nop
 }
 
 // IsRunning returns whether the server is currently running

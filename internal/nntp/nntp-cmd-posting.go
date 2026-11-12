@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/mail"
 	"strconv"
 	"strings"
@@ -68,6 +67,11 @@ func (c *ClientConnection) handlePost() error {
 		return err // I/O error: nothing can be written
 	}
 
+	// The size of what the poster sent, taken before injectProtoArticle adds Message-ID,
+	// Date, Injection-Date, Injection-Info and the Path identity: a group's max_art_size
+	// must not count the headers this server injected (plan e2e-gap-tests, item (c)).
+	size := feedWireSize(head, body)
+
 	head, err = c.injectProtoArticle(head)
 	if err != nil {
 		log.Printf("[NNTP] POST refused: %v", err)
@@ -83,6 +87,7 @@ func (c *ClientConnection) handlePost() error {
 		return c.sendResponse(441, "Posting failed (invalid article)")
 	}
 	article.Posted = true // injected here: the processor applies the POST-only group policy
+	c.setIntakePolicy(article, size)
 
 	// Copy the id and the groups before the hand-off: once the processor returns, the batch
 	// goroutine may already have cleared the struct (db_batch.go processNewsgroupBatch),
@@ -113,34 +118,40 @@ func (c *ClientConnection) handleIHave(args []string) error {
 		return c.sendResponse(501, "IHAVE command requires exactly one argument (message-ID)")
 	}
 
-	// Check authentication and permission before requesting the article
-	if !c.authenticated {
+	// Only a peer may feed (plan nntp-peering); checked before the article is requested
+	if !c.feedAllowed() {
 		c.rateLimitOnError()
-		return c.sendResponse(480, "Transfer permission denied (authentication required)")
-	}
-	if c.user != nil && !c.user.Posting {
-		c.rateLimitOnError()
-		return c.sendResponse(502, "Transfer not permitted for this user")
+		code := c.feedDeniedCode()
+		c.peerStatsDenied(code) // plan peering-stats
+		if code == 480 {
+			return c.sendResponse(480, "Transfer permission denied (authentication required)")
+		}
+		return c.sendResponse(502, "Transfer not permitted (peers only)")
 	}
 	messageID := args[0]
 	// RFC 3977 §3.2.1, §3.6: a malformed message-id argument is a syntax error
 	if !common.ValidMessageID(messageID) {
 		c.rateLimitOnError()
-		return c.sendResponse(501, "Syntax error in message-id")
+		return c.sendResponse(501, "Syntax error in message-id") // a syntax error is no offer
 	}
+	// The IHAVE of an id this connection CHECKed before counts no second offer.
+	offer := c.peerStatsOffer(false, messageID)
 
 	// Check if we want this article
 	switch c.server.Processor.CheckMessageID(messageID) {
 	case history.CasePass:
 		// wanted
 	case history.CaseDupes:
+		c.peerStatsAdd(peerFeedCounters(offer, 435, 0, false))
 		return c.sendResponse(435, "Not wanted")
 	case history.CaseRetry:
 		// another connection is transferring it right now
+		c.peerStatsAdd(peerFeedCounters(offer, 436, 0, false))
 		return c.sendResponse(436, "Retry later")
 	default: // history.CaseError
 		log.Printf("Error checking article history for %s", messageID)
 		c.rateLimitOnError()
+		c.peerStatsAdd(peerFeedCounters(offer, 436, 0, false))
 		return c.sendResponse(436, "Retry later (history error)")
 	}
 
@@ -149,27 +160,44 @@ func (c *ClientConnection) handleIHave(args []string) error {
 		return err
 	}
 
-	head, body, err := c.readArticleBlock(c.server.MaxArticleBytes())
+	head, body, err := c.readArticleBlock(c.feedArticleBytes())
 	switch {
 	case errors.Is(err, ErrArticleDrainLimit):
 		log.Printf("[NNTP] IHAVE %s: article too large to drain, closing the connection", messageID)
 		return c.closeAfterReply(400, "Article too large, closing connection")
 	case errors.Is(err, ErrArticleTooLarge):
+		c.rememberReject(messageID) // permanent for this article (plan nntp-peering)
 		c.rateLimitOnError()
+		c.peerStatsAdd(peerFeedCounters(offer, 437, 0, false))
 		return c.sendResponse(437, "Rejected (article too large)")
 	case err != nil:
 		return err // I/O error: nothing can be written
 	}
-	head = c.relayPath(head)
+	// The wire size of what the peer transferred, taken before the hand-off below.
+	size := feedWireSize(head, body)
+	// Loop and in_patterns are decided here, so the article never reaches the processor;
+	// the id is remembered as rejected, so the peer stops offering it (plan nntp-peering).
+	if reason := c.feedCheck(head); reason != "" {
+		log.Printf("[NNTP-PEER] IHAVE %s from peer %q refused: %s", messageID, c.peerName(), reason)
+		c.rememberReject(messageID)
+		c.peerStatsAdd(peerFeedCounters(offer, 437, size, false))
+		return c.sendResponse(437, "Rejected ("+reason+")")
+	}
+	head = c.feedPath(head)
 
 	article, err := c.buildIncomingArticle(head, body)
 	if err != nil {
 		log.Printf("[NNTP] IHAVE %s: invalid article: %v", messageID, err)
+		c.rememberReject(messageID)
 		c.rateLimitOnError()
+		c.peerStatsAdd(peerFeedCounters(offer, 437, size, false))
 		return c.sendResponse(437, "Rejected (invalid article)")
 	}
+	c.setIntakePolicy(article, size)
 	if !reconcileMessageID(article, messageID) {
 		log.Printf("IHAVE message-id mismatch: command '%s' article '%s'", messageID, article.MessageID)
+		c.rememberReject(messageID)
+		c.peerStatsAdd(peerFeedCounters(offer, 437, size, false))
 		return c.sendResponse(437, "Rejected (Message-ID mismatch)")
 	}
 
@@ -179,10 +207,26 @@ func (c *ClientConnection) handleIHave(args []string) error {
 	if reply == 235 {
 		c.server.noteArrival(messageID, groups)
 	}
+	c.peerStatsAdd(peerFeedCounters(offer, reply, size, intakeDuplicate(code, perr)))
 	if closeConn {
 		return c.closeAfterReply(reply, text)
 	}
 	return c.sendResponse(reply, text)
+}
+
+// setIntakePolicy carries the intake policy of this connection into the processor (plan
+// e2e-gap-tests, D1/D4 and item (c)): size is the article as it arrived (un-stuffed, before
+// feedPath or injectProtoArticle changed the header block), which a group's max_art_size is
+// compared against, and the sending peer's header_check selects the header rules. A POST
+// (article.Posted) is always checked strictly, whatever the connection's peer says.
+func (c *ClientConnection) setIntakePolicy(article *models.Article, size int64) {
+	if article == nil {
+		return
+	}
+	article.IntakeWireSize = int(size)
+	if c.peer != nil {
+		article.IntakeHeaderCheck = c.peer.HeaderCheck
+	}
 }
 
 // articleGroupNames returns the names behind article.NewsgroupsPtr (the Newsgroups header as
@@ -223,12 +267,11 @@ func (c *ClientConnection) handleTakeThis(args []string) error {
 	if len(args) > 0 {
 		id = args[0]
 	}
-	allowed := c.server.Processor != nil && len(args) == 1 && c.authenticated &&
-		(c.user == nil || c.user.Posting) && common.ValidMessageID(id)
+	allowed := c.feedAllowed() && len(args) == 1 && common.ValidMessageID(id)
 
 	// Streaming mode: the client sends the article without waiting, so it is always
 	// consumed (bounded) before the reply, also for the early error replies.
-	head, body, err := c.readArticleBlock(c.server.MaxArticleBytes())
+	head, body, err := c.readArticleBlock(c.feedArticleBytes())
 	if !allowed {
 		head, body = nil, nil // never keep an article this client may not send
 	}
@@ -254,21 +297,30 @@ func (c *ClientConnection) handleTakeThis(args []string) error {
 	if len(args) != 1 {
 		return reply(501, "TAKETHIS requires exactly one message-id")
 	}
-	// Check authentication and permission (exactly one response per TAKETHIS)
-	if !c.authenticated {
+	// Only a peer may feed (plan nntp-peering; exactly one response per TAKETHIS)
+	if !c.feedAllowed() {
 		c.rateLimitOnError()
-		return reply(480, "Transfer permission denied")
+		code := c.feedDeniedCode()
+		c.peerStatsDenied(code) // plan peering-stats
+		if code == 480 {
+			return reply(480, "Transfer permission denied")
+		}
+		return reply(502, "Transfer not permitted (peers only)")
 	}
-	if c.user != nil && !c.user.Posting {
-		c.rateLimitOnError()
-		return reply(502, "Transfer not permitted")
-	}
+	// A TAKETHIS of an id this connection CHECKed is the second half of that offer.
+	offer := c.peerStatsOffer(false, id)
+	// The wire size of what the peer transferred, taken before the hand-off below
+	// (0 when the article was not kept).
+	size := feedWireSize(head, body)
 	if !common.ValidMessageID(id) {
 		c.rateLimitOnError()
+		c.peerStatsAdd(peerFeedCounters(offer, 439, size, false))
 		return reply(439, "Rejected (invalid message-id)")
 	}
 	if tooLarge {
+		c.rememberReject(id) // permanent for this article (plan nntp-peering)
 		c.rateLimitOnError()
+		c.peerStatsAdd(peerFeedCounters(offer, 439, size, false))
 		return reply(439, "Rejected (article too large)")
 	}
 
@@ -277,22 +329,39 @@ func (c *ClientConnection) handleTakeThis(args []string) error {
 	case history.CasePass:
 		// wanted
 	case history.CaseDupes:
+		// The body was already on the wire, so this is a duplicate the peer sent us and
+		// not a refusal before the transfer (plan peering-stats).
+		c.peerStatsAdd(peerFeedCounters(offer, 439, size, true))
 		return reply(439, "Not wanted")
 	case history.CaseRetry:
+		c.peerStatsAdd(peerFeedCounters(offer, 439, size, false))
 		return reply(439, "In progress")
 	default: // history.CaseError: RFC 4644 §2.5.2, a temporary failure is 400 and a close
 		log.Printf("[NNTP] TAKETHIS %s: error checking article history, closing", id)
+		c.peerStatsAdd(peerFeedCounters(offer, 400, size, false))
 		return c.closeAfterReply(400, "Service temporarily unavailable")
 	}
-	head = c.relayPath(head)
+	// Loop and in_patterns, as in IHAVE (plan nntp-peering)
+	if reason := c.feedCheck(head); reason != "" {
+		log.Printf("[NNTP-PEER] TAKETHIS %s from peer %q refused: %s", id, c.peerName(), reason)
+		c.rememberReject(id)
+		c.peerStatsAdd(peerFeedCounters(offer, 439, size, false))
+		return reply(439, "Rejected ("+reason+")")
+	}
+	head = c.feedPath(head)
 
 	article, err := c.buildIncomingArticle(head, body)
 	if err != nil {
 		log.Printf("Failed to parse TAKETHIS article data: %v", err)
+		c.rememberReject(id)
+		c.peerStatsAdd(peerFeedCounters(offer, 439, size, false))
 		return reply(439, "Rejected (invalid article)")
 	}
+	c.setIntakePolicy(article, size)
 	if !reconcileMessageID(article, id) {
 		log.Printf("TAKETHIS message-id mismatch: command '%s' article '%s'", id, article.MessageID)
+		c.rememberReject(id)
+		c.peerStatsAdd(peerFeedCounters(offer, 439, size, false))
 		return reply(439, "Transfer failed (Message-ID mismatch)")
 	}
 
@@ -302,10 +371,18 @@ func (c *ClientConnection) handleTakeThis(args []string) error {
 	if r == 239 {
 		c.server.noteArrival(id, groups)
 	}
+	c.peerStatsAdd(peerFeedCounters(offer, r, size, intakeDuplicate(code, perr)))
 	if closeConn {
 		return c.closeAfterReply(r, text)
 	}
 	return c.sendResponse(r, text)
+}
+
+// intakeDuplicate reports whether an intake result is an article the store already had
+// (the 437/439 "duplicate" rejection of intakeReply). The peer statistics count it as
+// Duplicate and not as Rejected (plan peering-stats, "Counting rules").
+func intakeDuplicate(code int, err error) bool {
+	return code == history.CaseDupes && err == nil
 }
 
 // intakeReply maps a ProcessIncomingArticle result to the reply of a POST, IHAVE
@@ -486,22 +563,6 @@ func (c *ClientConnection) injectProtoArticle(head []string) ([]string, error) {
 		old = "not-for-mail"
 	}
 	return common.ReplaceHeader(out, "Path", identity+"!.POSTED!"+old), nil
-}
-
-// relayPath prepends "<identity>!.SEEN.<peer IP>!" to the Path of a relayed article
-// (RFC 5537 §3.2.1). Without an identity or a Path header the head is returned unchanged.
-func (c *ClientConnection) relayPath(head []string) []string {
-	identity := c.pathIdentity()
-	if identity == "" || len(common.HeaderValues(head, "Path")) == 0 {
-		return head
-	}
-	peerIP := "unknown"
-	if c.conn != nil && c.conn.RemoteAddr() != nil {
-		if host, _, err := net.SplitHostPort(c.conn.RemoteAddr().String()); err == nil && host != "" {
-			peerIP = host
-		}
-	}
-	return common.ReplaceHeader(head, "Path", identity+"!.SEEN."+peerIP+"!"+common.HeaderValue(head, "Path"))
 }
 
 // buildIncomingArticle parses raw head/body lines and maps the newsgroups to pointers.

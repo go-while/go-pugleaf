@@ -139,6 +139,11 @@ func (s *WebServer) threadTreePage(c *Context) {
 	}
 
 	treeResponse, err := s.DB.GetThreadTreeView(groupDB, threadRoot, options)
+	if errors.Is(err, database.ErrArticleNotFound) {
+		// Expired, deleted or never stored (crawlers ask for old numbers): not a server error.
+		s.renderError(c, http.StatusNotFound, "Thread Not Found", "This thread does not exist (any more).")
+		return
+	}
 	if err != nil {
 		log.Printf("[WEB]: threadTreePage: GetThreadTreeView(%s/%d): %v", groupName, threadRoot, err)
 		s.renderError(c, http.StatusInternalServerError, "Tree Error", publicErrorDetail)
@@ -227,6 +232,10 @@ func (s *WebServer) sectionThreadTreePage(c *Context) {
 	}
 
 	treeResponse, err := s.DB.GetThreadTreeView(groupDB, threadRoot, options)
+	if errors.Is(err, database.ErrArticleNotFound) {
+		s.renderError(c, http.StatusNotFound, "Thread Not Found", "This thread does not exist (any more).")
+		return
+	}
 	if err != nil {
 		log.Printf("[WEB]: sectionThreadTreePage: GetThreadTreeView(%s/%s/%d): %v", section, groupName, threadRoot, err)
 		s.renderError(c, http.StatusInternalServerError, "Tree Error", publicErrorDetail)

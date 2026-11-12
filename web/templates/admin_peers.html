@@ -1,0 +1,563 @@
+{{define "breadcrumb"}}
+<nav aria-label="breadcrumb">
+    <ol class="breadcrumb">
+        <li class="breadcrumb-item"><a href="/" class="text-decoration-none">Home</a></li>
+        <li class="breadcrumb-item"><a href="/admin" class="text-decoration-none">Admin Panel</a></li>
+        <li class="breadcrumb-item active" aria-current="page">Peers</li>
+    </ol>
+</nav>
+{{end}}
+
+{{define "content"}}
+{{if .Success}}
+<div class="alert alert-success alert-dismissible fade show mt-3" role="alert">
+    <strong>Success!</strong> {{.Success}}
+    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+</div>
+{{end}}
+
+{{if .Error}}
+<div class="alert alert-danger alert-dismissible fade show mt-3" role="alert">
+    <strong>Error!</strong> {{.Error}}
+    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+</div>
+{{end}}
+
+<div class="row mt-3">
+  <div class="col-12">
+    <div class="card">
+      <div class="card-header bg-dark text-white">
+        <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+          <h5 class="card-title mb-0">🤝 NNTP Peers</h5>
+          <div class="d-flex align-items-center gap-2">
+            <!-- What the peers sent us and what we sent them, per hour (plan peering-stats). -->
+            <a href="/admin/peers/stats" class="btn btn-sm btn-light" title="what peers send us and what we send them">📊 Statistics</a>
+            <span class="badge bg-light text-dark">{{len .Peers}} peers</span>
+          </div>
+        </div>
+      </div>
+      <div class="card-body">
+
+        <!-- Help -->
+        <div class="alert alert-secondary">
+          <p class="mb-2">
+            <strong>What a peer is.</strong> A peer is another news server this node exchanges articles with.
+            Only peers may feed us with <code>IHAVE</code>, <code>MODE STREAM</code>, <code>CHECK</code> and
+            <code>TAKETHIS</code>; NNTP users can no longer feed, whatever their posting flag says
+            (<code>posting</code> now means <code>POST</code> and nothing else). A disabled peer may neither
+            feed us nor be fed.
+          </p>
+          <p class="mb-2">
+            <strong>Hosts.</strong> A comma separated list of IP addresses (<code>192.0.2.7</code>,
+            <code>2001:db8::1</code>), CIDR ranges (<code>192.0.2.0/24</code>) and host names
+            (<code>news.example.org</code>, resolved and cached). A connection from a matching address is that
+            peer's connection. Leave it <em>empty</em> to match the peer by its <code>AUTHINFO</code> login
+            only. With both set, the peer matches by address and, when it has a login, must authenticate.
+          </p>
+          <p class="mb-2">
+            <strong>Patterns.</strong> INN wildmat lists, comma separated, read left to right, the last match
+            wins: <code>*</code> every group, <code>!comp.*</code> excludes a subtree,
+            <code>@alt.binaries.*</code> poisons the whole article (one matching group refuses the article
+            even when another group of it is wanted). <em>In patterns</em> are the groups the peer may send
+            us, <em>out patterns</em> the groups we offer to the peer. The <em>preset</em> menu under each
+            field fills in a common list, including the newsdeef.eu defaults that pugleaf.net's INN servers
+            use (newsdeef peers also limit the size with the out flag <code>&lt;{{.NewsdeefMaxSize}}</code>).
+          </p>
+          <details class="mb-2">
+            <summary>newsdeef.eu pattern lists (INN newsfeeds variables)</summary>
+            <pre class="border rounded p-2 small mt-2" style="white-space: pre-wrap; overflow-wrap: anywhere;">{{.NewsdeefINN}}</pre>
+          </details>
+          <p class="mb-0">
+            <strong>Path token.</strong> The peer's own Path identity, the leftmost element it writes into
+            <code>Path:</code>. An article arriving from the peer with that token on the left gets our
+            identity prepended as usual; a different leftmost element is recorded as
+            <code>&lt;token&gt;.MISMATCH</code>. The token also suppresses the outgoing feed: an article whose
+            Path already carries the peer's token is not offered to it again.
+          </p>
+        </div>
+
+        {{if .Peers}}
+        <div class="table-responsive">
+          <table class="table table-striped align-middle">
+            <thead>
+              <tr>
+                <th>On</th>
+                <th>Name</th>
+                <th>Path token</th>
+                <th>Hosts</th>
+                <th>In login</th>
+                <th>In patterns</th>
+                <th>Feed out</th>
+                <th>Out target</th>
+                <th>Out patterns</th>
+                <th>Queue</th>
+                <th>Counters</th>
+                <th>Edit</th>
+                <th>Delete</th>
+              </tr>
+            </thead>
+            <tbody>
+              {{range .Peers}}
+              <tr>
+                <td>
+                  <form method="POST" action="/admin/peers/toggle" style="display: inline;">
+                    <input type="hidden" name="id" value="{{.ID}}">
+                    {{if .Enabled}}
+                    <button type="submit" class="btn btn-sm btn-link p-0" title="{{.Name}}: enabled, click to disable">✅</button>
+                    {{else}}
+                    <button type="submit" class="btn btn-sm btn-link p-0" title="{{.Name}}: disabled, click to enable">🔴</button>
+                    {{end}}
+                  </form>
+                </td>
+                <td>{{.Name}}</td>
+                <td><code>{{.PathToken}}</code></td>
+                <td>
+                  {{if .Hosts}}<code>{{.Hosts}}</code>{{else}}<span class="text-muted">AUTHINFO only</span>{{end}}
+                </td>
+                <td>
+                  {{if .InUsername}}
+                    <code>{{.InUsername}}</code>
+                    {{if .InPasswordSet}}<span class="badge bg-success">password set</span>
+                    {{else}}<span class="badge bg-warning text-dark">no password</span>{{end}}
+                  {{else}}
+                    <span class="text-muted">none</span>
+                  {{end}}
+                </td>
+                <td style="max-width: 16rem; overflow-wrap: anywhere;"><code title="{{.InPatterns}}">{{.InPatternsShort}}</code></td>
+                <td>
+                  {{if .OutEnabled}}<span title="outgoing feed enabled">✅</span>{{else}}<span title="outgoing feed disabled">⚪</span>{{end}}
+                </td>
+                <td>
+                  {{if .OutHost}}
+                    <code>{{.OutHost}}:{{.OutPort}}</code>
+                    {{if .OutTLS}}<span class="badge bg-info text-dark">TLS</span>{{end}}
+                    {{if .OutUsername}}<br><small>login <code>{{.OutUsername}}</code>
+                      {{if .OutPasswordSet}}(password set){{else}}(no password){{end}}</small>{{end}}
+                  {{else}}
+                    <span class="text-muted">—</span>
+                  {{end}}
+                </td>
+                <td style="max-width: 16rem; overflow-wrap: anywhere;"><code title="{{.OutPatterns}}">{{.OutPatternsShort}}</code></td>
+                <!-- Queue depth and the per-peer counters come from the feed queue file the
+                     sender writes (data/cfg/feed-queue.sq3, at most once a minute). .Stats is
+                     nil while there are no numbers (no sender has run yet, or this process
+                     cannot read the file) and both columns then show n/a: no invented numbers. -->
+                <td>
+                  {{if .Stats}}{{.Stats.QueueDepth}}{{else}}<span class="text-muted" title="no counters: the outgoing feed has not written any yet">n/a</span>{{end}}
+                </td>
+                <td>
+                  {{if .Stats}}
+                    <small>offered {{.Stats.Offered}} / accepted {{.Stats.Accepted}} / refused {{.Stats.Refused}} / rejected {{.Stats.Rejected}} / deferred {{.Stats.Deferred}}
+                    {{if .Stats.LastError}}<br><span class="text-danger">{{.Stats.LastError}}</span>{{end}}</small>
+                  {{else}}
+                    <span class="text-muted" title="no counters: the outgoing feed has not written any yet">n/a</span>
+                  {{end}}
+                </td>
+                <td>
+                  <button type="button" class="btn btn-outline-primary btn-sm"
+                          data-bs-toggle="collapse" data-bs-target="#edit-peer-{{.ID}}"
+                          title="edit peer {{.Name}}">Edit</button>
+                  <button type="button" class="btn btn-outline-secondary btn-sm"
+                          data-bs-toggle="collapse" data-bs-target="#config-peer-{{.ID}}"
+                          title="INN and Diablo configuration for {{.Name}}'s side">Config</button>
+                </td>
+                <td>
+                  {{if .Enabled}}
+                  <button type="button" class="btn btn-outline-danger btn-sm" disabled
+                          title="disable the peer before deleting it">Delete</button>
+                  {{else}}
+                  <form method="POST" action="/admin/peers/delete" style="display: inline;"
+                        onsubmit="return confirm('Delete peer {{.Name}}?');">
+                    <input type="hidden" name="id" value="{{.ID}}">
+                    <button type="submit" class="btn btn-outline-danger btn-sm">Delete</button>
+                  </form>
+                  {{end}}
+                </td>
+              </tr>
+              <!-- Collapsible peering configuration for the peer's side -->
+              <tr class="collapse" id="config-peer-{{.ID}}">
+                <td colspan="13">
+                  <div class="card">
+                    <div class="card-header bg-secondary text-white">
+                      <h6 class="mb-0">Configuration for {{.Name}}'s side: paste into their INN or Diablo</h6>
+                    </div>
+                    <div class="card-body">
+                      <p class="small text-muted mb-2">Built from this peer row and our host name. Passwords are
+                        shown as placeholders; give them to the peer's admin yourself.</p>
+                      <div class="row">
+                        <div class="col-lg-6">
+                          <h6>INN (incoming.conf, newsfeeds, innfeed.conf)</h6>
+                          <pre class="border rounded p-2 small" style="white-space: pre-wrap; overflow-wrap: anywhere;">{{.Config.INN}}</pre>
+                        </div>
+                        <div class="col-lg-6">
+                          <h6>Diablo (dnewsfeeds)</h6>
+                          <pre class="border rounded p-2 small" style="white-space: pre-wrap; overflow-wrap: anywhere;">{{.Config.Diablo}}</pre>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </td>
+              </tr>
+              <!-- Collapsible edit form -->
+              <tr class="collapse" id="edit-peer-{{.ID}}">
+                <td colspan="13">
+                  <div class="card">
+                    <div class="card-header bg-dark text-white">
+                      <h6 class="mb-0">Edit peer: {{.Name}}</h6>
+                    </div>
+                    <div class="card-body">
+                      <form method="POST" action="/admin/peers/update">
+                        <input type="hidden" name="id" value="{{.ID}}">
+                        <div class="row">
+                          <div class="col-md-3">
+                            <div class="mb-3">
+                              <label class="form-label">Name</label>
+                              <input type="text" class="form-control" name="name" value="{{.Name}}" required>
+                            </div>
+                          </div>
+                          <div class="col-md-3">
+                            <div class="mb-3">
+                              <label class="form-label">Path token</label>
+                              <input type="text" class="form-control" name="path_token" value="{{.PathToken}}" required>
+                            </div>
+                          </div>
+                          <div class="col-md-4">
+                            <div class="mb-3">
+                              <label class="form-label">Hosts (IP, CIDR, host name; empty = AUTHINFO only)</label>
+                              <input type="text" class="form-control" name="hosts" value="{{.Hosts}}">
+                            </div>
+                          </div>
+                          <div class="col-md-2">
+                            <div class="form-check mt-4">
+                              <input type="hidden" name="enabled" value="off">
+                              <input class="form-check-input" type="checkbox" name="enabled" value="on" {{if .Enabled}}checked{{end}}>
+                              <label class="form-check-label">Enabled</label>
+                            </div>
+                          </div>
+                        </div>
+                        <hr class="my-3">
+                        <h6>Incoming (the peer feeds us)</h6>
+                        <div class="row">
+                          <div class="col-md-3">
+                            <div class="mb-3">
+                              <label class="form-label">Peer login (AUTHINFO USER)</label>
+                              <input type="text" class="form-control" name="in_username" value="{{.InUsername}}">
+                            </div>
+                          </div>
+                          <div class="col-md-3">
+                            <div class="mb-3">
+                              <label class="form-label">Peer password
+                                {{if .InPasswordSet}}<span class="badge bg-success">set</span>{{else}}<span class="badge bg-secondary">not set</span>{{end}}
+                              </label>
+                              <input type="password" class="form-control" name="in_password" value="" autocomplete="new-password"
+                                     placeholder="empty: keep the stored password">
+                            </div>
+                          </div>
+                          <div class="col-md-2">
+                            <div class="form-check mt-4">
+                              <input class="form-check-input" type="checkbox" name="in_password_clear" value="on">
+                              <label class="form-check-label">Clear it</label>
+                            </div>
+                          </div>
+                          <div class="col-md-4">
+                            <div class="mb-3">
+                              <label class="form-label">In patterns (groups the peer may send)</label>
+                              <input type="text" class="form-control" name="in_patterns" value="{{.InPatterns}}">
+                              <select class="form-select form-select-sm mt-1" data-preset-for="in_patterns" aria-label="in_patterns preset">
+                                <option value="">preset&hellip;</option>
+                                {{range $.PatternPresets}}<option value="{{.Patterns}}">{{.Label}}</option>{{end}}
+                              </select>
+                            </div>
+                          </div>
+                          <div class="col-md-3">
+                            <div class="mb-3">
+                              <label class="form-label">Max article size from the peer (bytes)</label>
+                              <input type="number" class="form-control" name="in_max_size" value="{{if .InMaxSize}}{{.InMaxSize}}{{end}}" min="0" max="16777216" placeholder="{{if $.ServerMaxArtSize}}{{$.ServerMaxArtSize}} (server limit){{else}}server limit{{end}}">
+                              <div class="form-text">Empty = the server limit (CFG &ldquo;Article Size Limit&rdquo;). Announced in the INN/Diablo config below.</div>
+                            </div>
+                          </div>
+                          <div class="col-md-3">
+                            <div class="mb-3">
+                              <label class="form-label">Header check (IHAVE/TAKETHIS)</label>
+                              <select class="form-select" name="header_check">
+                                <option value="relay" {{if ne .HeaderCheck "strict"}}selected{{end}}>relay (innd, default)</option>
+                                <option value="strict" {{if eq .HeaderCheck "strict"}}selected{{end}}>strict (nnrpd, like POST)</option>
+                              </select>
+                              <div class="form-text">relay: no header line length limit, a bare CR/LF in a header is stored verbatim and logged. strict: at most 998 octets per line, exactly &ldquo;: &rdquo; and a non-empty value. NUL, missing or duplicate core headers, a bad Message-ID and an unparseable Date are refused either way.</div>
+                            </div>
+                          </div>
+                        </div>
+                        <hr class="my-3">
+                        <h6>Outgoing (we feed the peer)</h6>
+                        <div class="row">
+                          <div class="col-md-2">
+                            <div class="form-check mt-4">
+                              <input type="hidden" name="out_enabled" value="off">
+                              <input class="form-check-input" type="checkbox" name="out_enabled" value="on" {{if .OutEnabled}}checked{{end}}>
+                              <label class="form-check-label">Feed enabled</label>
+                            </div>
+                          </div>
+                          <div class="col-md-3">
+                            <div class="mb-3">
+                              <label class="form-label">Out host</label>
+                              <input type="text" class="form-control" name="out_host" value="{{.OutHost}}">
+                            </div>
+                          </div>
+                          <div class="col-md-2">
+                            <div class="mb-3">
+                              <label class="form-label">Out port</label>
+                              <input type="number" class="form-control" name="out_port" value="{{.OutPort}}" min="1" max="65535">
+                            </div>
+                          </div>
+                          <div class="col-md-2">
+                            <div class="form-check mt-4">
+                              <input type="hidden" name="out_tls" value="off">
+                              <input class="form-check-input" type="checkbox" name="out_tls" value="on" {{if .OutTLS}}checked{{end}}>
+                              <label class="form-check-label">TLS</label>
+                            </div>
+                          </div>
+                          <div class="col-md-3">
+                            <div class="mb-3">
+                              <label class="form-label">Max connections (1..64)</label>
+                              <input type="number" class="form-control" name="max_conns" value="{{.MaxConns}}" min="1" max="64">
+                            </div>
+                          </div>
+                        </div>
+                        <div class="row">
+                          <div class="col-md-3">
+                            <div class="mb-3">
+                              <label class="form-label">Out login</label>
+                              <input type="text" class="form-control" name="out_username" value="{{.OutUsername}}">
+                            </div>
+                          </div>
+                          <div class="col-md-3">
+                            <div class="mb-3">
+                              <label class="form-label">Out password
+                                {{if .OutPasswordSet}}<span class="badge bg-success">set</span>{{else}}<span class="badge bg-secondary">not set</span>{{end}}
+                              </label>
+                              <input type="password" class="form-control" name="out_password" value="" autocomplete="new-password"
+                                     placeholder="empty: keep the stored password">
+                            </div>
+                          </div>
+                          <div class="col-md-2">
+                            <div class="form-check mt-4">
+                              <input class="form-check-input" type="checkbox" name="out_password_clear" value="on">
+                              <label class="form-check-label">Clear it</label>
+                            </div>
+                          </div>
+                          <div class="col-md-4">
+                            <div class="mb-3">
+                              <label class="form-label">Out patterns (groups we offer)</label>
+                              <input type="text" class="form-control" name="out_patterns" value="{{.OutPatterns}}">
+                              <select class="form-select form-select-sm mt-1" data-preset-for="out_patterns" aria-label="out_patterns preset">
+                                <option value="">preset&hellip;</option>
+                                {{range $.PatternPresets}}<option value="{{.Patterns}}">{{.Label}}</option>{{end}}
+                              </select>
+                            </div>
+                          </div>
+                        </div>
+                        <div class="row">
+                          <div class="col-md-4">
+                            <div class="mb-3">
+                              <label class="form-label">Out flags (INN newsfeeds subset: &lt;N &gt;N Hcount Gcount Nm Nu)</label>
+                              <input type="text" class="form-control" name="out_flags" value="{{.OutFlags}}">
+                            </div>
+                          </div>
+                          <div class="col-md-8">
+                            <div class="mb-3">
+                              <label class="form-label">Notes</label>
+                              <input type="text" class="form-control" name="notes" value="{{.Notes}}">
+                            </div>
+                          </div>
+                        </div>
+                        <button type="submit" class="btn btn-primary">Save peer</button>
+                      </form>
+                    </div>
+                  </div>
+                </td>
+              </tr>
+              {{end}}
+            </tbody>
+          </table>
+        </div>
+        {{else}}
+        <div class="alert alert-info mb-0">
+          <strong>No peers configured.</strong> Without a peer no server can feed this node.
+        </div>
+        {{end}}
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Add peer -->
+<div class="row mt-4">
+  <div class="col-12">
+    <div class="card">
+      <div class="card-header bg-dark text-white">
+        <h5 class="card-title mb-0">➕ Add peer</h5>
+      </div>
+      <div class="card-body">
+        <form method="POST" action="/admin/peers">
+          <div class="row">
+            <div class="col-md-3">
+              <div class="mb-3">
+                <label class="form-label">Name</label>
+                <input type="text" class="form-control" name="name" placeholder="news.example.org" required>
+              </div>
+            </div>
+            <div class="col-md-3">
+              <div class="mb-3">
+                <label class="form-label">Path token</label>
+                <input type="text" class="form-control" name="path_token" placeholder="news.example.org" required>
+              </div>
+            </div>
+            <div class="col-md-4">
+              <div class="mb-3">
+                <label class="form-label">Hosts (IP, CIDR, host name; empty = AUTHINFO only)</label>
+                <input type="text" class="form-control" name="hosts" placeholder="192.0.2.7, 2001:db8::/32, news.example.org">
+              </div>
+            </div>
+            <div class="col-md-2">
+              <div class="form-check mt-4">
+                <input type="hidden" name="enabled" value="off">
+                <input class="form-check-input" type="checkbox" name="enabled" value="on" checked>
+                <label class="form-check-label">Enabled</label>
+              </div>
+            </div>
+          </div>
+          <hr class="my-3">
+          <h6>Incoming (the peer feeds us)</h6>
+          <div class="row">
+            <div class="col-md-3">
+              <div class="mb-3">
+                <label class="form-label">Peer login (AUTHINFO USER)</label>
+                <input type="text" class="form-control" name="in_username" autocomplete="off">
+              </div>
+            </div>
+            <div class="col-md-3">
+              <div class="mb-3">
+                <label class="form-label">Peer password</label>
+                <input type="password" class="form-control" name="in_password" autocomplete="new-password">
+              </div>
+            </div>
+            <div class="col-md-4">
+              <div class="mb-3">
+                <label class="form-label">In patterns (groups the peer may send)</label>
+                <input type="text" class="form-control" name="in_patterns" value="{{.DefaultInPatterns}}">
+                <select class="form-select form-select-sm mt-1" data-preset-for="in_patterns" aria-label="in_patterns preset">
+                  <option value="">preset&hellip;</option>
+                  {{range $.PatternPresets}}<option value="{{.Patterns}}">{{.Label}}</option>{{end}}
+                </select>
+              </div>
+            </div>
+            <div class="col-md-3">
+              <div class="mb-3">
+                <label class="form-label">Max article size from the peer (bytes)</label>
+                <input type="number" class="form-control" name="in_max_size" min="0" max="16777216" placeholder="{{if $.ServerMaxArtSize}}{{$.ServerMaxArtSize}} (server limit){{else}}server limit{{end}}">
+                <div class="form-text">Empty = the server limit (CFG &ldquo;Article Size Limit&rdquo;).</div>
+              </div>
+            </div>
+            <div class="col-md-3">
+              <div class="mb-3">
+                <label class="form-label">Header check (IHAVE/TAKETHIS)</label>
+                <select class="form-select" name="header_check">
+                  <option value="relay" selected>relay (innd, default)</option>
+                  <option value="strict">strict (nnrpd, like POST)</option>
+                </select>
+                <div class="form-text">relay keeps what another server accepted (no 998 limit, bare CR/LF stored verbatim); strict applies the POST rules.</div>
+              </div>
+            </div>
+          </div>
+          <hr class="my-3">
+          <h6>Outgoing (we feed the peer)</h6>
+          <div class="row">
+            <div class="col-md-2">
+              <div class="form-check mt-4">
+                <input type="hidden" name="out_enabled" value="off">
+                <input class="form-check-input" type="checkbox" name="out_enabled" value="on">
+                <label class="form-check-label">Feed enabled</label>
+              </div>
+            </div>
+            <div class="col-md-3">
+              <div class="mb-3">
+                <label class="form-label">Out host</label>
+                <input type="text" class="form-control" name="out_host" placeholder="news.example.org">
+              </div>
+            </div>
+            <div class="col-md-2">
+              <div class="mb-3">
+                <label class="form-label">Out port</label>
+                <input type="number" class="form-control" name="out_port" value="{{.DefaultOutPort}}" min="1" max="65535">
+              </div>
+            </div>
+            <div class="col-md-2">
+              <div class="form-check mt-4">
+                <input type="hidden" name="out_tls" value="off">
+                <input class="form-check-input" type="checkbox" name="out_tls" value="on">
+                <label class="form-check-label">TLS</label>
+              </div>
+            </div>
+            <div class="col-md-3">
+              <div class="mb-3">
+                <label class="form-label">Max connections (1..64)</label>
+                <input type="number" class="form-control" name="max_conns" value="{{.DefaultMaxConns}}" min="1" max="64">
+              </div>
+            </div>
+          </div>
+          <div class="row">
+            <div class="col-md-3">
+              <div class="mb-3">
+                <label class="form-label">Out login</label>
+                <input type="text" class="form-control" name="out_username" autocomplete="off">
+              </div>
+            </div>
+            <div class="col-md-3">
+              <div class="mb-3">
+                <label class="form-label">Out password</label>
+                <input type="password" class="form-control" name="out_password" autocomplete="new-password">
+              </div>
+            </div>
+            <div class="col-md-6">
+              <div class="mb-3">
+                <label class="form-label">Out patterns (groups we offer)</label>
+                <input type="text" class="form-control" name="out_patterns" value="{{.DefaultOutPatterns}}">
+                <select class="form-select form-select-sm mt-1" data-preset-for="out_patterns" aria-label="out_patterns preset">
+                  <option value="">preset&hellip;</option>
+                  {{range $.PatternPresets}}<option value="{{.Patterns}}">{{.Label}}</option>{{end}}
+                </select>
+              </div>
+            </div>
+          </div>
+          <div class="row">
+            <div class="col-md-4">
+              <div class="mb-3">
+                <label class="form-label">Out flags (INN newsfeeds subset: &lt;N &gt;N Hcount Gcount Nm Nu)</label>
+                <input type="text" class="form-control" name="out_flags">
+              </div>
+            </div>
+            <div class="col-md-8">
+              <div class="mb-3">
+                <label class="form-label">Notes</label>
+                <input type="text" class="form-control" name="notes">
+              </div>
+            </div>
+          </div>
+          <button type="submit" class="btn btn-success">Create peer</button>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+  // Pattern presets: picking one fills the patterns field of the same form (still editable).
+  document.querySelectorAll('select[data-preset-for]').forEach(function (sel) {
+    sel.addEventListener('change', function () {
+      if (!sel.value || !sel.form) { return; }
+      var input = sel.form.elements[sel.dataset.presetFor];
+      if (input) { input.value = sel.value; }
+      sel.selectedIndex = 0;
+    });
+  });
+</script>
+{{end}}

@@ -1,0 +1,75 @@
+# go-pugleaf web gateway behind nginx: TLS, rate limits, page cache.
+# Needs conf.d/pugleaf-ratelimit.conf, conf.d/pugleaf-cache.conf and snippets/pugleaf-proxy.conf.
+# Replace news.example.org and the upstream address; the webserver listens on 127.0.0.1:11980
+# (webserver -webhost 127.0.0.1 -webport 11980).
+
+upstream pugleaf_web {
+    server 127.0.0.1:11980;
+    keepalive 16;
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name news.example.org;
+
+    # certbot renews with --webroot /var/www/html
+    location /.well-known/acme-challenge/ { root /var/www/html; }
+    location / { return 301 https://$host$request_uri; }
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name news.example.org;
+
+    ssl_certificate     /etc/letsencrypt/live/news.example.org/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/news.example.org/privkey.pem;
+    ssl_session_cache   shared:SSL:10m;
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;
+
+    # go-pugleaf caps request bodies itself (1 MiB, web posts up to the article size limit)
+    client_max_body_size 2m;
+
+    # rate limits (zones in conf.d/pugleaf-ratelimit.conf); over the limit -> 429
+    limit_req_status  429;
+    limit_conn_status 429;
+    limit_conn pugleaf_conn 20;
+
+    # static files (CSS/JS/icons): cached for an hour, only the connection limit applies
+    location /static/ {
+        proxy_cache pugleaf_cache;
+        proxy_cache_key "$scheme$host$request_uri";
+        proxy_cache_bypass $pugleaf_badbot;
+        proxy_no_cache     $pugleaf_badbot;
+        proxy_cache_valid 200 1h;
+        proxy_cache_use_stale error timeout updating http_502 http_503 http_504;
+        add_header X-Cache-Status $upstream_cache_status always;
+        include snippets/pugleaf-proxy.conf;
+        proxy_pass http://pugleaf_web;
+    }
+
+    location / {
+        limit_req zone=pugleaf_ip burst=30 nodelay;
+        limit_req zone=pugleaf_bots burst=5;
+
+        # page cache for anonymous visitors only: a session cookie (logged in) or a blocked bot
+        # always goes to go-pugleaf. 403 and 429 are never cached (they depend on the client);
+        # nginx also skips responses with Set-Cookie or Cache-Control: private (thread trees).
+        proxy_cache pugleaf_cache;
+        proxy_cache_key "$scheme$host$request_uri";
+        proxy_cache_bypass $cookie_session_id $http_authorization $pugleaf_badbot;
+        proxy_no_cache     $cookie_session_id $http_authorization $pugleaf_badbot;
+        proxy_cache_valid 200 301 5m;
+        proxy_cache_valid 404 1m;
+        proxy_cache_lock on;
+        proxy_cache_lock_timeout 10s;
+        proxy_cache_background_update on;
+        proxy_cache_use_stale error timeout updating http_500 http_502 http_503 http_504;
+        add_header X-Cache-Status $upstream_cache_status always;
+        include snippets/pugleaf-proxy.conf;
+        proxy_pass http://pugleaf_web;
+    }
+}

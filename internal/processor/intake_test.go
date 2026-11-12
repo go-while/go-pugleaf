@@ -80,23 +80,40 @@ func TestIntakeProcParseNNTPDateStrict(t *testing.T) {
 func TestIntakeProcFutureMargin(t *testing.T) {
 	now := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
 	f := func(d time.Duration) string { return now.Add(d).Format(time.RFC1123Z) }
+	// maxAge 0 is "no past cutoff" (POST, and the admin setting PeerArticleMaxAgeHours = 0);
+	// maxFuture 0 would be "no future limit", so the rows that do not set it get MaxFutureDate.
 	for _, tc := range []struct {
 		name, date, injection, reason string
+		maxAge, maxFuture             time.Duration
 	}{
-		{"now", f(0), "", ""},
-		{"23h", f(23 * time.Hour), "", ""},
-		{"24h-boundary", f(MaxFutureDate), "", ""},
-		{"24h+1s", f(MaxFutureDate + time.Second), "", "date in the future"},
-		{"24h30m", f(24*time.Hour + 30*time.Minute), "", "date in the future"},
-		{"old-date", f(-30 * 24 * time.Hour), "", ""},
-		{"garbage", "garbage", "", "invalid date"},
-		{"empty", "", "", "invalid date"},
+		{name: "now", date: f(0)},
+		{name: "23h", date: f(23 * time.Hour)},
+		{name: "24h-boundary", date: f(MaxFutureDate)},
+		{name: "24h+1s", date: f(MaxFutureDate + time.Second), reason: "date in the future"},
+		{name: "24h30m", date: f(24*time.Hour + 30*time.Minute), reason: "date in the future"},
+		{name: "old-date", date: f(-30 * 24 * time.Hour)},
+		{name: "garbage", date: "garbage", reason: "invalid date"},
+		{name: "empty", date: "", reason: "invalid date"},
 		// the Injection-Date is measured when present and parseable
-		{"injection-future", f(0), f(25 * time.Hour), "date in the future"},
-		{"injection-ok-date-future", f(48 * time.Hour), f(0), ""},
-		{"injection-unparseable", f(0), "garbage", ""},
+		{name: "injection-future", date: f(0), injection: f(25 * time.Hour), reason: "date in the future"},
+		{name: "injection-ok-date-future", date: f(48 * time.Hour), injection: f(0)},
+		{name: "injection-unparseable", date: f(0), injection: "garbage"},
+		// the peer past cutoff (INN artcutoff): 0 = off, else the Date must be inside it
+		{name: "age-boundary", date: f(-72 * time.Hour), maxAge: 72 * time.Hour},
+		{name: "age+1s", date: f(-72*time.Hour - time.Second), maxAge: 72 * time.Hour, reason: "date too old"},
+		{name: "age-off", date: f(-10 * 365 * 24 * time.Hour)},
+		{name: "age-injection", date: f(-100 * time.Hour), injection: f(0), maxAge: 72 * time.Hour},
+		// no future limit (PeerArticleMaxFutureHours = 0)
+		{name: "future-off", date: f(99 * time.Hour), maxFuture: -1},
 	} {
-		got, err := checkIntakeDates(tc.date, tc.injection, now)
+		maxFuture := tc.maxFuture
+		switch maxFuture {
+		case 0:
+			maxFuture = MaxFutureDate
+		case -1:
+			maxFuture = 0 // the limit is off
+		}
+		got, err := checkIntakeDates(tc.date, tc.injection, now, tc.maxAge, maxFuture)
 		if tc.reason == "" {
 			if err != nil {
 				t.Errorf("%s: unexpected error %v", tc.name, err)
@@ -200,7 +217,10 @@ func TestIntakeProcValidateHeaders(t *testing.T) {
 		{"dot-line", iprHead(id, "."), id, "invalid header block", false},
 		{"nul", iprHead(id, "X-Bad: a\x00b"), id, "invalid header block", false},
 		{"no-path", iprHead(id)[1:], id, "missing mandatory header", false},
-		{"empty-subject", append(iprHead(id)[:3:3], "Subject:", "Date: Sun, 11 Oct 2026 12:00:00 +0000", "Message-ID: "+id), id, "missing mandatory header", false},
+		// D4: strict needs ": " and a non-empty value, so "Subject:" never reaches the
+		// mandatory-header check (the relay leg of this case is in intake_policy_test.go)
+		{"empty-subject", append(iprHead(id)[:3:3], "Subject:", "Date: Sun, 11 Oct 2026 12:00:00 +0000", "Message-ID: "+id), id, "invalid header block", false},
+		{"blank-subject-value", append(iprHead(id)[:3:3], "Subject: ", "Date: Sun, 11 Oct 2026 12:00:00 +0000", "Message-ID: "+id), id, "invalid header block", false},
 		{"no-message-id", iprHead(id)[:5], id, "missing mandatory header", false},
 		{"nil-block", nil, id, "missing mandatory header", false},
 		{"id-mismatch", iprHead(id), "<t7-ipr-2@test.invalid>", "invalid message-id", false},
@@ -208,7 +228,7 @@ func TestIntakeProcValidateHeaders(t *testing.T) {
 		{"id-too-long", iprHead("<" + strings.Repeat("a", 240) + "@test.invalid>"), "<" + strings.Repeat("a", 240) + "@test.invalid>", "invalid message-id", false},
 		{"control", iprHead(id, "Control: cancel <x@y>"), id, "control messages not accepted", false},
 	} {
-		normalized, approved, err := validateIntakeHeaders(tc.lines, tc.msgid)
+		normalized, approved, _, err := validateIntakeHeaders(tc.lines, tc.msgid, common.HeaderBlockStrict)
 		if tc.reason == "" {
 			if err != nil {
 				t.Errorf("%s: unexpected error %v", tc.name, err)

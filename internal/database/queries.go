@@ -654,8 +654,20 @@ func (db *Database) DeleteNewsgroup(name string) (bool, error) {
 	return deleted, nil
 }
 
-const query_GetThreadsCount = `SELECT COUNT(*) FROM threads`
+// query_GetThreadsCount counts the group's threads, that is its thread ROOTS: the threads
+// table holds one row per threaded article (a root is (root, NULL, root, 0), a reply is
+// (root, parent, child, depth)), so COUNT(*) counted articles, not threads. It read like a
+// thread count only while intake wrote no reply rows at all; a rebuild wrote them and made
+// the stats total jump (plan thread-orphan-followups). parent_article IS NULL is exactly the
+// root rows and needs no DISTINCT. parent_article = 0 counts as a root as well: the batch
+// writer and the rebuild write NULL, but cmd/fix-references inserts its orphan roots with a
+// parent_article of 0, and a group last repaired with that tool would otherwise report no
+// threads at all.
+const query_GetThreadsCount = `SELECT COUNT(*) FROM threads WHERE parent_article IS NULL OR parent_article = 0`
 
+// GetThreadsCount returns the number of threads in the group: its thread roots. The threads
+// readers that return rows (GetThreads below, GetThreadsPaged in db_threads_paged.go) keep
+// returning every row, roots and replies alike.
 func (db *Database) GetThreadsCount(groupDB *GroupDB) (int64, error) {
 	var count int64
 
@@ -756,6 +768,11 @@ func (db *Database) InsertThread(groupDB *GroupDB, t *models.Thread, a *models.A
 
 const query_GetThreads = `SELECT id, root_article, parent_article, child_article, depth, thread_order FROM threads`
 
+// GetThreads returns ALL rows of the group's threads table, one per threaded article: the
+// thread roots (parent_article NULL, child_article == root_article, depth 0) and the replies
+// (root, parent, child, depth). It is not a list of threads - GetThreadsCount counts those -
+// and filtering it to roots would be a behaviour change for its readers (the /api threads
+// endpoint through GetThreadsPaged, which returns all rows as well).
 func (db *Database) GetThreads(groupDB *GroupDB) ([]*models.Thread, error) {
 	rows, err := RetryableQuery(groupDB.DB, query_GetThreads)
 	if err != nil {
@@ -1749,8 +1766,11 @@ func (db *Database) SearchNewsgroupsWithOptions(searchTerm string, limit, offset
 	var query string
 	var args []interface{}
 
-	// Use prefix matching (term%) instead of substring (%term%); % and _ in the term are literal
-	searchPattern := escapeLike(searchTerm) + "%"
+	// prefix matching (term%) unless the term has '*'/'%' wildcards (newsgroupSearchPattern)
+	searchPattern, err := newsgroupSearchPattern(searchTerm)
+	if err != nil {
+		return nil, err
+	}
 
 	if searchDescription {
 		// Search both name and description
@@ -1829,6 +1849,47 @@ const query_CountSearchNewsgroupsAdminNameOnly = `
 		WHERE name LIKE ? ESCAPE '\'
 	`
 
+// MaxNewsgroupSearchWildcards bounds the wildcards of one newsgroup search term (a LIKE
+// pattern with many % can get slow in SQLite).
+const MaxNewsgroupSearchWildcards = 10
+
+// ErrTooManyWildcards is returned by the newsgroup searches for a term with more than
+// MaxNewsgroupSearchWildcards wildcards.
+var ErrTooManyWildcards = fmt.Errorf("search term has more than %d wildcards", MaxNewsgroupSearchWildcards)
+
+// newsgroupSearchPattern turns a search term into a LIKE pattern for ESCAPE '\': '*' and '%'
+// are wildcards (any run of them counts as one, at most MaxNewsgroupSearchWildcards), '_' and
+// '\' are literal (newsgroup names contain '_'). A term without a wildcard is a prefix search
+// (term%), as before; a term with one is matched as written ("%.test", "comp.*", "*lang*").
+func newsgroupSearchPattern(term string) (string, error) {
+	if !strings.ContainsAny(term, "*%") {
+		return escapeLike(term) + "%", nil
+	}
+	var b strings.Builder
+	b.Grow(len(term) + 4)
+	wild, prevWild := 0, false
+	for i := 0; i < len(term); i++ {
+		c := term[i]
+		switch c {
+		case '*', '%':
+			if !prevWild {
+				wild++
+				if wild > MaxNewsgroupSearchWildcards {
+					return "", ErrTooManyWildcards
+				}
+				b.WriteByte('%')
+			}
+			prevWild = true
+			continue
+		case '\\', '_':
+			b.WriteByte('\\')
+		}
+		prevWild = false
+		b.WriteByte(c)
+	}
+	return b.String(), nil
+}
+
 // escapeLike escapes the LIKE wildcards % and _ and the escape character \ itself,
 // for patterns used with ESCAPE '\'.
 func escapeLike(s string) string {
@@ -1853,8 +1914,11 @@ func (db *Database) CountSearchNewsgroups(searchTerm string) (int, error) {
 
 // CountSearchNewsgroupsWithOptions counts newsgroups with configurable options
 func (db *Database) CountSearchNewsgroupsWithOptions(searchTerm string, searchDescription bool, admin bool) (int, error) {
-	// Use prefix matching (term%) instead of substring (%term%); % and _ in the term are literal
-	searchPattern := escapeLike(searchTerm) + "%"
+	// prefix matching (term%) unless the term has '*'/'%' wildcards (newsgroupSearchPattern)
+	searchPattern, err := newsgroupSearchPattern(searchTerm)
+	if err != nil {
+		return 0, err
+	}
 
 	var query string
 	var args []interface{}
@@ -1878,7 +1942,7 @@ func (db *Database) CountSearchNewsgroupsWithOptions(searchTerm string, searchDe
 	}
 
 	var count int
-	err := db.mainDB.QueryRow(query, args...).Scan(&count)
+	err = db.mainDB.QueryRow(query, args...).Scan(&count)
 
 	return count, err
 }

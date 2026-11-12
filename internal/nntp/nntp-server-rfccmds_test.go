@@ -9,68 +9,28 @@ package nntp
 
 import (
 	"bufio"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/tls"
-	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
-	"math/big"
 	"net"
-	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/config"
+	"github.com/go-while/go-pugleaf/internal/history"
 	"github.com/go-while/nntp-testkit/client"
+	"github.com/go-while/nntp-testkit/tlscert"
 )
 
-// rfcWriteCert writes a self-signed ECDSA P-256 certificate for
-// 127.0.0.1/localhost and its key as PEM files into t.TempDir() (a copy of
-// stlsWriteCert, kept here so this file is self-contained).
+// rfcWriteCert writes a throw-away self-signed certificate for 127.0.0.1/localhost and its
+// key as PEM files into t.TempDir() (kit package tlscert; the server config takes paths).
 func rfcWriteCert(t *testing.T) (certFile, keyFile string) {
 	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("GenerateKey: %v", err)
-	}
-	now := time.Now()
-	tmpl := &x509.Certificate{
-		SerialNumber:          big.NewInt(now.UnixNano()),
-		Subject:               pkix.Name{CommonName: "t6.rfcwire.test.invalid"},
-		NotBefore:             now.Add(-time.Hour),
-		NotAfter:              now.Add(time.Hour),
-		KeyUsage:              x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		BasicConstraintsValid: true,
-		DNSNames:              []string{"localhost"},
-		IPAddresses:           []net.IP{net.IPv4(127, 0, 0, 1)},
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
-	if err != nil {
-		t.Fatalf("CreateCertificate: %v", err)
-	}
-	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
-	if err != nil {
-		t.Fatalf("MarshalPKCS8PrivateKey: %v", err)
-	}
-	dir := t.TempDir()
-	certFile = filepath.Join(dir, "cert.pem")
-	keyFile = filepath.Join(dir, "key.pem")
-	if err := os.WriteFile(certFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
-		t.Fatalf("write cert: %v", err)
-	}
-	if err := os.WriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
-		t.Fatalf("write key: %v", err)
-	}
-	return certFile, keyFile
+	f := tlscert.SelfSigned(t, tlscert.Options{CommonName: "t6.rfcwire.test.invalid"}).Write(t, "")
+	return f.Cert, f.Key
 }
 
 // rfcServerTLS builds an implicit-TLS server config from the PEM files.
@@ -121,23 +81,6 @@ func rfcNewCertServer(t *testing.T, certFile, keyFile string, tlsCfg *tls.Config
 	return hs
 }
 
-// rfcExpect fails the test unless the command answers with want; it returns the status line.
-func rfcExpect(t *testing.T, c *client.Conn, want int, format string, args ...interface{}) string {
-	t.Helper()
-	code, line := c.Cmd(format, args...)
-	if err := client.ExpectCode(code, line, want); err != nil {
-		t.Fatalf("%q: %v", format, err)
-	}
-	return line
-}
-
-// rfcCaps runs CAPABILITIES (101 + list) and returns the capability lines.
-func rfcCaps(t *testing.T, c *client.Conn) []string {
-	t.Helper()
-	rfcExpect(t, c, 101, "CAPABILITIES")
-	return c.ReadDotLines()
-}
-
 // rfcHasLine reports whether caps contains exactly line.
 func rfcHasLine(caps []string, line string) bool {
 	for _, l := range caps {
@@ -148,33 +91,23 @@ func rfcHasLine(caps []string, line string) bool {
 	return false
 }
 
-// rfcHasLabel reports whether a capability line has label as its first word
-// (case-insensitive, RFC 3977 §3.3.1).
-func rfcHasLabel(caps []string, label string) bool {
-	for _, l := range caps {
-		if f := strings.Fields(l); len(f) > 0 && strings.EqualFold(f[0], label) {
-			return true
-		}
-	}
-	return false
-}
-
 // rfcAuth runs AUTHINFO USER/PASS and requires 381 then 281 (RFC 4643 §2.3).
 func rfcAuth(t *testing.T, c *client.Conn, user, pass string) {
 	t.Helper()
-	rfcExpect(t, c, 381, "AUTHINFO USER %s", user)
-	rfcExpect(t, c, 281, "AUTHINFO PASS %s", pass)
+	c.ExpectCmd(381, "AUTHINFO USER %s", user)
+	c.ExpectCmd(281, "AUTHINFO PASS %s", pass)
 }
 
-// rfcUpgrade runs the client side of the TLS handshake after a 382 and switches
-// c to the TLS connection. It returns the *tls.Conn.
-func rfcUpgrade(t *testing.T, c *client.Conn) *tls.Conn {
-	t.Helper()
-	return rfcUpgradeOver(t, c, c.Conn, 0)
+// rfcClientTLS is the client side of the STARTTLS handshake: the scratch certificate is
+// self-signed, so it is not verified.
+func rfcClientTLS() *tls.Config {
+	return &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12} //nolint:gosec // test client
 }
 
-// rfcUpgradeOver is rfcUpgrade with the TLS layer on raw (c.Conn or a wrapper of
-// it) and an optional maximum TLS version (0: the default).
+// rfcUpgradeOver runs the client side of the TLS handshake after a 382 with the TLS layer on
+// raw (a wrapper of c.Conn) and an optional maximum TLS version (0: the default), and switches
+// c to the TLS connection. The kit's client.StartTLS sends the STARTTLS itself, so it cannot be
+// used where the recorder has to be installed between the 382 and the handshake.
 func rfcUpgradeOver(t *testing.T, c *client.Conn, raw net.Conn, maxVersion uint16) *tls.Conn {
 	t.Helper()
 	if c.R.Buffered() != 0 {
@@ -235,40 +168,46 @@ func TestRfcDispatch(t *testing.T) {
 	g := hGroup(t, "rc6.dispatch", 2, nil)
 	proc := newTestServer(t, hServerOpts{Proc: &hFakeProcessor{}})
 	plain := newTestServer(t, hServerOpts{}) // no processor, no certificate
+	// a server whose peer may feed from 127.0.0.1: only there do the feed commands work
+	peerReg, _ := hPeerIP("")
+	peerSrv := newTestServer(t, hServerOpts{Proc: &hFakeProcessor{checkResult: history.CasePass}, Peers: peerReg})
+	// a server whose peer still has to log in: the feed commands answer 480 there
+	loginReg, _, _ := hPeerLogin(t, "127.0.0.1")
+	loginSrv := newTestServer(t, hServerOpts{Proc: &hFakeProcessor{}, Peers: loginReg})
 
 	t.Run("DATE", func(t *testing.T) {
-		line := rfcExpect(t, plain.dial(t), 111, "DATE")
+		line := plain.dial(t).ExpectCmd(111, "DATE")
 		if !rfcDateRe.MatchString(line) {
 			t.Fatalf("DATE reply %q, want 111 yyyymmddhhmmss", line)
 		}
 	})
 	t.Run("DATE-args", func(t *testing.T) {
 		// commandMaxArgs["DATE"] = 0: the table answers before the handler
-		line := rfcExpect(t, plain.dial(t), 501, "DATE x")
+		line := plain.dial(t).ExpectCmd(501, "DATE x")
 		if !strings.Contains(line, "too many arguments") {
 			t.Fatalf("got %q, want the table's 501 (too many arguments)", line)
 		}
 	})
 	t.Run("NEXT", func(t *testing.T) {
-		rfcExpect(t, plain.dial(t), 412, "NEXT")
+		plain.dial(t).ExpectCmd(412, "NEXT")
 	})
 	t.Run("LAST", func(t *testing.T) {
-		rfcExpect(t, plain.dial(t), 412, "LAST")
+		plain.dial(t).ExpectCmd(412, "LAST")
 	})
 	t.Run("NEWGROUPS", func(t *testing.T) {
 		c := plain.dial(t)
-		rfcExpect(t, c, 231, "NEWGROUPS 20991231 235959 GMT")
+		c.ExpectCmd(231, "NEWGROUPS 20991231 235959 GMT")
 		if lines := c.ReadDotLines(); len(lines) != 0 {
 			t.Fatalf("NEWGROUPS in the future listed %q, want an empty block", lines)
 		}
 	})
 	t.Run("LIST-ACTIVE-wildmat", func(t *testing.T) {
 		c := plain.dial(t)
-		rfcExpect(t, c, 215, "LIST ACTIVE rc6.none.*")
+		c.ExpectCmd(215, "LIST ACTIVE rc6.none.*")
 		if lines := c.ReadDotLines(); len(lines) != 0 {
 			t.Fatalf("LIST ACTIVE rc6.none.* listed %q, want an empty block", lines)
 		}
-		rfcExpect(t, c, 215, "LIST ACTIVE %s", g)
+		c.ExpectCmd(215, "LIST ACTIVE %s", g)
 		if lines := c.ReadDotLines(); len(lines) != 1 || !strings.HasPrefix(lines[0], g+" ") {
 			t.Fatalf("LIST ACTIVE %s listed %q, want exactly that group", g, lines)
 		}
@@ -276,7 +215,7 @@ func TestRfcDispatch(t *testing.T) {
 	t.Run("LIST-ACTIVE-plain", func(t *testing.T) {
 		// without a wildmat the hardened handleList answers with every active group
 		c := plain.dial(t)
-		rfcExpect(t, c, 215, "LIST ACTIVE")
+		c.ExpectCmd(215, "LIST ACTIVE")
 		lines := c.ReadDotLines()
 		found := false
 		for _, l := range lines {
@@ -288,63 +227,73 @@ func TestRfcDispatch(t *testing.T) {
 	})
 	t.Run("LIST-OVERVIEW.FMT", func(t *testing.T) {
 		c := plain.dial(t)
-		rfcExpect(t, c, 215, "LIST OVERVIEW.FMT")
+		c.ExpectCmd(215, "LIST OVERVIEW.FMT")
 		if err := client.ExpectLines(c.ReadDotLines(), rfcListOverviewFmt); err != nil {
 			t.Fatal(err)
 		}
 	})
 	t.Run("LIST-HEADERS", func(t *testing.T) {
 		c := plain.dial(t)
-		rfcExpect(t, c, 215, "LIST HEADERS")
+		c.ExpectCmd(215, "LIST HEADERS")
 		if err := client.ExpectLines(c.ReadDotLines(), rfcListHeaders); err != nil {
 			t.Fatal(err)
 		}
 	})
 	t.Run("OVER", func(t *testing.T) {
-		rfcExpect(t, plain.dial(t), 412, "OVER")
+		plain.dial(t).ExpectCmd(412, "OVER")
 	})
 	t.Run("HDR", func(t *testing.T) {
-		rfcExpect(t, plain.dial(t), 412, "HDR Subject")
+		plain.dial(t).ExpectCmd(412, "HDR Subject")
 	})
 	t.Run("MODE-STREAM", func(t *testing.T) {
-		line := rfcExpect(t, proc.dial(t), 203, "MODE STREAM")
+		line := peerSrv.dial(t).ExpectCmd(203, "MODE STREAM")
 		if !strings.Contains(line, "Streaming permitted") {
 			t.Fatalf("got %q, want handleModeStream's 203", line)
 		}
+		// plan nntp-peering: 502 without peers, 480 while a peer login could help
+		proc.dial(t).ExpectCmd(502, "MODE STREAM")
+		loginSrv.dial(t).ExpectCmd(480, "MODE STREAM")
 	})
 	t.Run("MODE-READER", func(t *testing.T) {
 		// the hardened handleMode still answers MODE READER
-		line := rfcExpect(t, proc.dial(t), 200, "MODE READER")
+		line := proc.dial(t).ExpectCmd(200, "MODE READER")
 		if !strings.Contains(line, "Reader mode") {
 			t.Fatalf("got %q, want handleMode's reader reply", line)
 		}
-		rfcExpect(t, plain.dial(t), 201, "MODE READER")
+		plain.dial(t).ExpectCmd(201, "MODE READER")
 	})
 	t.Run("CHECK", func(t *testing.T) {
-		line := rfcExpect(t, proc.dial(t), 480, "CHECK <x@y>")
+		// plan nntp-peering: 480 while a peer login could help, 502 without peers,
+		// each reply carrying the message-id (RFC 4644 §2.4.2)
+		line := loginSrv.dial(t).ExpectCmd(480, "CHECK <x@y>")
 		if !strings.HasPrefix(line, "480 <x@y> ") {
 			t.Fatalf("got %q, want 480 carrying <x@y>", line)
 		}
+		line = proc.dial(t).ExpectCmd(502, "CHECK <x@y>")
+		if !strings.HasPrefix(line, "502 <x@y> ") {
+			t.Fatalf("got %q, want 502 carrying <x@y>", line)
+		}
+		peerSrv.dial(t).ExpectCmd(238, "CHECK <x@y>")
 	})
 	t.Run("CHECK-args", func(t *testing.T) {
 		// commandMaxArgs["CHECK"] = 1: the table's 501 comes before the handler's
 		// no-processor 500
-		line := rfcExpect(t, plain.dial(t), 501, "CHECK a b")
+		line := plain.dial(t).ExpectCmd(501, "CHECK a b")
 		if !strings.Contains(line, "too many arguments") {
 			t.Fatalf("got %q, want the table's 501 (too many arguments)", line)
 		}
-		rfcExpect(t, plain.dial(t), 500, "CHECK <x@y>") // and the handler answers 500 there
+		plain.dial(t).ExpectCmd(500, "CHECK <x@y>") // and the handler answers 500 there
 	})
 	t.Run("STARTTLS", func(t *testing.T) {
-		line := rfcExpect(t, plain.dial(t), 502, "STARTTLS")
+		line := plain.dial(t).ExpectCmd(502, "STARTTLS")
 		if !strings.Contains(line, "not available") {
 			t.Fatalf("got %q, want handleStartTLS's 502 (not available)", line)
 		}
 	})
 	t.Run("NEWNEWS", func(t *testing.T) {
 		// decision D3: NEWNEWS is not implemented and stays unknown (RFC-1m)
-		rfcExpect(t, proc.dial(t), 500, "NEWNEWS rc6.* 20000101 000000 GMT")
-		rfcExpect(t, plain.dial(t), 500, "NEWNEWS rc6.* 20000101 000000 GMT")
+		proc.dial(t).ExpectCmd(500, "NEWNEWS rc6.* 20000101 000000 GMT")
+		plain.dial(t).ExpectCmd(500, "NEWNEWS rc6.* 20000101 000000 GMT")
 	})
 }
 
@@ -358,6 +307,8 @@ func TestRfcCapabilities(t *testing.T) {
 	readUser, readPass := hUser(t, false, true)
 
 	base := []string{rfcCapLIST, "OVER MSGID", "HDR"}
+	// IHAVE and STREAMING are listed on a peer connection only (plan nntp-peering)
+	peerReg, _ := hPeerIP("")
 	cases := []struct {
 		name    string
 		session func(t *testing.T) *client.Conn // returns the client in the state of the row
@@ -369,15 +320,24 @@ func TestRfcCapabilities(t *testing.T) {
 			session: func(t *testing.T) *client.Conn {
 				return rfcNewCertServer(t, certFile, keyFile, nil, &hFakeProcessor{}).dial(t)
 			},
-			present: append(append([]string{}, base...), "STREAMING", "STARTTLS"),
-			never:   []string{"NEWNEWS", "TAKETHIS"},
+			present: append(append([]string{}, base...), "STARTTLS"),
+			never:   []string{"NEWNEWS", "TAKETHIS", "IHAVE", "STREAMING"},
 		},
 		{
 			name: "plaintext-before-auth-no-cert",
 			session: func(t *testing.T) *client.Conn {
 				return newTestServer(t, hServerOpts{Proc: &hFakeProcessor{}}).dial(t)
 			},
-			present: append(append([]string{}, base...), "STREAMING"),
+			present: base,
+			never:   []string{"STARTTLS", "IHAVE", "STREAMING"},
+		},
+		{
+			// plan nntp-peering: a peer connection is the only one that may feed
+			name: "peer-connection",
+			session: func(t *testing.T) *client.Conn {
+				return newTestServer(t, hServerOpts{Proc: &hFakeProcessor{}, Peers: peerReg}).dial(t)
+			},
+			present: append(append([]string{}, base...), "IHAVE", "STREAMING"),
 			never:   []string{"STARTTLS"},
 		},
 		{
@@ -387,8 +347,8 @@ func TestRfcCapabilities(t *testing.T) {
 				rfcAuth(t, c, postUser, postPass)
 				return c
 			},
-			present: append(append([]string{}, base...), "STREAMING"),
-			never:   []string{"STARTTLS"},
+			present: append(append([]string{}, base...), "POST"),
+			never:   []string{"STARTTLS", "IHAVE", "STREAMING"},
 		},
 		{
 			name: "after-auth-user-without-posting",
@@ -398,7 +358,7 @@ func TestRfcCapabilities(t *testing.T) {
 				return c
 			},
 			present: base,
-			never:   []string{"STREAMING", "STARTTLS"},
+			never:   []string{"POST", "IHAVE", "STREAMING", "STARTTLS"},
 		},
 		{
 			name: "no-processor",
@@ -406,31 +366,29 @@ func TestRfcCapabilities(t *testing.T) {
 				return rfcNewCertServer(t, certFile, keyFile, nil, nil).dial(t)
 			},
 			present: append(append([]string{}, base...), "STARTTLS"),
-			never:   []string{"STREAMING"},
+			never:   []string{"IHAVE", "STREAMING"},
 		},
 		{
 			name: "tls-port",
 			session: func(t *testing.T) *client.Conn {
 				return rfcNewCertServer(t, certFile, keyFile, tlsCfg, &hFakeProcessor{}).dial(t)
 			},
-			present: append(append([]string{}, base...), "STREAMING"),
-			never:   []string{"STARTTLS"},
+			present: base,
+			never:   []string{"STARTTLS", "IHAVE", "STREAMING"},
 		},
 		{
 			name: "after-starttls",
 			session: func(t *testing.T) *client.Conn {
 				c := rfcNewCertServer(t, certFile, keyFile, nil, &hFakeProcessor{}).dial(t)
-				rfcExpect(t, c, 382, "STARTTLS")
-				rfcUpgrade(t, c)
-				return c
+				return c.StartTLS(rfcClientTLS())
 			},
-			present: append(append([]string{}, base...), "STREAMING"),
-			never:   []string{"STARTTLS"},
+			present: base,
+			never:   []string{"STARTTLS", "IHAVE", "STREAMING"},
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			caps := rfcCaps(t, tc.session(t))
+			capsM, caps := tc.session(t).Capabilities()
 			// RFC 3977 §5.2.2: VERSION first; READER unconditional (plan D9)
 			if len(caps) < 2 || caps[0] != "VERSION 2" || caps[1] != "READER" {
 				t.Fatalf("capabilities %q: want VERSION 2, READER first", caps)
@@ -441,7 +399,7 @@ func TestRfcCapabilities(t *testing.T) {
 				}
 			}
 			for _, n := range append([]string{"NEWNEWS", "TAKETHIS"}, tc.never...) {
-				if rfcHasLabel(caps, n) {
+				if _, listed := capsM[n]; listed {
 					t.Errorf("capability %q listed in %q", n, caps)
 				}
 			}
@@ -452,20 +410,26 @@ func TestRfcCapabilities(t *testing.T) {
 func TestRfcStreamingConsistent(t *testing.T) {
 	postUser, postPass := hUser(t, true, true)
 	readUser, readPass := hUser(t, false, true)
+	peerReg, _ := hPeerIP("")
+	loginReg, _, _ := hPeerLogin(t, "127.0.0.1")
 	for _, tc := range []struct {
 		name      string
 		proc      bool
+		peers     *PeerRegistry
 		user      string
 		pass      string
 		streaming bool
 	}{
-		{"processor-unauthenticated", true, "", "", true},
-		{"posting-user", true, postUser, postPass, true},
-		{"user-without-posting", true, readUser, readPass, false},
-		{"no-processor", false, "", "", false},
+		// plan nntp-peering: STREAMING is a peer-only capability
+		{"peer", true, peerReg, "", "", true},
+		{"no-peers", true, nil, "", "", false},
+		{"peer-login-pending", true, loginReg, "", "", false},
+		{"posting-user", true, nil, postUser, postPass, false},
+		{"user-without-posting", true, nil, readUser, readPass, false},
+		{"no-processor", false, peerReg, "", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			opts := hServerOpts{}
+			opts := hServerOpts{Peers: tc.peers}
 			if tc.proc {
 				opts.Proc = &hFakeProcessor{}
 			}
@@ -473,7 +437,7 @@ func TestRfcStreamingConsistent(t *testing.T) {
 			if tc.user != "" {
 				rfcAuth(t, c, tc.user, tc.pass)
 			}
-			caps := rfcCaps(t, c)
+			capsM, caps := c.Capabilities()
 			code, line := c.Cmd("MODE STREAM")
 			// RFC 4644 §2.2 / plan D5: STREAMING listed iff MODE STREAM gives 203
 			has := rfcHasLine(caps, "STREAMING")
@@ -482,6 +446,10 @@ func TestRfcStreamingConsistent(t *testing.T) {
 			}
 			if has != tc.streaming {
 				t.Fatalf("STREAMING listed=%v, want %v (MODE STREAM %q)", has, tc.streaming, line)
+			}
+			// IHAVE is listed under the same condition (plan nntp-peering)
+			if _, ihave := capsM["IHAVE"]; ihave != tc.streaming {
+				t.Fatalf("IHAVE listed=%v, want %v: %q", ihave, tc.streaming, caps)
 			}
 		})
 	}
@@ -494,19 +462,18 @@ func TestRfcStartTLSWire(t *testing.T) {
 		hs := rfcNewCertServer(t, certFile, keyFile, nil, nil)
 		user, pass := hUser(t, true, true)
 		c := hs.dial(t)
-		if caps := rfcCaps(t, c); !rfcHasLine(caps, "STARTTLS") {
+		if _, caps := c.Capabilities(); !rfcHasLine(caps, "STARTTLS") {
 			t.Fatalf("STARTTLS not listed before auth: %q", caps)
 		}
-		rfcExpect(t, c, 382, "STARTTLS")
-		rfcUpgrade(t, c)
-		caps := rfcCaps(t, c)
-		if rfcHasLabel(caps, "STARTTLS") {
+		c = c.StartTLS(rfcClientTLS())
+		capsM, caps := c.Capabilities()
+		if _, listed := capsM["STARTTLS"]; listed {
 			t.Fatalf("STARTTLS still listed over TLS: %q", caps)
 		}
 		if !rfcHasLine(caps, "AUTHINFO USER") {
 			t.Fatalf("AUTHINFO USER not listed over TLS: %q", caps)
 		}
-		line := rfcExpect(t, c, 502, "STARTTLS")
+		line := c.ExpectCmd(502, "STARTTLS")
 		if !strings.Contains(line, "active TLS layer") {
 			t.Fatalf("second STARTTLS: got %q, want 502 (active TLS layer)", line)
 		}
@@ -515,10 +482,11 @@ func TestRfcStartTLSWire(t *testing.T) {
 	t.Run("implicit-tls", func(t *testing.T) {
 		hs := rfcNewCertServer(t, certFile, keyFile, rfcServerTLS(t, certFile, keyFile), nil)
 		c := hs.dial(t)
-		if caps := rfcCaps(t, c); rfcHasLabel(caps, "STARTTLS") {
+		capsM, caps := c.Capabilities()
+		if _, listed := capsM["STARTTLS"]; listed {
 			t.Fatalf("STARTTLS listed on the TLS port: %q", caps)
 		}
-		rfcExpect(t, c, 502, "STARTTLS")
+		c.ExpectCmd(502, "STARTTLS")
 	})
 	t.Run("quit-close-notify", func(t *testing.T) {
 		// T-rfc-commands-2 (fixed in step A): after STARTTLS the server closes the
@@ -528,10 +496,10 @@ func TestRfcStartTLSWire(t *testing.T) {
 		// and the raw stream after the 205 must hold that alert record.
 		hs := rfcNewCertServer(t, certFile, keyFile, nil, nil)
 		c := hs.dial(t)
-		rfcExpect(t, c, 382, "STARTTLS")
+		c.ExpectCmd(382, "STARTTLS")
 		raw := &rfcRecordingConn{Conn: c.Conn}
 		tc := rfcUpgradeOver(t, c, raw, tls.VersionTLS12)
-		rfcExpect(t, c, 205, "QUIT")
+		c.ExpectCmd(205, "QUIT")
 		if n := c.R.Buffered(); n != 0 {
 			t.Fatalf("%d unexpected bytes after 205", n)
 		}
@@ -555,7 +523,7 @@ func TestRfcReaderHonest(t *testing.T) {
 	g := hGroup(t, "rc6.honest", 3, nil)
 	hs := newTestServer(t, hServerOpts{})
 	c := hs.dial(t)
-	if caps := rfcCaps(t, c); !rfcHasLine(caps, "READER") {
+	if _, caps := c.Capabilities(); !rfcHasLine(caps, "READER") {
 		t.Fatalf("READER not listed: %q", caps)
 	}
 	// RFC 3977 §3.3.3: a server listing READER MUST implement DATE, NEXT, LAST
@@ -577,7 +545,7 @@ func TestRfcReaderHonest(t *testing.T) {
 	if code, line := nonUnknown("LAST"); code != 412 {
 		t.Fatalf("LAST without a group: %q, want 412", line)
 	}
-	rfcExpect(t, c, 211, "GROUP %s", g)
+	c.ExpectCmd(211, "GROUP %s", g)
 	if code, line := nonUnknown("NEXT"); code != 223 || !strings.HasPrefix(line, "223 2 "+hMessageID(g, 2)) {
 		t.Fatalf("NEXT: %q, want 223 2 %s", line, hMessageID(g, 2))
 	}

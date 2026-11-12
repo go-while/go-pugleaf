@@ -1,6 +1,8 @@
 package web
 
 import (
+	"errors"
+	"fmt"
 	"html/template"
 	"log"
 	"net/http"
@@ -92,6 +94,10 @@ func (s *WebServer) adminPage(c *Context) {
 	if searchTerm != "" {
 		// Use search function with description option if search term provided
 		newsgroups, err = s.DB.SearchNewsgroupsWithOptions(searchTerm, 1000, 0, true, searchDescription) // High limit for admin
+		if errors.Is(err, database.ErrTooManyWildcards) {
+			s.renderError(c, http.StatusBadRequest, "Search Error", fmt.Sprintf("Use at most %d wildcards (* or %%) in a search.", database.MaxNewsgroupSearchWildcards))
+			return
+		}
 		if err != nil {
 			s.renderError(c, http.StatusInternalServerError, "Database Error", "Failed to search newsgroups")
 			return
@@ -558,7 +564,11 @@ func (s *WebServer) adminPage(c *Context) {
 		CurrentHostname:            currentHostname,
 		WebPostMaxArticleSize:      webPostMaxSize,
 		MaxCrossPosts:              s.DB.MaxCrossPosts(),
+		Maintenance:                s.maintenanceStatus(),
 		MaxCrossPostsLimit:         config.MaxCrossPostsLimit,
+		PeerDateMaxAgeHours:        int(s.DB.PeerDateMaxAge() / time.Hour),
+		PeerDateMaxFutureHours:     int(s.DB.PeerDateMaxFuture() / time.Hour),
+		PeerDateHoursLimit:         config.PeerDateHoursLimit,
 		AbuseMail:                  abuseMail,
 		WebLocalNNTPServerAddrInfo: webLocalNNTPServerAddrInfo,
 		ReverseProxyAddr:           reverseProxyAddr,
@@ -572,6 +582,8 @@ func (s *WebServer) adminPage(c *Context) {
 		FormFieldHostname:             config.FORM_FIELD_HOSTNAME,
 		FormFieldWebPostSize:          config.FORM_FIELD_WEBPOSTSIZE,
 		FormFieldMaxCrossPosts:        config.FORM_FIELD_MAXCROSSPOSTS,
+		FormFieldPeerDateMaxAge:       config.FORM_FIELD_PEERDATEMAXAGE,
+		FormFieldPeerDateMaxFuture:    config.FORM_FIELD_PEERDATEMAXFUTURE,
 		FormFieldAbuseMail:            config.FORM_FIELD_ABUSEMAIL,
 		FormFieldWebLocalNNTP:         config.FORM_FIELD_WEBLOCALNNTP,
 		FormFieldReverseProxy:         config.FORM_FIELD_REVERSEPROXY,

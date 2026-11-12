@@ -54,10 +54,14 @@ type TrimStats struct {
 	Removed        int64
 	GroupsMissing  int64 // refs to a group ID not in the main DB (or without group DB file)
 	ArticleMissing int64 // refs where the group DB does not have the article
+	RejectsSkipped int64 // remembered rejects ("r<unixday>"): no location, left to the reject prune
 	Errors         int64
 	StartTime      time.Time
 	EndTime        time.Time
 }
+
+// errTrimRejectToken is returned by parseTrimToken for a remembered reject token
+var errTrimRejectToken = errors.New("reject token, not a group")
 
 var appVersion = "-unset-"
 
@@ -481,8 +485,13 @@ func findLocation(locs []history.Location, groupID int64) (history.Location, boo
 
 // parseTrimToken parses one token of a history newsgroups CSV: "groupID" (old rows, number 0)
 // or "groupID:articleNum". An invalid or non-positive article number gives 0 (unknown), like the
-// history reader does; an invalid group ID is an error.
+// history reader does; an invalid group ID is an error. A remembered reject ("r<unixday>", plan
+// nntp-peering) is no group token: callers skip it with history.IsRejectToken before calling,
+// and it is reported as skipped here, never as an error.
 func parseTrimToken(token string) (groupID, articleNum int64, err error) {
+	if history.IsRejectToken(token) {
+		return 0, 0, errTrimRejectToken
+	}
 	idStr, numStr, hasNum := strings.Cut(token, ":")
 	groupID, err = strconv.ParseInt(idStr, 10, 64)
 	if err != nil || groupID <= 0 {
@@ -586,6 +595,11 @@ func trimTable(ctx context.Context, db *database.Database, h historyIndex, rodb 
 			for _, part := range strings.Split(r.newsgroups, ",") {
 				part = strings.TrimSpace(part)
 				if part == "" {
+					continue
+				}
+				if history.IsRejectToken(part) {
+					// a remembered reject is no location: the reject prune expires it
+					ts.RejectsSkipped++
 					continue
 				}
 				// the exact token is removed: "id:num" with its number, an old plain "id" with 0
@@ -725,6 +739,7 @@ func (ts *TrimStats) PrintFinal(interrupted bool) {
 	fmt.Printf("History Rows Scanned: %d\n", ts.RowsScanned)
 	fmt.Printf("Group References:     %d\n", ts.GroupRefs)
 	fmt.Printf("Removed References:   %d (group gone: %d, article gone: %d)\n", ts.Removed, ts.GroupsMissing, ts.ArticleMissing)
+	fmt.Printf("Rejects Skipped:      %d\n", ts.RejectsSkipped)
 	fmt.Printf("Errors:               %d\n", ts.Errors)
 	fmt.Printf("Scan Time:            %v (without final flush)\n", ts.EndTime.Sub(ts.StartTime).Truncate(time.Millisecond))
 }

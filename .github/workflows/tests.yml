@@ -41,7 +41,7 @@ jobs:
           go test -race -count=1 -timeout 1200s \
             ./internal/database/... ./internal/web/... ./internal/history/... ./internal/nntp/... \
             ./internal/processor/... ./cmd/expire-news/... ./cmd/history-rebuild/... ./cmd/nntp-server/... \
-            ./internal/postmgr/... ./internal/cache/... ./internal/models/... ./internal/common/... \
+            ./internal/postmgr/... ./internal/feed/... ./internal/peerstats/... ./internal/cache/... ./internal/models/... ./internal/common/... \
             ./cmd/tcp2tor/... ./cmd/web/... ./cmd/nntp-fetcher/... ./cmd/nntp-analyze/... ./cmd/recover-db/... \
             ./cmd/post-queue/... ./cmd/import-flat-files/... ./cmd/rslight-importer/... ./cmd/fix-references/... \
             ./cmd/fix-thread-activity/... ./cmd/audit-web-posts/... ./cmd/extract_hierarchies/... ./cmd/merge-active/... \

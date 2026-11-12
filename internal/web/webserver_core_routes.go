@@ -38,8 +38,9 @@ type WebServer struct {
 	trustedProxyNets []*net.IPNet // reverse proxies whose X-Forwarded-* headers are trusted
 
 	httpServerMu sync.Mutex
-	httpServer   *http.Server  // set by Start/serveOn, stopped by Shutdown
-	stopCh       chan struct{} // closed by Shutdown; background goroutines of the server stop on it
+	httpServer   *http.Server   // set by Start/serveOn, stopped by Shutdown
+	stopCh       chan struct{}  // closed by Shutdown; background goroutines of the server stop on it
+	maint        maintenanceJob // global FNA/FTA job of the CFG tab (web_admin_maintenance.go)
 	stopOnce     sync.Once
 
 	inFlightRequests atomic.Int64       // requests currently inside a handler (trackInFlight)
@@ -462,6 +463,8 @@ func (s *WebServer) setupRoutes() {
 	s.Router.POST("/admin/newsgroups/migrate-activity", s.adminMigrateNewsgroupActivity)
 	s.Router.POST("/admin/newsgroups/hide-future-posts", s.adminHideFuturePosts)
 	s.Router.POST("/admin/newsgroups/fix-thread-activity", s.adminFixThreadActivity)
+	s.Router.POST("/admin/maintenance/start", s.adminMaintenanceStart)
+	s.Router.POST("/admin/maintenance/stop", s.adminMaintenanceStop)
 	s.Router.POST("/admin/newsgroups/bulk-enable", s.adminBulkEnableNewsgroups)
 	s.Router.POST("/admin/newsgroups/bulk-disable", s.adminBulkDisableNewsgroups)
 	s.Router.POST("/admin/newsgroups/bulk-delete", s.adminBulkDeleteNewsgroups)
@@ -480,6 +483,12 @@ func (s *WebServer) setupRoutes() {
 	s.Router.POST("/admin/nntpusers/delete", s.adminDeleteNNTPUser)
 	s.Router.POST("/admin/nntpusers/toggle", s.adminToggleNNTPUser)
 	s.Router.POST("/admin/nntpusers/enable", s.adminEnableNNTPUser)
+	s.Router.GET("/admin/peers", s.adminPeersPage)
+	s.Router.GET("/admin/peers/stats", s.adminPeerStatsPage)
+	s.Router.POST("/admin/peers", s.adminCreatePeer)
+	s.Router.POST("/admin/peers/update", s.adminUpdatePeer)
+	s.Router.POST("/admin/peers/delete", s.adminDeletePeer)
+	s.Router.POST("/admin/peers/toggle", s.adminTogglePeer)
 	s.Router.POST("/admin/sections", s.CreateSectionHandler)
 	s.Router.POST("/admin/sections/update", s.UpdateSectionHandler)
 	s.Router.POST("/admin/sections/delete", s.DeleteSectionHandler)
