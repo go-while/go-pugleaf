@@ -320,6 +320,7 @@ func TestMboxDiscUnpackResult(t *testing.T) {
 		{"warnings", 1, "WARNING: cannot read something\n", false, true},
 		{"refused link", 2, dangerous, false, true},
 		{"refused links, partial write", 2, dangerous + "ERROR: Dangerous link path was ignored : a : ../b", false, true},
+		{"refused link, older 7-Zip wording", 2, "ERROR: Dangerous symbolic link path was ignored : SPOOL/alt/test/link : ../../../other/9\n", false, true},
 		{"refused link, nothing extracted", 2, dangerous, true, false},
 		{"refused link and a real error", 2, dangerous + "ERRORS:\nUnexpected end of archive\n", false, false},
 		{"cannot open the archive", 2, "ERROR: x.iso\nCannot open the file as archive\n", true, false},

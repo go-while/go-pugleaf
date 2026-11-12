@@ -283,9 +283,14 @@ func unpackDisc(image, dir, sevenZip string, stop <-chan struct{}) error {
 	return nil
 }
 
-// dangerousLinkMessage is what 7-Zip says about a symbolic link whose target leaves the
-// image ("ERROR: Dangerous link path was ignored : SPOOL/alt/test/link : ../../../other/9").
-const dangerousLinkMessage = "Dangerous link path was ignored"
+// isDangerousLinkLine reports whether l is 7-Zip's complaint about a symbolic link whose
+// target leaves the image. The wording depends on the 7-Zip version:
+// "ERROR: Dangerous link path was ignored : SPOOL/alt/test/link : ../../../other/9" (25.x)
+// and "ERROR: Dangerous symbolic link path was ignored : ..." (the one on Ubuntu 24.04).
+func isDangerousLinkLine(l string) bool {
+	i := strings.Index(l, "Dangerous ")
+	return i >= 0 && strings.Contains(l[i:], "link path was ignored")
+}
 
 // discUnpackResult turns the exit status of a `7z x` run into an error, or nil when the
 // image was unpacked well enough to walk it.
@@ -335,7 +340,7 @@ func dirIsEmpty(dir string) bool {
 const discErrorKeep = 5
 
 // sevenZipErrors is the stderr of a 7z run, read line by line: it counts the refused
-// symbolic links (dangerousLinkMessage) and keeps the other "ERROR" lines, which is what
+// symbolic links (isDangerousLinkLine) and keeps the other "ERROR" lines, which is what
 // tells a disc image with such links apart from a real failure — the tail of the output
 // alone cannot, because the lines may be anywhere in it. It also keeps the last stderrKeep
 // bytes for the error message, as the other 7z paths do. exec writes into it from its own
@@ -388,7 +393,7 @@ func (s *sevenZipErrors) flush() {
 func (s *sevenZipErrors) line(l string) {
 	t := strings.TrimSpace(strings.TrimRight(l, "\r"))
 	switch {
-	case strings.Contains(t, dangerousLinkMessage):
+	case isDangerousLinkLine(t):
 		s.dangerous++
 	case strings.HasPrefix(t, "ERROR"): // "ERROR: ..." and the "ERRORS:" header
 		s.otherSeen++

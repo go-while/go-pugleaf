@@ -122,6 +122,8 @@ from a posting user refuses it until that sender has a row in the new `peers` ta
 - The thread rebuild survives broken dates, keeps `last_activity` and skips self-references.
 - `expire-news` keeps the thread rows of surviving replies whose parent expired.
 - Peer host entries that do not parse are skipped instead of being looked up in DNS.
+- mbox-importer: a disc image with a symbolic link that points outside the image is imported with older 7-Zip
+  versions too (they word the warning differently); before, the whole image failed.
 
 ## Performance
 
