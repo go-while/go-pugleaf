@@ -18,7 +18,7 @@ with IHAVE.
 - Several inputs per run; a directory argument imports its mbox files and UAT archives in name order,
   one after the other or `-parallel N` at a time (CSV files such as archive.org's `NAME.mbox.csv.gz` index are never inputs)
 - Files every article like a fetched one, through the processor in bulk mode (message-id history,
-  overview, threading): into the first group of its `Newsgroups:` header, or into `-group NAME`
+  overview, threading), into one group (crossposts are not processed; see [Target group](#target-group))
 - Creates missing newsgroups on the fly
 - Skips articles that are already in their target group, so a run can be repeated
 - Renames a fully imported input to `INPUT.done` (`-mark-done`), so a directory can be re-run
@@ -115,6 +115,25 @@ Ctrl+C (or SIGTERM) finishes the current article, starts no further input, shuts
 (history) and the database down cleanly and exits with code 130. The interrupted input is not
 renamed; the copy of a `.usenet.xz`/`.usenet.7z` unpacked into `-tmpdir` is removed.
 
+
+## Target group
+
+Each article is filed into exactly one group, the first rule that gives one:
+
+1. `-group NAME`, or the file name's group with `-group-from-name`.
+2. In a disc image or `-spool` input: the group of the article file's directory, when the article
+   lists it (`SPOOL/alt/test/17` → `alt.test`; upper-case ISO 9660 names match too).
+3. The input's own group, when the article lists it: the group in the file name
+   (`alt.amiga.mbox.zip` → `alt.amiga`, also for an mbox file inside a spool) or the name a UAT
+   package carries. A file named after a hierarchy (`free.pt.mbox.7z`) gives the first listed group
+   below it (`free.pt.foo`).
+4. The first group of the `Newsgroups:` header.
+
+archive.org's collections hold one file per group, and a crossposted article is in the file of every
+group it was posted to. Rules 2 and 3 put each copy into the group of its own file. With only rule 4,
+every copy went to the first listed group (often a typo or a local group), which made thousands of
+one-article groups and left the other groups without the article.
+
 ## Command Line Options
 
 | Flag | Default | Meaning |
@@ -123,8 +142,8 @@ renamed; the copy of a `.usenet.xz`/`.usenet.7z` unpacked into `-tmpdir` is remo
 | `-nntphostname` | (none) | Your NNTP hostname; required on the first run, later runs use the value stored in the database. It must resolve in DNS: the processor checks it at start |
 | `-useshorthashlen` | `7` | Legacy short hash length (2-7). The value of the first run is stored in the database; later runs use the stored value and warn if it differs. No effect on the history index |
 | `-history` | `true` | Maintain and use the message-id history index in `<data>/history` |
-| `-group` | (none) | File every article of the run into this group instead of the first group of its `Newsgroups:` header |
-| `-group-from-name` | `false` | File every article of an input into the group named by the input's file name: the base name cut before the first `.mbox`, `.bag` or `.usenet` (`de.comm.foo.mbox.gz` becomes `de.comm.foo`, `pl.comp.lang.c.usenet.xz` becomes `pl.comp.lang.c`); a dump date or a file count right before the suffix is cut off as well, as archive.org's collections name their files (`0.akita-inu.20140617.mbox.gz` and `pitt.mac-users.(9).mbox.7z` become `0.akita-inu` and `pitt.mac-users`). A file whose name gives no valid group is an input error. A disc image or `-spool` input ignores the flag (it holds many groups; one log line says so). Not together with `-group`. This is what `mbox-import.sh` in the repository root uses for a directory of per-group archives |
+| `-group` | (none) | File every article of the run into this group (see [Target group](#target-group)) |
+| `-group-from-name` | `false` | File every article of an input into the group named by the input's file name: the base name cut before the first `.mbox`, `.bag` or `.usenet` (`de.comm.foo.mbox.gz` becomes `de.comm.foo`, `pl.comp.lang.c.usenet.xz` becomes `pl.comp.lang.c`); a dump date or a file count right before the suffix is cut off as well, as archive.org's collections name their files (`0.akita-inu.20140617.mbox.gz` and `pitt.mac-users.(9).mbox.7z` become `0.akita-inu` and `pitt.mac-users`). A file whose name gives no valid group is an input error. Without the flag the file name's group is still preferred for the articles that list it (see [Target group](#target-group)). A disc image or `-spool` input ignores the flag (it holds many groups; one log line says so). Not together with `-group`. This is what `mbox-import.sh` in the repository root uses for a directory of per-group archives |
 | `-disc-reader` | `auto` | How a disc image is read: `mount` (`fuseiso` for `.iso`/`.cdr`, `squashfuse` for `.sqsh`, read in place), `7z` (unpack into `-tmpdir`), `auto` (mount when possible, else 7z), see [Disc images and news spools](#disc-images-and-news-spools) |
 | `-pprof` | (off) | Debug: serve `net/http/pprof` on this address (`127.0.0.1:6061`) with block and mutex profiling on |
 | `-7z` | `7z` | Program used to unpack `.7z` and `.usenet.7z` inputs (name in `PATH` or a full path); also unpacks `.usenet.xz` when `-xz` is not found |

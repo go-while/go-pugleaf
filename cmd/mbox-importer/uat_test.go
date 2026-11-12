@@ -18,7 +18,7 @@ import (
 
 const (
 	uaGroup     = "t.uat.polish" // the package name, also the first group of the Polish article
-	uaOther     = "t.uat.other"  // the first group of the crosspost
+	uaOther     = "t.uat.other"  // the first group of the crosspost (it stays in uaGroup: the package's group wins)
 	uaIDPolish  = "<pl@uat.test.invalid>"
 	uaIDCross   = "<cross@uat.test.invalid>"
 	uaIDEmpty   = "<empty@uat.test.invalid>"
@@ -366,8 +366,7 @@ func TestMboxUatDryRun(t *testing.T) {
 	}
 	for _, want := range []string{
 		fmt.Sprintf("[MBOX-IMPORT] uat file=%q group=%q version=3 messages=4", in, uaGroup),
-		fmt.Sprintf("[MBOX-IMPORT] dry-run group=%q articles=1", uaGroup),
-		fmt.Sprintf("[MBOX-IMPORT] dry-run group=%q articles=1", uaOther),
+		fmt.Sprintf("[MBOX-IMPORT] dry-run group=%q articles=2", uaGroup),
 		fmt.Sprintf("[MBOX-IMPORT] file=%q read=4 stored=2 present=0 skipped=2 (no-body=1,no-subject=1) rejected=0 errors=0 parser-skipped=0 near-misses=0 stopped-early=false unread=false marked-done=false", in),
 		fmt.Sprintf("[MBOX-IMPORT] uat file=%q re-encoded-fields=1 added-mime-version=4 raw-fields=-", in),
 	} {
@@ -395,7 +394,8 @@ func uaExpectedSubject(t *testing.T) string {
 	return art.Subject
 }
 
-// TestMboxUatImport: a real run files the articles into their first groups and renames the
+// TestMboxUatImport: a real run files the articles into the package's group (the crosspost
+// lists it second) and renames the
 // package, a rerun finds them present, and .usenet.xz / .usenet.7z copies of the package are
 // unpacked into -tmpdir (emptied again), found present and renamed themselves.
 func TestMboxUatImport(t *testing.T) {
@@ -422,8 +422,11 @@ func TestMboxUatImport(t *testing.T) {
 	}
 	miWithDB(t, data, func(db *database.Database) {
 		// miCheckGroups inline: one database open less
-		want := map[string]string{uaIDPolish: uaGroup, uaIDCross: uaOther}
-		for _, group := range []string{uaGroup, uaOther} {
+		want := map[string]string{uaIDPolish: uaGroup, uaIDCross: uaGroup} // the crosspost lists the package's group
+		if _, err := db.MainDBGetNewsgroup(uaOther); err == nil {
+			t.Errorf("group %s was created: the crosspost belongs to the package's group %s", uaOther, uaGroup)
+		}
+		for _, group := range []string{uaGroup} {
 			if _, err := db.MainDBGetNewsgroup(group); err != nil {
 				t.Errorf("group %s: %v", group, err)
 				continue

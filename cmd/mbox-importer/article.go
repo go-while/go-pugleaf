@@ -486,6 +486,85 @@ func firstNewsgroup(head []string) (group string, reason skipReason) {
 	return "", skipNoNewsgroups
 }
 
+// targetGroup picks the group an article is filed into (crossposts are not processed, so
+// it is exactly one):
+//   - -group or -group-from-name (opts.group): that group;
+//   - the group of the spool directory the article file is in (opts.sourceDir
+//     "SPOOL/alt/test" -> alt.test), when the article lists it;
+//   - the group of the input's file name (opts.sourceGroup, alt.test.mbox.zip -> alt.test),
+//     when the article lists it, or else the first listed group below it (a hierarchy dump
+//     free.pt.mbox.7z -> free.pt.foo);
+//   - the first group of the Newsgroups header.
+//
+// Without the source rules a crossposted article went to the first group of its header in
+// every input that holds it: an article of the ca.forsale archive with "Newsgroups:
+// rec.boat,ca.forsale" made a one-article group rec.boat, and its copy in the next archive
+// counted as present, so ca.forsale never got it.
+func targetGroup(head []string, opts *runOptions) (string, skipReason) {
+	first, reason := firstNewsgroup(head)
+	if reason == skipNoNewsgroups {
+		return "", reason // the processor requires the header even when the group is forced
+	}
+	if opts.group != "" {
+		return opts.group, skipNone
+	}
+	if opts.sourceDir == "" && opts.sourceGroup == "" {
+		return first, reason
+	}
+	value, _ := headerField(head, "Newsgroups")
+	var listed []string
+	for _, g := range common.SeparatorRegex.Split(value, -1) {
+		if g = strings.TrimSpace(g); g != "" && common.IsValidGroupName(g) {
+			listed = append(listed, g)
+		}
+	}
+	if g := groupOfSpoolDir(opts.sourceDir, listed); g != "" {
+		return g, skipNone
+	}
+	if g := groupOfSource(opts.sourceGroup, listed); g != "" {
+		return g, skipNone
+	}
+	return first, reason
+}
+
+// groupOfSpoolDir returns the listed group whose spool path the directory ends with
+// ("SPOOL/alt/test" holds alt.test; case does not matter, as on ISO 9660 images), the
+// longest when several match; "" when none does.
+func groupOfSpoolDir(dir string, listed []string) string {
+	if dir == "" || dir == "." {
+		return ""
+	}
+	dir = strings.ToLower(dir)
+	best := ""
+	for _, g := range listed {
+		p := strings.ToLower(strings.ReplaceAll(g, ".", "/"))
+		if (dir == p || strings.HasSuffix(dir, "/"+p)) && len(g) > len(best) {
+			best = g
+		}
+	}
+	return best
+}
+
+// groupOfSource returns src when the article lists it (in any case), else the first listed
+// group below it (src "free.pt": free.pt.foo); "" when neither.
+func groupOfSource(src string, listed []string) string {
+	if src == "" {
+		return ""
+	}
+	for _, g := range listed {
+		if strings.EqualFold(g, src) {
+			return src
+		}
+	}
+	prefix := strings.ToLower(src) + "."
+	for _, g := range listed {
+		if strings.HasPrefix(strings.ToLower(g), prefix) {
+			return g
+		}
+	}
+	return ""
+}
+
 // buildArticle builds the processor's article from the rewritten head and the body.
 func buildArticle(msgid string, head, body []string) (*models.Article, error) {
 	lines := make([]string, 0, len(head)+1+len(body))

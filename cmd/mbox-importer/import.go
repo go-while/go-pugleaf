@@ -187,9 +187,11 @@ type runOptions struct {
 	discReader                         string // -disc-reader: auto, mount or 7z (discReaderAuto when empty)
 	zstd, xz, tmpDir                   string // UAT archives: programs and the unpack directory ("" = system temp)
 	useShortHashLen                    int
-	parallel                           int  // inputs imported at the same time (<= 1: one after the other)
-	groupFromName                      bool // -group-from-name: the target group of an input is its file name (inputOptions)
-	spool                              bool // -spool: a positional directory or .zip input is a news spool (disc.go)
+	parallel                           int    // inputs imported at the same time (<= 1: one after the other)
+	groupFromName                      bool   // -group-from-name: the target group of an input is its file name (inputOptions)
+	sourceGroup                        string // group named by the input's file name, preferred when the article lists it (targetGroup)
+	sourceDir                          string // spool directory of the article file ("SPOOL/alt/test"), preferred the same way
+	spool                              bool   // -spool: a positional directory or .zip input is a news spool (disc.go)
 	history, dryRun, keepBinary        bool
 	markDone, strictMsgID              bool
 	tracked                            bool          // the tracking DB is on: it, not the rename, holds the import state
@@ -290,15 +292,8 @@ func handleLines(c *counters, rawHead, body []string, isBinary bool, opts *runOp
 		c.Skipped[reason]++
 		return
 	}
-	group, reason := firstNewsgroup(head)
-	if opts.group != "" {
-		// the processor requires the header even when the target group is forced
-		if reason == skipNoNewsgroups {
-			c.Skipped[reason]++
-			return
-		}
-		group = opts.group
-	} else if reason != skipNone {
+	group, reason := targetGroup(head, opts)
+	if reason != skipNone {
 		c.Skipped[reason]++
 		return
 	}
@@ -755,7 +750,19 @@ func fileMD5(path string, stop <-chan struct{}) (string, error) {
 // input error and is not opened).
 func inputOptions(path string, opts *runOptions) (*runOptions, error) {
 	if !opts.groupFromName {
-		return opts, nil
+		if opts.group != "" {
+			return opts, nil
+		}
+		// archive.org's collections hold one group per file (alt.amiga.mbox.zip): its group
+		// is preferred for the articles that list it (targetGroup). A name without a group
+		// (a whole-hierarchy dump, a spool) leaves the first group of Newsgroups.
+		g, err := groupFromFileName(path)
+		if err != nil || g == opts.sourceGroup {
+			return opts, nil
+		}
+		in := *opts
+		in.sourceGroup = g
+		return &in, nil
 	}
 	group, err := groupFromFileName(path)
 	if err != nil {

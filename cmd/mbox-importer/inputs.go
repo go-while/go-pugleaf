@@ -388,7 +388,7 @@ func markDone(path string) error {
 }
 
 // groupFromFileName derives the target group of an input from its file name
-// (-group-from-name): the base name without a trailing ".done", cut before the first
+// (-group-from-name): the base name without a trailing ".done", cut before the last
 // ".mbox", ".bag" or ".usenet" (de.comm.internet.commerce.mbox.gz -> de.comm.internet.commerce,
 // pl.comp.lang.c.usenet.xz -> pl.comp.lang.c). The result must be a valid newsgroup name.
 // archiveNameSuffix matches what archive.org's Usenet collections put between the group and
@@ -406,12 +406,16 @@ func groupFromFileName(path string) (string, error) {
 	if strings.HasSuffix(strings.ToLower(name), ".done") {
 		name = name[:len(name)-len(".done")]
 	}
-	cut := len(name)
+	// the last marker: a group may hold one itself (comp.mail.mbox.mbox.zip -> comp.mail.mbox)
+	cut := -1
 	lower := strings.ToLower(name)
 	for _, marker := range []string{".mbox", ".bag", ".usenet"} {
-		if i := strings.Index(lower, marker); i >= 0 && i < cut {
+		if i := strings.LastIndex(lower, marker); i > cut {
 			cut = i
 		}
+	}
+	if cut < 0 {
+		cut = len(name)
 	}
 	if cut == len(name) {
 		return "", fmt.Errorf("file %q: no .mbox, .bag or .usenet in the name, no group to derive (-group-from-name)", path)

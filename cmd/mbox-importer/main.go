@@ -1,6 +1,8 @@
 // mbox-importer imports Usenet mbox archives (archive.org collections) directly into the
 // go-pugleaf databases through the processor's bulk path: every article is filed into one
-// group (the first of its Newsgroups header, or -group), crossposts are not processed.
+// group, crossposts are not processed. The group is -group, else the input's own group (the
+// file name alt.test.mbox.zip, a spool directory alt/test) when the article lists it, else the
+// first group of its Newsgroups header (targetGroup).
 package main
 
 import (
@@ -51,7 +53,7 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		nntpHostname    = fs.String("nntphostname", "", "your NNTP hostname: required on the first run, later runs use the value stored in the database (must resolve in DNS)")
 		useShortHashLen = fs.Int("useshorthashlen", 7, "legacy short hash length (2-7); fixed after the first run, later runs use the stored value")
 		useHistory      = fs.Bool("history", true, "maintain and use the message-id history index (<data>/history)")
-		forceGroup      = fs.String("group", "", "file every article into this group instead of the first group of its Newsgroups header")
+		forceGroup      = fs.String("group", "", "file every article into this group (default: the input's own group when the article lists it, else the first group of its Newsgroups header)")
 		groupFromName   = fs.Bool("group-from-name", false, "file every article of an input into the group named by its file name (de.comm.foo.mbox.gz -> de.comm.foo); not with -group")
 		sevenZip        = fs.String("7z", "7z", "program used to unpack .7z inputs (name in PATH or a full path)")
 		discReader      = fs.String("disc-reader", discReaderAuto, "how a disc image is read: mount (fuseiso for .iso/.cdr, squashfuse for .sqsh, read in place), 7z (unpack into -tmpdir), auto (mount when the tool is installed and the mount works, else 7z)")
