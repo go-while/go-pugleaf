@@ -1,4 +1,4 @@
-# go-pugleaf v0.6.13
+# go-pugleaf v0.6.14
 
 The first release since v0.5.0 (2026-11-01). It covers the 0.6.x line: go-pugleaf becomes a peering news server.
 Only configured peers may feed it, and articles from peers, web users and NNTP users are passed on to the other
