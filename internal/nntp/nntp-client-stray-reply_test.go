@@ -237,8 +237,8 @@ func TestCliStrayReplyPutClosesBufferedConn(t *testing.T) {
 	if err := pool.Put(c); err != nil {
 		t.Fatalf("pool.Put: %v", err)
 	}
-	if st := pool.Stats(); st.TotalClosed != 1 || st.IdleConnections != 0 {
-		t.Fatalf("after Put of a connection with unread bytes: %+v, want it closed (TotalClosed 1, no idle)", st)
+	if ps := pool.Stats(); ps.TotalClosed != 1 || ps.IdleConnections != 0 {
+		t.Fatalf("after Put of a connection with unread bytes: %+v, want it closed (TotalClosed 1, no idle)", ps)
 	}
 	strayWantGroup(t, pool) // a fresh connection serves the next command
 	strayWantNewConn(t, pool, 2)

@@ -456,7 +456,7 @@ func (pool *Pool) failSlot() {
 const strayLogEvery = time.Minute
 
 // logStrayClose counts a connection Put closes for n unread reply bytes and logs it, at most
-// once per strayLogEvery with the count since the last line.
+// once per strayLogEvery with the running total for this pool.
 func (pool *Pool) logStrayClose(n int) {
 	total := pool.strayClosed.Add(1)
 	now := time.Now().UnixNano()
