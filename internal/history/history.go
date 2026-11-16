@@ -766,8 +766,10 @@ func isBusyError(err error) bool {
 // statements prepared on it, reused by every flush. Before, each transaction prepared its own
 // statements and threw them away at commit: a flush of 10,000 message-IDs touches almost every
 // one of a file's 256 tables, so it prepared ~4,000 statements, and a prepare (~100 µs) costs
-// far more than the insert it is used for (~6 µs). The cache is bounded by the queries times the
-// tables of a file (6 x 256).
+// far more than the insert it is used for (~6 µs). The cache is bounded by the query kinds times
+// the tables of a file: at most 6 x 256 = 1,536 statements per file, 24,576 over the 16 files
+// (a few KB of SQLite heap each, so tens of MB at most, held until Close). Kinds are prepared
+// lazily: the importer only uses the add, i.e. 4,096 statements in total.
 type dbWriter struct {
 	conn  *sql.Conn
 	stmts map[string]*sql.Stmt // query + table name -> statement prepared on conn
@@ -863,12 +865,15 @@ func (h *History) executeDBTransaction(dbIndex int, ops []routedOp) error {
 	}
 
 	if err = h.beginWrite(dbIndex, w); err != nil {
+		// the connection may be the problem (e.g. sql.ErrConnDone): drop it, the next flush opens a fresh one
+		w.close()
+		h.writers[dbIndex] = nil
 		return fmt.Errorf("failed to begin transaction: %v", err)
 	}
 	defer func() {
 		if err != nil {
 			if _, rerr := w.conn.ExecContext(context.Background(), "ROLLBACK"); rerr != nil {
-				log.Printf("ERROR HISTORY rollback failed: %v", rerr)
+				log.Printf("[HISTORY] ERROR: rollback failed: %v", rerr)
 			}
 			log.Printf("ERROR HISTORY Rolling back transaction due to error: %v", err)
 			os.Exit(1) // @AI!! THIS IS A CRITICAL ERROR, WE MUST EXIT! DO NOT TOUCH THIS LINE OF CODE!!

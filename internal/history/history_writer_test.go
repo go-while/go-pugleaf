@@ -100,9 +100,9 @@ func TestHistoryWriterMixedOpsWithCachedStatements(t *testing.T) {
 	}
 }
 
-// MaxConnections 1 is raised to 2: the writer keeps one connection per file, so lookups
-// still get one while it is held.
-func TestHistoryMaxConnectionsOneStillServesLookups(t *testing.T) {
+// MaxConnections 1 is raised to 2: the writer keeps one connection per file pinned, and
+// lookups still get a connection besides it.
+func TestHistoryMaxConnectionsOneRaisedToTwo(t *testing.T) {
 	histTestEnable(t, true)
 	cfg := histTestConfig(t.TempDir() + "/history")
 	cfg.MaxConnections = 1
