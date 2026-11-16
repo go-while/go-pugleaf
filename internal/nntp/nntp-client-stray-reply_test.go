@@ -11,6 +11,8 @@ package nntp
 import (
 	"errors"
 	"fmt"
+	"net/textproto"
+	"strings"
 	"testing"
 
 	"github.com/go-while/nntp-testkit/fakeserver"
@@ -181,3 +183,33 @@ func TestCliStrayReplyArticle430BlockCompressed(t *testing.T) {
 	}
 	strayWantNewConn(t, pool, 2)
 }
+
+// unreadReplyBytes counts both places where unread server data can wait: the textproto
+// reader's buffer and, on a COMPRESS connection, octets the inflater decoded but the reader
+// has not taken yet (deflateConn.buf). Direct, without a network: the second place is what a
+// stray block that arrived in a later segment than the status line fills.
+func TestCliStrayReplyUnreadBytesCountsDeflateBuffer(t *testing.T) {
+	d := &deflateConn{buf: []byte("stray\r\n.\r\n")}
+	c := &BackendConn{dconn: &deadlineConn{Conn: d}}
+	c.TextConn = textproto.NewConn(nopRWC{strings.NewReader("")})
+	if got := c.unreadReplyBytes(); got != len(d.buf) {
+		t.Fatalf("unreadReplyBytes = %d, want %d (the deflate layer's pending octets)", got, len(d.buf))
+	}
+
+	// and the reader's own buffer
+	c2 := &BackendConn{}
+	c2.TextConn = textproto.NewConn(nopRWC{strings.NewReader("430 no\r\nstray\r\n.\r\n")})
+	if _, _, err := c2.TextConn.ReadCodeLine(430); err != nil {
+		t.Fatalf("ReadCodeLine: %v", err)
+	}
+	if got, want := c2.unreadReplyBytes(), len("stray\r\n.\r\n"); got != want {
+		t.Fatalf("unreadReplyBytes = %d, want %d (the reader's buffered stray lines)", got, want)
+	}
+}
+
+// nopRWC is a ReadWriteCloser over a reader, for a textproto.Conn without a socket.
+type nopRWC struct{ r *strings.Reader }
+
+func (n nopRWC) Read(p []byte) (int, error)  { return n.r.Read(p) }
+func (n nopRWC) Write(p []byte) (int, error) { return len(p), nil }
+func (n nopRWC) Close() error                { return nil }
