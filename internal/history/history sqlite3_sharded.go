@@ -98,6 +98,9 @@ func NewSQLite3ShardedDB(config *ShardConfig, createTables bool) (*SQLite3Sharde
 	if config.MaxOpenPerDB <= 0 {
 		config.MaxOpenPerDB = 16
 	}
+	if config.MaxOpenPerDB < 2 {
+		config.MaxOpenPerDB = 2 // the history writer keeps one connection per file (dbWriter)
+	}
 	if config.Timeout < 30 {
 		config.Timeout = 300
 	}
