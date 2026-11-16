@@ -213,3 +213,33 @@ type nopRWC struct{ r *strings.Reader }
 func (n nopRWC) Read(p []byte) (int, error)  { return n.r.Read(p) }
 func (n nopRWC) Write(p []byte) (int, error) { return len(p), nil }
 func (n nopRWC) Close() error                { return nil }
+
+// Pool.Put's decision, deterministic and without relying on how the stray bytes arrive: a
+// pooled connection whose reader holds unread bytes is closed, not put back.
+func TestCliStrayReplyPutClosesBufferedConn(t *testing.T) {
+	st := cliFakeNewStore()
+	cliQuirkFill(st, strayGroup, 1, 3)
+	s := cliStoreServer(t, st, cliFakeStoreOpts{}, cliFakeFaults{})
+	pool := strayPool(t, s)
+
+	c, err := pool.Get(MODE_READER_MV)
+	if err != nil {
+		t.Fatalf("pool.Get: %v", err)
+	}
+	// stand-in reader that already holds the stray lines of a finished reply
+	tc := textproto.NewConn(nopRWC{strings.NewReader("430 no\r\nstray\r\n.\r\n")})
+	if _, _, err := tc.ReadCodeLine(430); err != nil {
+		t.Fatalf("ReadCodeLine: %v", err)
+	}
+	c.mux.Lock()
+	c.TextConn = tc
+	c.mux.Unlock()
+	if err := pool.Put(c); err != nil {
+		t.Fatalf("pool.Put: %v", err)
+	}
+	if st := pool.Stats(); st.TotalClosed != 1 || st.IdleConnections != 0 {
+		t.Fatalf("after Put of a connection with unread bytes: %+v, want it closed (TotalClosed 1, no idle)", st)
+	}
+	strayWantGroup(t, pool) // a fresh connection serves the next command
+	strayWantNewConn(t, pool, 2)
+}
