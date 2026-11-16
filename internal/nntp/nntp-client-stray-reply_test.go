@@ -151,3 +151,33 @@ func TestCliStrayReplyCleanKeepsConn(t *testing.T) {
 	strayWantGroup(t, pool)
 	strayWantNewConn(t, pool, 1)
 }
+
+// The same 430 block on a COMPRESS DEFLATE connection: the leftover octets may sit in the
+// textproto reader or, inflated but not read yet, in the deflate layer; both count.
+func TestCliStrayReplyArticle430BlockCompressed(t *testing.T) {
+	rc, ok := fakeserver.ReplyCaseByName("article-430-block")
+	if !ok {
+		t.Fatal("reply corpus has no article-430-block")
+	}
+	s := cliCompServer(t, 3, cliFakeFaults{
+		Override:      map[string][]string{rc.Cmd: rc.Lines},
+		OverrideTimes: map[string]int{rc.Cmd: 1},
+	})
+	pool := cliCmdPool(t, s, func(cfg *BackendConfig) {
+		cfg.MaxConns = 1
+		cfg.Compress = true
+	})
+
+	id := cliCompMsgID(1)
+	if _, err := pool.GetArticle(&id, false); !errors.Is(err, ErrArticleNotFound) {
+		t.Fatalf("ARTICLE with the 430 block: err %v, want ErrArticleNotFound", err)
+	}
+	gi, err := pool.SelectGroup(cliCompGroup)
+	if err != nil {
+		t.Fatalf("GROUP after the stray lines: %v (the connection read the leftover lines)", err)
+	}
+	if gi == nil || gi.Count != 3 {
+		t.Fatalf("GROUP after the stray lines: %+v, want 3 articles", gi)
+	}
+	strayWantNewConn(t, pool, 2)
+}

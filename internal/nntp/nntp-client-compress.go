@@ -315,6 +315,13 @@ func (d *deflateConn) put(b []byte) error {
 	return nil
 }
 
+// pending returns how many inflated octets wait in buf for Read.
+func (d *deflateConn) pending() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return len(d.buf)
+}
+
 // Read returns inflated octets. It waits until some arrive, the stream ends or
 // the read deadline passes (a net.Error whose Timeout is true).
 func (d *deflateConn) Read(p []byte) (int, error) {
