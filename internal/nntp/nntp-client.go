@@ -550,6 +550,17 @@ func (c *BackendConn) IsConnected() bool {
 	return true
 }
 
+// unreadReplyBytes returns how many bytes of server data sit unread in the client's read
+// buffer. Between commands it must be 0: the client sends one command at a time and reads
+// each reply to its end. On a COMPRESS connection R reads the inflated stream, so a trailing
+// deflate flush does not count. Bytes still on the wire are not seen. The caller holds c.mux.
+func (c *BackendConn) unreadReplyBytes() int {
+	if c.TextConn == nil || c.TextConn.R == nil {
+		return 0
+	}
+	return c.TextConn.R.Buffered()
+}
+
 // UpdateLastUsed updates the last used timestamp
 func (c *BackendConn) UpdateLastUsed() {
 	c.mux.Lock()

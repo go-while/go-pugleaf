@@ -452,6 +452,12 @@ func (pool *Pool) Put(conn *BackendConn) error {
 		conn.mux.Lock()
 		if conn.forceClose || conn.closing.Load() || !conn.IsConnected() {
 			forceClose = true
+		} else if n := conn.unreadReplyBytes(); n > 0 {
+			// The last reply had more lines than its command allows (e.g. a block after a
+			// 430, 411 or 423): the next command on this connection would read them as its
+			// own reply and every later reply would be off by one. Close it instead.
+			log.Printf("[NNTP-POOL] closing connection to %s:%d: %d unread bytes after the last reply", pool.Backend.Host, pool.Backend.Port, n)
+			forceClose = true
 		}
 		conn.mux.Unlock()
 	}
