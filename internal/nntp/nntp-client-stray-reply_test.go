@@ -124,7 +124,7 @@ func TestCliStrayReplyXHdr423Block(t *testing.T) {
 		}
 		done <- got
 	}()
-	if err := pool.XHdrStreamedWait(strayGroup, "Subject", 10, 20, ch, nil); !errors.Is(err, ErrNoArticlesInRange) {
+	if err := pool.XHdrStreamedWait(strayGroup, "Subject", 2, 3, ch, nil); !errors.Is(err, ErrNoArticlesInRange) {
 		t.Fatalf("XHDR with the 423 block: err %v, want ErrNoArticlesInRange", err)
 	}
 	<-done
