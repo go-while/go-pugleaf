@@ -1,6 +1,7 @@
 package history
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -622,6 +623,7 @@ func (h *History) Close() error {
 			<-h.pruneDone // the reject prune releases its lock and stops on closeChan
 		}
 		h.dbClosed.Store(true)
+		h.closeWriters()
 		if h.db != nil {
 			err = h.db.Close()
 		}
@@ -760,17 +762,82 @@ func isBusyError(err error) bool {
 	return strings.Contains(errStr, "database is locked") || strings.Contains(errStr, "busy")
 }
 
-// beginTx starts a write transaction (_txlock=immediate: lock contention surfaces here).
-// Retries busy/locked errors with capped backoff, exits the process after beginMaxRetries.
-func (h *History) beginTx(dbIndex int, db *sql.DB) (*sql.Tx, error) {
+// dbWriter is the write side of one history database file: one pinned connection and the
+// statements prepared on it, reused by every flush. Before, each transaction prepared its own
+// statements and threw them away at commit: a flush of 10,000 message-IDs touches almost every
+// one of a file's 256 tables, so it prepared ~4,000 statements, and a prepare (~100 µs) costs
+// far more than the insert it is used for (~6 µs). The cache is bounded by the queries times the
+// tables of a file (6 x 256).
+type dbWriter struct {
+	conn  *sql.Conn
+	stmts map[string]*sql.Stmt // query + table name -> statement prepared on conn
+}
+
+// writer returns the dbWriter of dbIndex, opening its connection on first use.
+func (h *History) writer(dbIndex int) (*dbWriter, error) {
+	if w := h.writers[dbIndex]; w != nil {
+		return w, nil
+	}
+	db, err := h.db.GetShardedDB(dbIndex, true)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get database connection: %v", err)
+	}
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("failed to get write connection: %v", err)
+	}
+	w := &dbWriter{conn: conn, stmts: make(map[string]*sql.Stmt)}
+	h.writers[dbIndex] = w
+	return w, nil
+}
+
+// stmt returns the cached statement for query on tableName, preparing it on first use.
+func (w *dbWriter) stmt(query string, tableName string) (*sql.Stmt, error) {
+	key := query + tableName
+	if stmt, ok := w.stmts[key]; ok {
+		return stmt, nil
+	}
+	stmt, err := w.conn.PrepareContext(context.Background(), fmt.Sprintf(query, tableName))
+	if err != nil {
+		return nil, err
+	}
+	w.stmts[key] = stmt
+	return stmt, nil
+}
+
+// close closes the statements, then gives the connection back to its pool.
+func (w *dbWriter) close() {
+	for key, stmt := range w.stmts {
+		_ = stmt.Close()
+		delete(w.stmts, key)
+	}
+	if err := w.conn.Close(); err != nil {
+		log.Printf("[HISTORY] WARN: closing write connection: %v", err)
+	}
+}
+
+// closeWriters closes every dbWriter. Called by Close after the writer goroutine is done.
+func (h *History) closeWriters() {
+	for i, w := range h.writers {
+		if w != nil {
+			w.close()
+			h.writers[i] = nil
+		}
+	}
+}
+
+// beginWrite starts a write transaction on the writer's connection with BEGIN IMMEDIATE (as
+// _txlock=immediate does for db.Begin: lock contention surfaces here). Retries busy/locked
+// errors with capped backoff, exits the process after beginMaxRetries.
+func (h *History) beginWrite(dbIndex int, w *dbWriter) error {
 	delay := beginRetryBaseDelay
 	for attempt := 1; ; attempt++ {
-		tx, err := db.Begin()
+		_, err := w.conn.ExecContext(context.Background(), "BEGIN IMMEDIATE")
 		if err == nil {
-			return tx, nil
+			return nil
 		}
 		if !isBusyError(err) {
-			return nil, err
+			return err
 		}
 		if attempt >= beginMaxRetries {
 			log.Fatalf("[HISTORY] FATAL: failed to begin transaction on database %x after %d attempts: %v", dbIndex, attempt, err)
@@ -786,40 +853,29 @@ func (h *History) beginTx(dbIndex int, db *sql.DB) (*sql.Tx, error) {
 	}
 }
 
-// executeDBTransaction writes all ops of one database file in one transaction
+// executeDBTransaction writes all ops of one database file in one transaction, on the file's
+// write connection with its cached statements (dbWriter).
 func (h *History) executeDBTransaction(dbIndex int, ops []routedOp) error {
 	start := time.Now()
-	db, err := h.db.GetShardedDB(dbIndex, true)
+	w, err := h.writer(dbIndex)
 	if err != nil {
-		return fmt.Errorf("failed to get database connection: %v", err)
+		return err
 	}
 
-	tx, err := h.beginTx(dbIndex, db)
-	if err != nil {
+	if err = h.beginWrite(dbIndex, w); err != nil {
 		return fmt.Errorf("failed to begin transaction: %v", err)
 	}
 	defer func() {
 		if err != nil {
-			tx.Rollback()
+			if _, rerr := w.conn.ExecContext(context.Background(), "ROLLBACK"); rerr != nil {
+				log.Printf("ERROR HISTORY rollback failed: %v", rerr)
+			}
 			log.Printf("ERROR HISTORY Rolling back transaction due to error: %v", err)
 			os.Exit(1) // @AI!! THIS IS A CRITICAL ERROR, WE MUST EXIT! DO NOT TOUCH THIS LINE OF CODE!!
 		}
 	}()
 
-	// prepared statements per table + query, valid for this transaction
-	stmts := make(map[string]*sql.Stmt)
-	getStmt := func(query string, tableName string) (*sql.Stmt, error) {
-		key := query + tableName
-		if stmt, ok := stmts[key]; ok {
-			return stmt, nil
-		}
-		stmt, perr := tx.Prepare(fmt.Sprintf(query, tableName))
-		if perr != nil {
-			return nil, perr
-		}
-		stmts[key] = stmt
-		return stmt, nil
-	}
+	getStmt := w.stmt
 
 	var stmt *sql.Stmt
 	rejectTok := "" // reject token of this transaction, built once (same day for the whole flush)
@@ -905,8 +961,8 @@ func (h *History) executeDBTransaction(dbIndex int, ops []routedOp) error {
 		}
 	}
 
-	// Commit the transaction (closes the prepared statements)
-	if err = tx.Commit(); err != nil {
+	// Commit the transaction (the statements stay prepared for the next flush)
+	if _, err = w.conn.ExecContext(context.Background(), "COMMIT"); err != nil {
 		err = fmt.Errorf("failed to commit transaction: %v", err)
 		return err
 	}
