@@ -549,14 +549,17 @@ func (proc *Processor) FindStartArticleByDate(groupName string, targetDate time.
 		targetDate.Format("2006-01-02"), groupName, groupInfo.First, groupInfo.Last)
 
 	// The search assumes that Dates mostly rise with article numbers. Every step reads a window
-	// of articles and decides by the median of their Dates, so misdated articles (a late feed,
-	// a stuck clock, a forged Date) move it only when they are the majority of a window.
-	// Windows with fewer than two readable Dates, holes and undated articles move the search
-	// down (more is fetched, nothing skipped); an XOVER error other than 423 ends it with that
-	// error (the caller writes no progress). There is no shortcut on the first or the last
-	// article: a late article with an old Date at the top, or a stale low water mark, would
-	// mislead it. The start found is never above the first article dated on/after the target
-	// (by window evidence) and may lie up to about one window below it.
+	// of articles and decides by the median of their Dates: a minority of misdated or undated
+	// articles in a window (a late feed, a stuck clock, a forged or unparseable Date) is treated
+	// as noise both ways: it neither moves the search up nor pulls it down, and such an article
+	// can end up below the start. Windows with fewer than two readable Dates, holes that cannot
+	// be verified and empty windows move the search down (more is fetched); an XOVER error
+	// other than 423 ends it with that error (the caller writes no progress). There is no
+	// shortcut on the first or the last article: a late article with an old Date at the top, or
+	// a stale low water mark, would mislead it. With mostly rising Dates the start is never
+	// above the first article dated on/after the target and may lie up to about one window
+	// below it; a majority of old Dates numbered late (a backfill) can still make it start
+	// late (issues.md, "Date-start search assumes mostly rising Dates").
 	enforceLimit := true
 
 	// Every article up to FetchStart is before the target (by window evidence); FetchEnd is an
