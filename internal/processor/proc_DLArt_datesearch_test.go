@@ -31,9 +31,10 @@ func dsDay(n int64) time.Time {
 
 // dsFake is the provider of these tests.
 type dsFake struct {
-	holes   map[int64]bool   // numbers with no article (cancelled, expired)
-	badDate map[int64]bool   // articles whose Date does not parse
-	failAt  map[int64]string // XOVER whose range starts at this number gets this status line
+	holes   map[int64]bool      // numbers with no article (cancelled, expired)
+	badDate map[int64]bool      // articles whose Date does not parse
+	failAt  map[int64]string    // XOVER whose range starts at this number gets this status line
+	dateOf  map[int64]time.Time // a Date other than dsDay(n) (a late feed, a forged Date)
 }
 
 func (f *dsFake) exists(n int64) bool { return n >= 1 && n <= dsHigh && !f.holes[n] }
@@ -81,7 +82,11 @@ func (f *dsFake) handle(c *fakeserver.Conn) {
 				if !f.exists(n) {
 					continue
 				}
-				date := dsDay(n).Format(time.RFC1123Z)
+				d := dsDay(n)
+				if od, set := f.dateOf[n]; set {
+					d = od
+				}
+				date := d.Format(time.RFC1123Z)
 				if f.badDate[n] {
 					date = "not a date"
 				}
@@ -184,10 +189,55 @@ func TestDateSearchProbeErrorReturnsError(t *testing.T) {
 	}
 }
 
-// A failure on the first-article probe is an error too, not "start at the first article".
-func TestDateSearchFirstProbeErrorReturnsError(t *testing.T) {
-	got, err := dsFind(t, &dsFake{failAt: map[int64]string{1: "400 service temporarily unavailable"}}, dsTarget(28))
+// A failure on a later probe (the second, from 25) is an error too.
+func TestDateSearchLaterProbeErrorReturnsError(t *testing.T) {
+	got, err := dsFind(t, &dsFake{failAt: map[int64]string{25: "400 service temporarily unavailable"}}, dsTarget(28))
 	if err == nil {
-		t.Fatalf("FindStartArticleByDate after a 400 on the first article: start %d and no error, want an error", got)
+		t.Fatalf("FindStartArticleByDate after a 400 on the second probe: start %d and no error, want an error", got)
 	}
+}
+
+// The newest article carries an old Date (a late feed): the search must not return Last.
+func TestDateSearchMisdatedLastArticle(t *testing.T) {
+	f := &dsFake{dateOf: map[int64]time.Time{dsHigh: time.Date(2001, 1, 1, 0, 0, 0, 0, time.UTC)}}
+	got, err := dsFind(t, f, dsTarget(28))
+	dsWant(t, got, err, 28)
+}
+
+// One article with an old Date at a probe point does not move the search up.
+func TestDateSearchMisdatedArticleAtProbe(t *testing.T) {
+	f := &dsFake{dateOf: map[int64]time.Time{
+		37: time.Date(2001, 1, 1, 0, 0, 0, 0, time.UTC),
+		50: time.Date(2001, 1, 1, 0, 0, 0, 0, time.UTC),
+	}}
+	got, err := dsFind(t, f, dsTarget(28))
+	dsWant(t, got, err, 28)
+}
+
+// The first article is dated exactly at the target: it is the start, not skipped.
+func TestDateSearchFirstArticleAtTarget(t *testing.T) {
+	got, err := dsFind(t, &dsFake{}, dsTarget(1))
+	dsWant(t, got, err, 1)
+}
+
+// A stale low water mark: GROUP says 1, the articles start at 81. The search must reach the
+// live range instead of starting in the empty numbers.
+func TestDateSearchStaleLowWater(t *testing.T) {
+	holes := map[int64]bool{}
+	for n := int64(1); n <= 80; n++ {
+		holes[n] = true
+	}
+	got, err := dsFind(t, &dsFake{holes: holes}, dsTarget(90))
+	dsWant(t, got, err, 90)
+}
+
+// A wide hole right below the start: the start is the first article after the hole, not the
+// first number of the hole.
+func TestDateSearchWideHoleBeforeStart(t *testing.T) {
+	holes := map[int64]bool{}
+	for n := int64(30); n <= 98; n++ {
+		holes[n] = true
+	}
+	got, err := dsFind(t, &dsFake{holes: holes}, dsTarget(99))
+	dsWant(t, got, err, 99)
 }
