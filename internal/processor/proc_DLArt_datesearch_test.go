@@ -10,6 +10,7 @@ package processor
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -46,7 +47,7 @@ func (f *dsFake) last() int64 {
 	return dsHigh
 }
 
-func (f *dsFake) exists(n int64) bool { return n >= 1 && n <= f.last() && !f.holes[n] }
+func (f *dsFake) exists(n int64) bool { return !f.none && n >= 1 && n <= f.last() && !f.holes[n] }
 
 func (f *dsFake) handle(c *fakeserver.Conn) {
 	for {
@@ -87,7 +88,8 @@ func (f *dsFake) handle(c *fakeserver.Conn) {
 				continue
 			}
 			lines := []string{"224 overview follows"}
-			for n := from; n <= to; n++ {
+			for i := int64(0); i <= to-from; i++ { // no n++ overflow at MaxInt64
+				n := from + i
 				if !f.exists(n) {
 					continue
 				}
@@ -346,5 +348,47 @@ func TestDateSearchAtCap1000(t *testing.T) {
 			got, err := dsFind(t, tc.f, dsTarget(tc.want))
 			dsWant(t, got, err, tc.want)
 		})
+	}
+}
+
+// One delayed old article right above the boundary: the lower median of the window would be
+// an article dated after the target; the lower bound must not move onto it.
+func TestDateSearchOldOutlierAboveBoundary(t *testing.T) {
+	target := dsDay(40) // the search subtracts two days: effective target dsDay(38)
+	eff := target.AddDate(0, 0, -2)
+	dates := map[int64]time.Time{}
+	for n := int64(1); n <= dsHigh; n++ {
+		switch {
+		case n <= 36, n == 49:
+			dates[n] = eff.AddDate(0, 0, -1)
+		default:
+			dates[n] = eff.AddDate(0, 0, 3)
+		}
+	}
+	got, err := dsFind(t, &dsFake{dateOf: dates}, target)
+	dsWant(t, got, err, 37)
+}
+
+// A hostile GROUP reply with a huge last number and no articles at all: the search must end
+// (no overflow loop in the hole search). testWait is only a hang guard.
+func TestDateSearchHugeLastNoArticlesEnds(t *testing.T) {
+	done := make(chan struct{})
+	var got int64
+	var err error
+	go func() {
+		defer close(done)
+		got, err = dsFind(t, &dsFake{high: math.MaxInt64, none: true}, dsTarget(28))
+	}()
+	select {
+	case <-done:
+	case <-time.After(testWait):
+		t.Fatalf("FindStartArticleByDate did not end within %v on a group with Last=MaxInt64 and no articles", testWait)
+	}
+	if err != nil {
+		t.Logf("ended with error %v (acceptable: no progress is written)", err)
+		return
+	}
+	if got < 1 {
+		t.Fatalf("start %d, want >= First (1)", got)
 	}
 }
