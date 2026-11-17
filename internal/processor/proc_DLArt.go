@@ -550,10 +550,11 @@ func (proc *Processor) FindStartArticleByDate(groupName string, targetDate time.
 		targetDate.Format("2006-01-02"), groupName, groupInfo.First, groupInfo.Last)
 
 	// The search assumes that Dates mostly rise with article numbers. Every step reads a window
-	// of articles and decides by the median of their Dates: a minority of misdated or undated
-	// articles in a window (a late feed, a stuck clock, a forged or unparseable Date) is treated
-	// as noise both ways: it neither moves the search up nor pulls it down, and such an article
-	// can end up below the start. Windows with fewer than two readable Dates, holes that cannot
+	// of articles and decides by the median of their Dates; the lower bound moves only over a
+	// run of before-target articles the window starts with. A minority of misdated or undated
+	// articles in a window (a late feed, a stuck clock, a forged or unparseable Date) never
+	// moves the search up and can end up below the start; one among the first articles of a
+	// window moves it down (more is fetched). Windows with fewer than two readable Dates, holes that cannot
 	// be verified and empty windows move the search down (more is fetched); an XOVER error
 	// other than 423 ends it with that error (the caller writes no progress). There is no
 	// shortcut on the first or the last article: a late article with an old Date at the top, or
@@ -603,16 +604,17 @@ func (proc *Processor) FindStartArticleByDate(groupName string, targetDate time.
 		case !l.wide && l.allBefore():
 			// the articles right below the hole are before the target
 			groupInfo.FetchStart = crossTo
-		case l.existing || w.narrowTo >= upper:
+		case (l.existing && !(l.wide && l.allBefore())) || w.narrowTo >= upper:
 			// an article right below the hole is on/after the target or undated, or there is
 			// nothing above the hole: start lower
 			groupInfo.FetchEnd = mid
 		default:
-			// empty on both sides of mid and the range goes on (a purge, a stale low water
-			// mark): find the next articles above the hole and decide there
+			// empty around mid (or only a wide window below it, all before the target) and the
+			// range goes on (a purge, a stale low water mark): find the next articles above the
+			// hole and decide there
 			g, err := proc.probeDateFind(groupName, w.narrowTo+1, upper, targetDate, enforceLimit)
 			if err != nil {
-				return 0, fmt.Errorf("FindStartArticleByDate: group '%s': articles above %d: %w", groupName, w.to, err)
+				return 0, fmt.Errorf("FindStartArticleByDate: group '%s': articles above %d: %w", groupName, w.narrowTo, err)
 			}
 			if g.existing {
 				decideDateWindow(groupInfo, g)

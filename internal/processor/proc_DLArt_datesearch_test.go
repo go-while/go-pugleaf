@@ -374,8 +374,9 @@ func TestDateSearchOldOutlierAboveBoundary(t *testing.T) {
 	dsWant(t, got, err, 37)
 }
 
-// A hostile GROUP reply with a huge last number and no articles at all: the search must end
-// (no overflow loop in the hole search). testWait is only a hang guard.
+// A hostile GROUP reply with a huge last number and no articles at all: the search must end.
+// A guard only: an overflowing hole search would send a negative range, which this fake
+// answers with 501, so it ends with an error there too. testWait is only a hang guard.
 func TestDateSearchHugeLastNoArticlesEnds(t *testing.T) {
 	done := make(chan struct{})
 	var got int64
