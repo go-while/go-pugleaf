@@ -35,6 +35,7 @@ func dsDay(n int64) time.Time {
 type dsFake struct {
 	high    int64               // highest article number; 0: dsHigh
 	none    bool                // no article at all (every XOVER is 423)
+	maxSpan int64               // > 0: XOVER silently serves only the first maxSpan numbers of a range
 	holes   map[int64]bool      // numbers with no article (cancelled, expired)
 	badDate map[int64]bool      // articles whose Date does not parse
 	failAt  map[int64]string    // XOVER whose range starts at this number gets this status line
@@ -83,6 +84,9 @@ func (f *dsFake) handle(c *fakeserver.Conn) {
 			}
 			if to <= 0 {
 				to = f.last() // open range "n-"
+			}
+			if f.maxSpan > 0 && to-from+1 > f.maxSpan {
+				to = from + f.maxSpan - 1 // a provider that cuts the range without saying so
 			}
 			if st, fail := f.failAt[from]; fail {
 				_ = c.WriteLines(st)
@@ -392,4 +396,18 @@ func TestDateSearchHugeLastNoArticlesEnds(t *testing.T) {
 	if got < 1 {
 		t.Fatalf("start %d, want >= First (1)", got)
 	}
+}
+
+// A provider that silently serves only the first 70 numbers of an XOVER range (the client
+// asks for up to 100 here): an empty reply to a wide window must not be taken for a verified
+// hole. Articles dated by number, the hole 1000..1080 starting at the first probe point (the
+// narrow window 1000..1063 is empty and served whole; the wide one 1000..1099 is cut at 1069,
+// hiding 1081..1099), the start at 1085.
+func TestDateSearchTruncatingProvider(t *testing.T) {
+	holes := map[int64]bool{}
+	for n := int64(1000); n <= 1080; n++ {
+		holes[n] = true
+	}
+	got, err := dsFind(t, &dsFake{high: 2000, holes: holes, maxSpan: 70}, dsTarget(1085))
+	dsWant(t, got, err, 1085)
 }
