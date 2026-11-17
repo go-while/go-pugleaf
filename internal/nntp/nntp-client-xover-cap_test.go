@@ -111,28 +111,32 @@ func TestCliXOverSingleNumberCap(t *testing.T) {
 }
 
 // Through the pool: the connection that got too many rows is closed, and the next call gets a
-// fresh connection and the store's correct reply.
+// fresh connection and the store's correct reply (only "XOVER 1-3" gets the bad reply).
 func TestCliXOverCapPoolReplacesConn(t *testing.T) {
-	s := xoverCapServer(t, xoverCapReply(1, 2, 3, 4))
+	st := cliFakeNewStore()
+	cliQuirkFill(st, xoverCapGroup, 1, 20)
+	s := cliStoreServer(t, st, cliFakeStoreOpts{}, cliFakeFaults{
+		OverrideLine: map[string][]string{"XOVER 1-3": xoverCapReply(1, 2, 3, 4)},
+	})
 	pool := cliQuirkPool(t, s)
-	run := func() ([]OverviewLine, error) {
+	run := func(start, end int64) ([]OverviewLine, error) {
 		var ovs []OverviewLine
-		err := cliQuirkRun(t, "pool.XOver 1-3", func() error {
+		err := cliQuirkRun(t, fmt.Sprintf("pool.XOver %d-%d", start, end), func() error {
 			var e error
-			ovs, e = pool.XOver(xoverCapGroup, 1, 3, false)
+			ovs, e = pool.XOver(xoverCapGroup, start, end, false)
 			return e
 		})
 		return ovs, err
 	}
-	if _, err := run(); !errors.Is(err, ErrResponseTooLarge) {
-		t.Fatalf("first pool.XOver 1-3 with 4 rows: err %v, want ErrResponseTooLarge", err)
+	if _, err := run(1, 3); !errors.Is(err, ErrResponseTooLarge) {
+		t.Fatalf("pool.XOver 1-3 with 4 rows: err %v, want ErrResponseTooLarge", err)
 	}
-	ovs, err := run()
+	ovs, err := run(4, 6)
 	if err != nil {
-		t.Fatalf("second pool.XOver 1-3: %v (the bad connection was reused?)", err)
+		t.Fatalf("pool.XOver 4-6 after the rejected reply: %v", err)
 	}
-	if len(ovs) != 3 {
-		t.Fatalf("second pool.XOver 1-3: %d rows, want 3", len(ovs))
+	if len(ovs) != 3 || ovs[0].ArticleNum != 4 {
+		t.Fatalf("pool.XOver 4-6: %d rows (first %+v), want articles 4-6", len(ovs), ovs)
 	}
 	if got := pool.Stats().TotalCreated; got < 2 {
 		t.Fatalf("pool created %d connections, want a fresh one after the rejected reply", got)
