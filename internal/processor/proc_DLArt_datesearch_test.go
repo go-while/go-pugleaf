@@ -31,13 +31,21 @@ func dsDay(n int64) time.Time {
 
 // dsFake is the provider of these tests.
 type dsFake struct {
+	high    int64               // highest article number; 0: dsHigh
 	holes   map[int64]bool      // numbers with no article (cancelled, expired)
 	badDate map[int64]bool      // articles whose Date does not parse
 	failAt  map[int64]string    // XOVER whose range starts at this number gets this status line
 	dateOf  map[int64]time.Time // a Date other than dsDay(n) (a late feed, a forged Date)
 }
 
-func (f *dsFake) exists(n int64) bool { return n >= 1 && n <= dsHigh && !f.holes[n] }
+func (f *dsFake) last() int64 {
+	if f.high > 0 {
+		return f.high
+	}
+	return dsHigh
+}
+
+func (f *dsFake) exists(n int64) bool { return n >= 1 && n <= f.last() && !f.holes[n] }
 
 func (f *dsFake) handle(c *fakeserver.Conn) {
 	for {
@@ -63,7 +71,7 @@ func (f *dsFake) handle(c *fakeserver.Conn) {
 				_ = c.WriteLines("411 no such newsgroup")
 				continue
 			}
-			_ = c.WriteLines(fmt.Sprintf("211 %d 1 %d %s", dsHigh-len(f.holes), dsHigh, dsGroup))
+			_ = c.WriteLines(fmt.Sprintf("211 %d 1 %d %s", f.last()-int64(len(f.holes)), f.last(), dsGroup))
 		case "XOVER", "OVER":
 			from, to, ok := dlFakeRange(strings.Join(fields[1:], ""))
 			if !ok {
@@ -71,7 +79,7 @@ func (f *dsFake) handle(c *fakeserver.Conn) {
 				continue
 			}
 			if to <= 0 {
-				to = dsHigh // open range "n-"
+				to = f.last() // open range "n-"
 			}
 			if st, fail := f.failAt[from]; fail {
 				_ = c.WriteLines(st)
@@ -117,7 +125,7 @@ func dsFind(t *testing.T, f *dsFake, target time.Time) (int64, error) {
 	})
 	t.Cleanup(func() { _ = pool.ClosePool() })
 	proc := &Processor{Pool: pool}
-	gi := &nntp.GroupInfo{Name: dsGroup, Count: int64(dsHigh - len(f.holes)), First: 1, Last: dsHigh}
+	gi := &nntp.GroupInfo{Name: dsGroup, Count: f.last() - int64(len(f.holes)), First: 1, Last: f.last()}
 	return proc.FindStartArticleByDate(dsGroup, target, gi)
 }
 
@@ -125,6 +133,8 @@ func dsFind(t *testing.T, f *dsFake, target time.Time) (int64, error) {
 // margin) is article want.
 func dsTarget(want int64) time.Time { return dsDay(want).AddDate(0, 0, 2) }
 
+// dsWant checks a start: never above want (the first article on the target date; above it
+// articles would be skipped) and at most one probe window below it (a little more fetched).
 func dsWant(t *testing.T, got int64, err error, want int64) {
 	t.Helper()
 	if err != nil {
@@ -133,8 +143,8 @@ func dsWant(t *testing.T, got int64, err error, want int64) {
 	if got > want {
 		t.Fatalf("start article %d is above %d, the first article on the target date: articles %d-%d would be skipped", got, want, want, got-1)
 	}
-	if got != want {
-		t.Fatalf("start article %d, want %d", got, want)
+	if got < want-dateProbeWindow {
+		t.Fatalf("start article %d, want %d (at most %d below it)", got, want, dateProbeWindow)
 	}
 }
 
@@ -240,4 +250,46 @@ func TestDateSearchWideHoleBeforeStart(t *testing.T) {
 	}
 	got, err := dsFind(t, &dsFake{holes: holes}, dsTarget(99))
 	dsWant(t, got, err, 99)
+}
+
+// A single article with an old Date in a sparse window (holes around it) does not move the
+// lower bound: too few readable Dates to decide.
+func TestDateSearchMisdatedArticleInSparseWindow(t *testing.T) {
+	holes := map[int64]bool{}
+	for n := int64(41); n <= 99; n++ {
+		if n != 70 {
+			holes[n] = true
+		}
+	}
+	f := &dsFake{holes: holes, dateOf: map[int64]time.Time{70: time.Date(2001, 1, 1, 0, 0, 0, 0, time.UTC)}}
+	got, err := dsFind(t, f, dsTarget(28))
+	dsWant(t, got, err, 28)
+}
+
+// Two articles in a row with an old Date (a stuck clock, a late batch) at a probe point do not
+// move the search up: the median of the window decides.
+func TestDateSearchMisdatedRunAtProbe(t *testing.T) {
+	old := time.Date(2001, 1, 1, 0, 0, 0, 0, time.UTC)
+	f := &dsFake{dateOf: map[int64]time.Time{50: old, 51: old, 52: old}}
+	got, err := dsFind(t, f, dsTarget(28))
+	dsWant(t, got, err, 28)
+}
+
+// One article with a future Date below the start does not pull the start far down.
+func TestDateSearchFutureDatedArticle(t *testing.T) {
+	f := &dsFake{dateOf: map[int64]time.Time{65: time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)}}
+	got, err := dsFind(t, f, dsTarget(80))
+	dsWant(t, got, err, 80)
+}
+
+// A stale low water mark far below the articles (a hole wider than every probe window): the
+// search must still reach the live range.
+func TestDateSearchVeryStaleLowWater(t *testing.T) {
+	const high = 20000
+	holes := map[int64]bool{}
+	for n := int64(1); n <= 15000; n++ {
+		holes[n] = true
+	}
+	got, err := dsFind(t, &dsFake{high: high, holes: holes}, dsTarget(18000))
+	dsWant(t, got, err, 18000)
 }
