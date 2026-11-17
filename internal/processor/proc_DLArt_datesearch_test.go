@@ -22,6 +22,7 @@ import (
 const (
 	dsGroup = "date.search"
 	dsHigh  = 100
+	dsSlack = 64 // how far below the first article on the target date a start may lie (one probe window)
 )
 
 // dsDay is the Date of article n: n days after 2020-01-01.
@@ -143,8 +144,8 @@ func dsWant(t *testing.T, got int64, err error, want int64) {
 	if got > want {
 		t.Fatalf("start article %d is above %d, the first article on the target date: articles %d-%d would be skipped", got, want, want, got-1)
 	}
-	if got < want-dateProbeWindow {
-		t.Fatalf("start article %d, want %d (at most %d below it)", got, want, dateProbeWindow)
+	if got < want-dsSlack {
+		t.Fatalf("start article %d, want %d (at most %d below it)", got, want, dsSlack)
 	}
 }
 
