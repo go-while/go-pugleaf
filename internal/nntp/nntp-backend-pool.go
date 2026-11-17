@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/models"
@@ -31,6 +32,12 @@ type Pool struct {
 	// Statistics
 	totalCreated int64
 	totalClosed  int64
+
+	// Connections closed by Put for unread reply bytes: the count, and when the last log
+	// line about them was written (unix nanoseconds), so a server that appends lines to
+	// every reply logs once per strayLogEvery, not once per request.
+	strayClosed atomic.Int64
+	strayLogged atomic.Int64
 
 	// Byte totals of the connections this pool has closed; the current
 	// counters of the live connections are added in Stats. Guarded by mux.
@@ -444,6 +451,26 @@ func (pool *Pool) failSlot() {
 	pool.mux.Unlock()
 }
 
+// strayLogEvery is the shortest gap between two log lines about connections Put closed for
+// unread reply bytes.
+const strayLogEvery = time.Minute
+
+// logStrayClose counts a connection Put closes for n unread reply bytes and logs it, at most
+// once per strayLogEvery with the running total for this pool.
+func (pool *Pool) logStrayClose(n int) {
+	total := pool.strayClosed.Add(1)
+	now := time.Now().UnixNano()
+	last := pool.strayLogged.Load()
+	if last != 0 && now-last < int64(strayLogEvery) {
+		return
+	}
+	if !pool.strayLogged.CompareAndSwap(last, now) {
+		return
+	}
+	log.Printf("[NNTP-POOL] closing connection to %s:%d: %d unread bytes after the last reply (%d connections closed for this so far)",
+		pool.Backend.Host, pool.Backend.Port, n, total)
+}
+
 // Put returns a connection to the pool
 func (pool *Pool) Put(conn *BackendConn) error {
 	forceClose := false
@@ -451,6 +478,12 @@ func (pool *Pool) Put(conn *BackendConn) error {
 	if conn != nil {
 		conn.mux.Lock()
 		if conn.forceClose || conn.closing.Load() || !conn.IsConnected() {
+			forceClose = true
+		} else if n := conn.unreadReplyBytes(); n > 0 {
+			// The last reply had more lines than its command allows (e.g. a block after a
+			// 430, 411 or 423): the next command on this connection would read them as its
+			// own reply and every later reply would be off by one. Close it instead.
+			pool.logStrayClose(n)
 			forceClose = true
 		}
 		conn.mux.Unlock()
