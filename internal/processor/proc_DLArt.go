@@ -549,60 +549,61 @@ func (proc *Processor) FindStartArticleByDate(groupName string, targetDate time.
 
 	// Check if target date is before the first article
 	enforceLimit := true
-	firstOverviews, err := proc.Pool.XOver(groupName, groupInfo.First, groupInfo.First, enforceLimit)
-	if err == nil && len(firstOverviews) > 0 {
-		firstArticleDate := ParseNNTPDate(firstOverviews[0].Date)
-		if !firstArticleDate.IsZero() && targetDate.Before(firstArticleDate) {
-			log.Printf("Target date %s is before first article %d (date: %s), returning first article. ng: %s",
-				targetDate.Format("2006-01-02"), groupInfo.First, firstArticleDate.Format("2006-01-02"), groupName)
-			return groupInfo.First, nil
-		} else {
-			log.Printf("Target date %s is after first article %d (date: %s), checking last article. ng: %s",
-				targetDate.Format("2006-01-02"), groupInfo.First, firstArticleDate.Format("2006-01-02"), groupName)
-		}
+	firstNum, firstArticleDate, ok, err := proc.probeArticleDate(groupName, groupInfo.First, groupInfo.Last, enforceLimit)
+	if err != nil {
+		return 0, fmt.Errorf("FindStartArticleByDate: group '%s': first article: %w", groupName, err)
+	}
+	if !ok {
+		// no article with a readable date near the start: start at the first article (fetches more, skips nothing)
+		log.Printf("No readable date in articles %d-%d, returning first article. ng: %s",
+			groupInfo.First, min(groupInfo.First+dateProbeWindow-1, groupInfo.Last), groupName)
+		return groupInfo.First, nil
+	}
+	if targetDate.Before(firstArticleDate) {
+		log.Printf("Target date %s is before first article %d (date: %s), returning first article. ng: %s",
+			targetDate.Format("2006-01-02"), firstNum, firstArticleDate.Format("2006-01-02"), groupName)
+		return groupInfo.First, nil
 	}
 
 	// Check if target date is after the last article
 	lastOverviews, err := proc.Pool.XOver(groupName, groupInfo.Last, groupInfo.Last, enforceLimit)
+	if err != nil && !errors.Is(err, nntp.ErrNoArticlesInRange) {
+		return 0, fmt.Errorf("FindStartArticleByDate: group '%s': last article: %w", groupName, err)
+	}
 	if err == nil && len(lastOverviews) > 0 {
 		lastArticleDate := ParseNNTPDate(lastOverviews[0].Date)
 		if !lastArticleDate.IsZero() && targetDate.After(lastArticleDate) {
 			log.Printf("Target date %s is after last article %d (date: %s), returning last article. ng: %s",
 				targetDate.Format("2006-01-02"), groupInfo.Last, lastArticleDate.Format("2006-01-02"), groupName)
 			return groupInfo.Last, nil
-		} else {
-			log.Printf("Target date %s is before last article %d (date: %s), starting search. ng: %s",
-				targetDate.Format("2006-01-02"), groupInfo.Last, lastArticleDate.Format("2006-01-02"), groupName)
 		}
 	}
-	groupInfo.FetchStart = groupInfo.First
+	groupInfo.FetchStart = firstNum
 	groupInfo.FetchEnd = groupInfo.Last
 
-	// Binary search using 50% approach
+	// Binary search. FetchStart always holds an article dated before the target, FetchEnd the
+	// upper bound. A probe that finds no readable date moves FetchEnd down: starting lower
+	// fetches more articles but never skips one; an XOVER error ends the search with that error.
 	for groupInfo.FetchEnd-groupInfo.FetchStart > 1 {
 		if common.WantShutdown() {
 			return 0, fmt.Errorf("FindStartArticleByDate: common.WantShutdown() group '%s'", groupName)
 		}
 		mid := groupInfo.FetchStart + (groupInfo.FetchEnd-groupInfo.FetchStart)/2
 
-		// Get XOVER for this article
-		overviews, err := proc.Pool.XOver(groupName, mid, mid, enforceLimit)
-		if err != nil || len(overviews) == 0 {
-			// Article doesn't exist, try moving up
-			groupInfo.FetchStart = mid
+		num, articleDate, ok, err := proc.probeArticleDate(groupName, mid, groupInfo.FetchEnd-1, enforceLimit)
+		if err != nil {
+			return 0, fmt.Errorf("FindStartArticleByDate: group '%s': article %d: %w", groupName, mid, err)
+		}
+		if !ok {
+			// mid..FetchEnd-1 holds no article with a readable date near mid: look lower
+			groupInfo.FetchEnd = mid
 			continue
 		}
 
-		articleDate := ParseNNTPDate(overviews[0].Date)
-		if articleDate.IsZero() {
-			groupInfo.FetchStart = mid
-			continue
-		}
-
-		log.Printf("Scanning: %s - Article %d has date %s", groupName, mid, articleDate.Format("2006-01-02"))
+		log.Printf("Scanning: %s - Article %d has date %s", groupName, num, articleDate.Format("2006-01-02"))
 
 		if articleDate.Before(targetDate) {
-			groupInfo.FetchStart = mid
+			groupInfo.FetchStart = num // mid..num-1 are holes or unreadable
 		} else {
 			groupInfo.FetchEnd = mid
 		}
@@ -612,6 +613,40 @@ func (proc *Processor) FindStartArticleByDate(groupName string, targetDate time.
 	}
 	log.Printf("Found start article: %d, ng: %s", groupInfo.FetchEnd, groupName)
 	return groupInfo.FetchEnd, nil
+}
+
+// dateProbeWindow is how many article numbers probeArticleDate looks at from its start
+// number when that number is a hole (cancelled, expired) or has no readable Date.
+const dateProbeWindow = 64
+
+// probeArticleDate returns the first article in from..min(from+dateProbeWindow-1, upTo) that
+// has a readable Date, with its number. ok is false when the window holds none (423 or only
+// unreadable dates). err is an XOVER failure other than 423 (timeout, dropped connection,
+// 4xx/5xx): the caller must not take it for "nothing there".
+func (proc *Processor) probeArticleDate(groupName string, from, upTo int64, enforceLimit bool) (num int64, date time.Time, ok bool, err error) {
+	to := from + dateProbeWindow - 1
+	if to > upTo {
+		to = upTo
+	}
+	if to < from {
+		to = from
+	}
+	overviews, err := proc.Pool.XOver(groupName, from, to, enforceLimit)
+	if err != nil {
+		if errors.Is(err, nntp.ErrNoArticlesInRange) {
+			return 0, time.Time{}, false, nil
+		}
+		return 0, time.Time{}, false, err
+	}
+	for _, ov := range overviews {
+		if ov.ArticleNum < from || ov.ArticleNum > to {
+			continue
+		}
+		if d := ParseNNTPDate(ov.Date); !d.IsZero() {
+			return ov.ArticleNum, d, true, nil
+		}
+	}
+	return 0, time.Time{}, false, nil
 }
 
 var ErrIsEmptyGroup = fmt.Errorf("isEmptyGroup")
