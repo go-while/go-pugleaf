@@ -1,7 +1,7 @@
 package nntp
 
 // XOVER row cap (plan fetcher-date-search-holes, slice xover-row-cap; report of uarc-py-28cb):
-// a server may not return more overview lines than article numbers asked for, as for XHDR.
+// a server may not return more overview lines than article numbers asked for, as XHdrStreamed checks.
 // Before, a broken or hostile server answering "XOVER 5-5" with endless rows was bounded only
 // by the 512 MiB list budget per call. Servers are cliStoreServer on 127.0.0.1:0; every call
 // runs under cliQuirkRun (cliWait is a hang guard only, no wall-clock assertion).
@@ -52,8 +52,8 @@ func xoverCapCall(t *testing.T, c *BackendConn, start, end int64) ([]OverviewLin
 	return ovs, err
 }
 
-// A reply with many more rows than numbers asked for ends in ErrResponseTooLarge after the
-// first extra row, and the connection is marked for close.
+// A reply with 5000 rows for one number ends in ErrResponseTooLarge at the first extra row
+// (the reader stops there), and the connection is marked for close.
 func TestCliXOverRowsCapped(t *testing.T) {
 	nums := make([]int, 5000)
 	for i := range nums {

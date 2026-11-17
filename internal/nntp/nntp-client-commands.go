@@ -412,7 +412,7 @@ func (c *BackendConn) XOver(groupName string, start, end int64, enforceLimit boo
 		end = start + MaxReadLinesXover - 1
 	}
 
-	// The server may not return more lines than numbers requested (as for XHDR): a broken or
+	// The server may not return more lines than numbers requested (as XHdrStreamed checks): a broken or
 	// hostile server answering "XOVER 5-5" with endless rows would otherwise fill up to the list
 	// byte budget on every connection of the pool.
 	var id uint
