@@ -412,9 +412,16 @@ func (c *BackendConn) XOver(groupName string, start, end int64, enforceLimit boo
 		end = start + MaxReadLinesXover - 1
 	}
 
+	// The server may not return more lines than numbers requested (as for XHDR): a broken or
+	// hostile server answering "XOVER 5-5" with endless rows would otherwise fill up to the list
+	// byte budget on every connection of the pool.
 	var id uint
+	var maxRows int64 = 1
 	if end > 0 {
 		id, err = c.sendCmd("XOVER %d-%d", start, end)
+		if end >= start {
+			maxRows = end - start + 1
+		}
 	} else {
 		id, err = c.sendCmd("XOVER %d", start)
 	}
@@ -444,7 +451,7 @@ func (c *BackendConn) XOver(groupName string, start, end int64, enforceLimit boo
 	}
 
 	// Use your existing readMultilineResponse function!
-	lines, err := c.readMultilineResponse("xover")
+	lines, err := c.readMultilineResponseMax("xover", maxRows)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read XOVER data: %w", err)
 	}
@@ -879,6 +886,13 @@ func (c *BackendConn) responseBudget(src string) int64 {
 
 // readMultilineResponse reads a multi-line response ending with "."
 func (c *BackendConn) readMultilineResponse(src string) ([]string, error) {
+	return c.readMultilineResponseMax(src, 0)
+}
+
+// readMultilineResponseMax is readMultilineResponse with a line limit of its own: maxLines > 0
+// lowers the limit for src to maxLines (more lines are ErrResponseTooLarge and the connection
+// is closed, as for the other limits).
+func (c *BackendConn) readMultilineResponseMax(src string, maxLines int64) ([]string, error) {
 	var lines []string
 	lineCount := 0
 	budget := c.responseBudget(src) // 0: unlimited
@@ -920,13 +934,10 @@ func (c *BackendConn) readMultilineResponse(src string) ([]string, error) {
 		*/
 
 	}
+	if maxLines > 0 && maxLines < int64(maxReadLines) {
+		maxReadLines = int(maxLines)
+	}
 	for {
-		if lineCount >= maxReadLines {
-			c.conn.Close() // Close connection on limit reached
-			c.forceClose = true
-			return nil, fmt.Errorf("%w: too many lines in response (limit: %d)", ErrResponseTooLarge, maxReadLines)
-		}
-
 		line, err := c.TextConn.ReadLine()
 		if err != nil {
 			if errors.Is(err, ErrResponseLineTooLong) {
@@ -938,6 +949,14 @@ func (c *BackendConn) readMultilineResponse(src string) ([]string, error) {
 		// Check for end marker
 		if line == "." {
 			break
+		}
+
+		// a line beyond the limit (checked after the end marker, so exactly maxReadLines
+		// lines and the dot are accepted)
+		if lineCount >= maxReadLines {
+			c.conn.Close() // Close connection on limit reached
+			c.forceClose = true
+			return nil, fmt.Errorf("%w: too many lines in response (limit: %d)", ErrResponseTooLarge, maxReadLines)
 		}
 
 		total += int64(len(line)) + 2 // CRLF
