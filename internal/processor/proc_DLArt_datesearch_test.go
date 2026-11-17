@@ -294,3 +294,24 @@ func TestDateSearchVeryStaleLowWater(t *testing.T) {
 	got, err := dsFind(t, &dsFake{high: high, holes: holes}, dsTarget(18000))
 	dsWant(t, got, err, 18000)
 }
+
+// Wide holes on both sides of the first probe point with the XOVER cap below the wide probe
+// size (MaxReadLinesXover 100 in these tests): the windows read must cover what a hole crossing
+// assumes, so the articles below the probe point are never crossed unread. Only "no skip" is
+// checked here; the start may be far below (a sparse group is over-fetched).
+func TestDateSearchCappedWindowsDoNotCrossUnread(t *testing.T) {
+	const high = 1500
+	holes := map[int64]bool{}
+	for n := int64(1); n < high; n++ {
+		if n < 300 || n > 600 {
+			holes[n] = true
+		}
+	}
+	got, err := dsFind(t, &dsFake{high: high, holes: holes}, dsTarget(300))
+	if err != nil {
+		t.Fatalf("FindStartArticleByDate: %v", err)
+	}
+	if got > 300 {
+		t.Fatalf("start article %d is above 300, the first article on the target date: articles 300-%d would be skipped", got, min(got-1, 600))
+	}
+}

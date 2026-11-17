@@ -590,8 +590,8 @@ func (proc *Processor) FindStartArticleByDate(groupName string, targetDate time.
 			crossTo = upper // mid..FetchEnd-1 is empty: crossing it makes FetchEnd the start
 		}
 		switch {
-		case !l.existing && l.from <= groupInfo.FetchStart+1:
-			// FetchStart+1..w.to is empty
+		case !l.existing && l.from <= groupInfo.FetchStart+1 && l.to >= mid-1:
+			// FetchStart+1..w.to is empty (the left window covered FetchStart+1..mid-1)
 			groupInfo.FetchStart = crossTo
 		case l.allBefore():
 			// the articles right below the hole are before the target
@@ -677,9 +677,7 @@ func decideDateWindow(gi *nntp.GroupInfo, w dateWindow) {
 // window; any other XOVER failure (timeout, dropped connection, 4xx/5xx) is returned: the
 // caller must not take it for "nothing there".
 func (proc *Processor) probeDateWindow(groupName string, from, upTo, size int64, target time.Time, enforceLimit bool) (dateWindow, error) {
-	if enforceLimit && nntp.MaxReadLinesXover > 0 && size > nntp.MaxReadLinesXover {
-		size = nntp.MaxReadLinesXover // XOver would cut the range there: never claim more than was read
-	}
+	size = dateWindowSize(size, enforceLimit) // XOver would cut the range there: never claim more than was read
 	to := from + size - 1
 	if to > upTo {
 		to = upTo
@@ -726,6 +724,14 @@ func (proc *Processor) probeDateWindow(groupName string, from, upTo, size int64,
 	return w, nil
 }
 
+// dateWindowSize is size capped at nntp.MaxReadLinesXover when XOver enforces that limit.
+func dateWindowSize(size int64, enforceLimit bool) int64 {
+	if enforceLimit && nntp.MaxReadLinesXover > 0 && size > nntp.MaxReadLinesXover {
+		return nntp.MaxReadLinesXover
+	}
+	return size
+}
+
 // probeDateRight probes from upward: a dateProbeWindow window, and a dateProbeWide one when
 // that held fewer than dateMinReadable readable Dates.
 func (proc *Processor) probeDateRight(groupName string, from, upTo int64, target time.Time, enforceLimit bool) (dateWindow, error) {
@@ -742,13 +748,19 @@ func (proc *Processor) probeDateLeft(groupName string, lo, hi int64, target time
 	if hi < lo {
 		return dateWindow{from: lo, to: hi}, nil
 	}
-	from := max(lo, hi-dateProbeWindow+1)
-	w, err := proc.probeDateWindow(groupName, from, hi, dateProbeWindow, target, enforceLimit)
+	// the windows end at hi; their size is what XOver really reads (capped), so from..hi is
+	// what a returned window covers
+	size := dateWindowSize(dateProbeWindow, enforceLimit)
+	from := max(lo, hi-size+1)
+	w, err := proc.probeDateWindow(groupName, from, hi, size, target, enforceLimit)
 	if err != nil || w.enough() || from <= lo {
 		return w, err
 	}
-	from = max(lo, hi-dateProbeWide+1)
-	return proc.probeDateWindow(groupName, from, hi, dateProbeWide, target, enforceLimit)
+	size = dateWindowSize(dateProbeWide, enforceLimit)
+	if wideFrom := max(lo, hi-size+1); wideFrom < from {
+		return proc.probeDateWindow(groupName, wideFrom, hi, size, target, enforceLimit)
+	}
+	return w, nil
 }
 
 // probeDateFind looks for the next articles in from..upTo above an empty window: windows of
