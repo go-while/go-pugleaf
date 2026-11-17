@@ -315,3 +315,36 @@ func TestDateSearchCappedWindowsDoNotCrossUnread(t *testing.T) {
 		t.Fatalf("start article %d is above 300, the first article on the target date: articles 300-%d would be skipped", got, min(got-1, 600))
 	}
 }
+
+// The main layouts again with the XOVER cap at 1000 (the fetcher's default -max-batch); the
+// other tests run with the package default of 100.
+func TestDateSearchAtCap1000(t *testing.T) {
+	old := nntp.MaxReadLinesXover
+	nntp.MaxReadLinesXover = 1000
+	t.Cleanup(func() { nntp.MaxReadLinesXover = old })
+
+	holes := func(from, to int64) map[int64]bool {
+		m := map[int64]bool{}
+		for n := from; n <= to; n++ {
+			m[n] = true
+		}
+		return m
+	}
+	cases := []struct {
+		name string
+		f    *dsFake
+		want int64
+	}{
+		{"no-holes", &dsFake{}, 28},
+		{"hole-at-probe", &dsFake{holes: holes(40, 60)}, 28},
+		{"stale-low-water", &dsFake{holes: holes(1, 80)}, 90},
+		{"very-stale-low-water", &dsFake{high: 20000, holes: holes(1, 15000)}, 18000},
+		{"misdated-run", &dsFake{dateOf: map[int64]time.Time{50: time.Date(2001, 1, 1, 0, 0, 0, 0, time.UTC), 51: time.Date(2001, 1, 1, 0, 0, 0, 0, time.UTC)}}, 28},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := dsFind(t, tc.f, dsTarget(tc.want))
+			dsWant(t, got, err, tc.want)
+		})
+	}
+}
