@@ -142,3 +142,86 @@ func TestCliXOverCapPoolReplacesConn(t *testing.T) {
 		t.Fatalf("pool created %d connections, want a fresh one after the rejected reply", got)
 	}
 }
+
+// With enforceLimit the range is cut at MaxReadLinesXover before the cap is computed: the cap is
+// the cut range, not the range the caller asked for.
+func TestCliXOverCapAfterEnforcedCut(t *testing.T) {
+	n := int(MaxReadLinesXover)
+	rows := func(k int) []int {
+		out := make([]int, k)
+		for i := range out {
+			out[i] = i + 1
+		}
+		return out
+	}
+	t.Run("cut-range-full", func(t *testing.T) {
+		c, err := cliDial(t, xoverCapServer(t, xoverCapReply(rows(n)...)), nil)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		var ovs []OverviewLine
+		err = cliQuirkRun(t, "XOver enforced", func() error {
+			var e error
+			ovs, e = c.XOver(xoverCapGroup, 1, int64(10*n), true)
+			return e
+		})
+		if err != nil || len(ovs) != n {
+			t.Fatalf("XOVER 1-%d cut to %d with %d rows: %d rows, err %v", 10*n, n, n, len(ovs), err)
+		}
+	})
+	t.Run("cut-range-plus-one", func(t *testing.T) {
+		c, err := cliDial(t, xoverCapServer(t, xoverCapReply(rows(n+1)...)), nil)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		err = cliQuirkRun(t, "XOver enforced", func() error {
+			_, e := c.XOver(xoverCapGroup, 1, int64(10*n), true)
+			return e
+		})
+		if !errors.Is(err, ErrResponseTooLarge) {
+			t.Fatalf("XOVER cut to %d with %d rows: err %v, want ErrResponseTooLarge", n, n+1, err)
+		}
+	})
+}
+
+// A reversed range allows one row (a server answers it with 423 or nothing).
+func TestCliXOverReversedRangeCap(t *testing.T) {
+	c, err := cliDial(t, xoverCapServer(t, xoverCapReply(3, 4)), nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	if _, err := xoverCapCall(t, c, 5, 3); !errors.Is(err, ErrResponseTooLarge) {
+		t.Fatalf("XOVER 5-3 with 2 rows: err %v, want ErrResponseTooLarge", err)
+	}
+}
+
+// The shared reader checks its line limit after the end marker: a HEAD reply with exactly
+// MaxReadLinesHeaders header lines is accepted (one more is still refused).
+func TestCliReaderExactLineLimitHead(t *testing.T) {
+	head := func(k int) []string {
+		lines := []string{"221 1 <1.cap@test.invalid> head follows", "Message-ID: <1.cap@test.invalid>"}
+		for i := 1; len(lines)-1 < k; i++ {
+			lines = append(lines, fmt.Sprintf("X-Line-%d: v", i))
+		}
+		return append(lines, ".")
+	}
+	run := func(k int) error {
+		st := cliFakeNewStore()
+		cliQuirkFill(st, xoverCapGroup, 1, 3)
+		s := cliStoreServer(t, st, cliFakeStoreOpts{}, cliFakeFaults{Override: map[string][]string{"HEAD": head(k)}})
+		c, err := cliDial(t, s, nil)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		return cliQuirkRun(t, fmt.Sprintf("GetHead %d lines", k), func() error {
+			_, e := c.GetHead("<1.cap@test.invalid>")
+			return e
+		})
+	}
+	if err := run(MaxReadLinesHeaders); err != nil {
+		t.Fatalf("HEAD with exactly %d header lines: %v", MaxReadLinesHeaders, err)
+	}
+	if err := run(MaxReadLinesHeaders + 1); !errors.Is(err, ErrResponseTooLarge) {
+		t.Fatalf("HEAD with %d header lines: err %v, want ErrResponseTooLarge", MaxReadLinesHeaders+1, err)
+	}
+}
