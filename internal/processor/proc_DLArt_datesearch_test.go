@@ -34,6 +34,7 @@ func dsDay(n int64) time.Time {
 // dsFake is the provider of these tests.
 type dsFake struct {
 	high    int64               // highest article number; 0: dsHigh
+	none    bool                // no article at all (every XOVER is 423)
 	holes   map[int64]bool      // numbers with no article (cancelled, expired)
 	badDate map[int64]bool      // articles whose Date does not parse
 	failAt  map[int64]string    // XOVER whose range starts at this number gets this status line
