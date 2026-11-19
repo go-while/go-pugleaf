@@ -229,8 +229,11 @@ func TestMboxIAOrderAndReasons(t *testing.T) {
 	if in.Size != 22 || in.MD5 != "aa22" {
 		t.Errorf("Size/MD5 = %d/%q, want 22/aa22", in.Size, in.MD5)
 	}
-	if in.Mtime == 0 {
-		t.Errorf("Mtime = 0 for a file on disk")
+	if in.Mtime != 0 || !in.StatLater {
+		t.Errorf("scan: Mtime = %d StatLater = %v, want 0/true (the scan stats nothing)", in.Mtime, in.StatLater)
+	}
+	if in = statPlanned(in); in.Mtime == 0 || in.StatLater {
+		t.Errorf("statPlanned: Mtime = %d StatLater = %v for a file on disk", in.Mtime, in.StatLater)
 	}
 }
 
@@ -328,7 +331,11 @@ func TestMboxIADiskState(t *testing.T) {
 		{"a6.tar", false, "tar", 100, false, false},
 		{"a7.iso", false, iaReasonMissing, 100, false, true},
 	} {
-		in := iaFind(t, inputs, "item-a", c.name)
+		scanned := iaFind(t, inputs, "item-a", c.name)
+		if scanned.Mtime != 0 {
+			t.Errorf("%s: the scan stat'ed the file (Mtime %d)", c.name, scanned.Mtime)
+		}
+		in := statPlanned(scanned) // the disk state is decided when a worker reaches the input
 		if in.Supported != c.supported || in.Reason != c.reason {
 			t.Errorf("%s: supported=%v reason=%q, want %v/%q", c.name, in.Supported, in.Reason, c.supported, c.reason)
 		}

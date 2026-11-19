@@ -63,6 +63,11 @@ type History struct {
 	// Database backend (SQLite with sharding)
 	db *SQLite3ShardedDB
 
+	// One write connection per database file with its prepared statements, kept across
+	// flushes (see dbWriter). Used only by executeDBTransaction, which runs one goroutine per
+	// file and never two for the same file; Close closes them after the writer's final flush.
+	writers [historyNumDBs]*dbWriter
+
 	// Writer queue: small value ops, no shared pointers
 	opChan  chan historyOp
 	pending atomic.Int64 // ops counted but not yet committed (queued, in channel or in current batch)
@@ -191,6 +196,9 @@ func (c *HistoryConfig) ValidateConfig() error {
 
 	if c.MaxConnections <= 0 {
 		c.MaxConnections = 8
+	}
+	if c.MaxConnections < 2 {
+		c.MaxConnections = 2 // the writer keeps one connection per file (dbWriter); lookups need another
 	}
 
 	// Validate batching configuration

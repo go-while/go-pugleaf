@@ -19,4 +19,8 @@ type plannedInput struct {
 	MD5        string // hex md5 from iafetch's DB ("" when unknown)
 	Supported  bool
 	Reason     string // why not supported, or why pending ("" when Supported)
+	// StatLater: the file has not been looked at on disk yet (an iafetch input with a
+	// supported name). The worker that reaches it stats it first (statPlanned), so a scan
+	// of the mirror does not stat hundreds of thousands of files before the first import.
+	StatLater bool
 }

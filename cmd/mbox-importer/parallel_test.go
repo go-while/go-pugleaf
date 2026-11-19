@@ -169,6 +169,8 @@ func TestMboxCmdGroupFromFileName(t *testing.T) {
 		{"pitt.mac-users.(9).mbox.7z", "pitt.mac-users"},
 		{"alt.2600.mbox.gz", "alt.2600"},                         // a short number is a group component
 		{"alt.binaries.1234567.mbox.gz", "alt.binaries.1234567"}, // 7 digits: not a date
+		{"comp.mail.mbox.mbox.zip", "comp.mail.mbox"},            // the last marker: a group may hold one
+		{"t.mbox.alpha.mbox", "t.mbox.alpha"},
 		{".mbox", ""},
 		{"bad name!.mbox", ""},
 		{"nosuffix", ""},

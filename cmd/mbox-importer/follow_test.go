@@ -739,8 +739,9 @@ func TestMboxFollowDryRun(t *testing.T) {
 	}
 	out := buf.String()
 	for _, want := range []string{
-		"[MBOX-IMPORT] scan 1: 5 planned input(s): supported=2 pending=1 unsupported=2",
-		"[MBOX-IMPORT] scan 1: pending missing=1",
+		// the scan stats nothing: the missing file counts as supported until a worker
+		// reaches it, and then as pending in the totals
+		"[MBOX-IMPORT] scan 1: 5 planned input(s): supported=3 pending=0 unsupported=2",
 		"[MBOX-IMPORT] scan 1: unsupported tar=1 txt=1",
 		"[MBOX-IMPORT] scan 1 done: imported=2 already-imported=0 pending=1 unsupported=2",
 		"is ignored in a dry run",

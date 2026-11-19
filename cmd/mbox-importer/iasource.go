@@ -14,8 +14,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
-	"sync"
 
 	_ "github.com/mattn/go-sqlite3" // SQLite3 driver ("sqlite3"), as the other cmd/ tools use it
 )
@@ -62,16 +62,15 @@ var iaUnsupportedSuffixes = map[string]string{
 	".torrent": "torrent",
 }
 
-// iafetchStatWorkers is the number of files a scan stats at the same time (iafetchInputs).
-const iafetchStatWorkers = 32
-
-// iafetchFilesQuery lists every file iafetch recorded, in the order the items were
-// selected: items.ord, then identifier and name. Files whose item has no items row, or an
-// items row without an ord, come last (by identifier and name); the status of the item is
-// not looked at, because a recorded file is complete even while its item is downloading.
-const iafetchFilesQuery = `SELECT files.identifier, files.name, files.size, files.md5, files.path
-	FROM files LEFT JOIN items ON items.identifier = files.identifier
-	ORDER BY items.ord IS NULL, items.ord, files.identifier, files.name`
+// iafetchFilesQuery and iafetchOrdQuery read iafetch's two tables in storage order: plain
+// table scans, no index. The import order (items.ord, then identifier and name; files
+// whose item has no items row or no ord last) is made in Go (iafetchSort). An ORDER BY over
+// the join made SQLite walk files through its primary-key index, one random page read per
+// row: on arc1-ca's busy HDD pool that took minutes for 645,000 rows.
+const (
+	iafetchFilesQuery = `SELECT identifier, name, size, md5, path FROM files`
+	iafetchOrdQuery   = `SELECT identifier, ord FROM items WHERE ord IS NOT NULL`
+)
 
 // iafetchInputs returns the files recorded in iafetch's DB at dbPath as planned inputs, in
 // import order. base is iafetch's working directory (-from-iafetch-base): a relative
@@ -81,16 +80,12 @@ const iafetchFilesQuery = `SELECT files.identifier, files.name, files.size, file
 // localPath refuses an identifier or a file name that is not local (fetch.go), so the names
 // of the mirror cannot escape the base.
 //
-// Supported is true for the names the importer can read today (iafetchSupported); any other
-// name gets Supported false and a suffix reason. A supported file that is not on disk, or
-// has another size than iafetch recorded, is not supported either (reason iaReasonMissing /
-// iaReasonSizeChanged, both iafetchPending: worth another look on the next scan). The size
-// is only compared when iafetch recorded one (> 0; it stores -1 for an unknown and 0 for an
-// empty file), and when it did not, Size is taken from disk. MD5 comes from the DB, Mtime
-// from disk (0 when the file is missing or cannot be stat'ed). An unsupported name is never
-// stat'ed (it is never imported); the supported ones are stat'ed iafetchStatWorkers at a time.
+// Supported is decided by the name alone (iafetchSupported); any other name gets Supported
+// false and a suffix reason. No file is stat'ed here: a supported one gets StatLater, and
+// the worker that reaches it checks it on disk then (statPlanned). The status of the item
+// is not looked at, because a recorded file is complete even while its item is downloading.
 //
-// The DB is opened read-only with one short query; it is closed before the stats start.
+// The DB is opened read-only for the two queries and closed before this returns.
 func iafetchInputs(dbPath, base string) ([]plannedInput, error) {
 	if dbPath == "" {
 		return nil, errors.New("iafetch DB: no path given")
@@ -102,58 +97,69 @@ func iafetchInputs(dbPath, base string) ([]plannedInput, error) {
 	defer func() { _ = db.Close() }()
 	db.SetMaxOpenConns(1)
 
+	ord := make(map[string]int64)
+	orows, err := db.Query(iafetchOrdQuery)
+	if err != nil {
+		return nil, iafetchReadError(dbPath, err)
+	}
+	for orows.Next() {
+		var id string
+		var o int64
+		if err := orows.Scan(&id, &o); err != nil {
+			_ = orows.Close()
+			return nil, fmt.Errorf("iafetch DB %q: %w", dbPath, err)
+		}
+		ord[id] = o
+	}
+	if err := orows.Err(); err != nil {
+		_ = orows.Close()
+		return nil, fmt.Errorf("iafetch DB %q: %w", dbPath, err)
+	}
+	_ = orows.Close()
+
 	rows, err := db.Query(iafetchFilesQuery)
 	if err != nil {
 		return nil, iafetchReadError(dbPath, err)
 	}
 	defer rows.Close()
-
-	type filesRow struct {
-		identifier, name, md5, path string
-		size                        int64
-	}
-	var recs []filesRow
+	var inputs []plannedInput
 	for rows.Next() {
-		var r filesRow
-		if err := rows.Scan(&r.identifier, &r.name, &r.size, &r.md5, &r.path); err != nil {
+		var identifier, name, md5, path string
+		var size int64
+		if err := rows.Scan(&identifier, &name, &size, &md5, &path); err != nil {
 			return nil, fmt.Errorf("iafetch DB %q: %w", dbPath, err)
 		}
-		recs = append(recs, r)
+		in, err := iafetchInput(identifier, name, size, md5, path, base)
+		if err != nil {
+			return nil, err
+		}
+		inputs = append(inputs, in)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iafetch DB %q: %w", dbPath, err)
 	}
-	_ = rows.Close()
-	_ = db.Close() // the query is done: iafetch's DB is not held during the stats
-
-	// The stats are the slow part of a scan: hundreds of thousands of files on a pool that
-	// iafetch is writing to, with a cold metadata cache. They run iafetchStatWorkers at a
-	// time; the order of the inputs stays the query's.
-	inputs := make([]plannedInput, len(recs))
-	errs := make([]error, len(recs))
-	next := make(chan int)
-	var wg sync.WaitGroup
-	for w := 0; w < min(iafetchStatWorkers, len(recs)); w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := range next {
-				r := recs[i]
-				inputs[i], errs[i] = iafetchInput(r.identifier, r.name, r.size, r.md5, r.path, base)
-			}
-		}()
-	}
-	for i := range recs {
-		next <- i
-	}
-	close(next)
-	wg.Wait()
-	for _, err := range errs {
-		if err != nil {
-			return nil, err // the first bad row in query order
-		}
-	}
+	iafetchSort(inputs, ord)
 	return iafetchDiscsFirst(inputs), nil
+}
+
+// iafetchSort puts the inputs in import order: items.ord ascending, the files of items
+// without an ord after all others, then identifier and name (byte order, as SQLite's BINARY
+// collation sorts them).
+func iafetchSort(inputs []plannedInput, ord map[string]int64) {
+	sort.SliceStable(inputs, func(i, j int) bool {
+		a, b := inputs[i], inputs[j]
+		oa, hasA := ord[a.Identifier]
+		ob, hasB := ord[b.Identifier]
+		switch {
+		case hasA != hasB:
+			return hasA
+		case hasA && oa != ob:
+			return oa < ob
+		case a.Identifier != b.Identifier:
+			return a.Identifier < b.Identifier
+		}
+		return a.Name < b.Name
+	})
 }
 
 // iafetchDiscsFirst puts the disc images of a scan before every other input, each half in
@@ -214,33 +220,42 @@ func iafetchInput(identifier, name string, size int64, md5, recorded, base strin
 		MD5:        strings.ToLower(strings.TrimSpace(md5)),
 	}
 	in.Supported, in.Reason = iafetchSupported(name)
-	if !in.Supported {
-		return in, nil // never imported, so its state on disk does not matter: no stat
-	}
+	// a supported file is looked at on disk when a worker reaches it (statPlanned); an
+	// unsupported one never is, it is never imported
+	in.StatLater = in.Supported
+	return in, nil
+}
 
-	fi, err := os.Stat(path)
+// statPlanned checks an input with StatLater on disk, right before the import decides about
+// it: Mtime from the file, Size from the file when the source recorded none (iafetch stores
+// -1 for an unknown and 0 for an empty file), and a supported input that is not on disk,
+// has another size than recorded, or cannot be stat'ed becomes unsupported with a pending
+// reason (iaReasonMissing / iaReasonSizeChanged / iaReasonStatError: tried again on the next
+// scan). An input without StatLater is returned as it is.
+func statPlanned(in plannedInput) plannedInput {
+	if !in.StatLater {
+		return in
+	}
+	in.StatLater = false
+	fi, err := os.Stat(in.Path)
 	switch {
 	case err == nil:
 		in.Mtime = fi.ModTime().Unix()
-		if size > 0 {
-			if in.Supported && fi.Size() != size {
+		if in.Size > 0 {
+			if fi.Size() != in.Size {
 				in.Supported, in.Reason = false, iaReasonSizeChanged
 			}
 		} else {
-			// iafetch had no size to verify (-1 unknown, 0 empty file): the file on disk
-			// is the only size there is, and the tracking DB needs one.
+			// no size to verify: the file on disk is the only size there is, and the
+			// tracking DB needs one
 			in.Size = fi.Size()
 		}
 	case errors.Is(err, os.ErrNotExist):
-		if in.Supported {
-			in.Supported, in.Reason = false, iaReasonMissing
-		}
+		in.Supported, in.Reason = false, iaReasonMissing
 	default:
-		if in.Supported {
-			in.Supported, in.Reason = false, iaReasonStatError
-		}
+		in.Supported, in.Reason = false, iaReasonStatError
 	}
-	return in, nil
+	return in
 }
 
 // iafetchSupported reports whether a recorded file name is an input the importer can read

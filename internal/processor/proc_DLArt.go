@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -547,71 +549,299 @@ func (proc *Processor) FindStartArticleByDate(groupName string, targetDate time.
 	log.Printf("Finding start article for date %s in group %s (range %d-%d)",
 		targetDate.Format("2006-01-02"), groupName, groupInfo.First, groupInfo.Last)
 
-	// Check if target date is before the first article
+	// The search assumes that Dates mostly rise with article numbers. Every step reads a window
+	// of articles and decides by the median of their Dates; the lower bound moves only over a
+	// run of before-target articles the window starts with. A minority of misdated or undated
+	// articles in a window (a late feed, a stuck clock, a forged or unparseable Date) never
+	// moves the search up and can end up below the start; one among the first articles of a
+	// window moves it down (more is fetched). Windows with fewer than two readable Dates, holes that cannot
+	// be verified and empty windows move the search down (more is fetched); an XOVER error
+	// other than 423 ends it with that error (the caller writes no progress). There is no
+	// shortcut on the first or the last article: a late article with an old Date at the top, or
+	// a stale low water mark, would mislead it. With mostly rising Dates the start is never
+	// above the first article dated on/after the target and may lie up to about one window
+	// below it; a majority of old Dates numbered late (a backfill) can still make it start
+	// late (issues.md, "Date-start search assumes mostly rising Dates").
 	enforceLimit := true
-	firstOverviews, err := proc.Pool.XOver(groupName, groupInfo.First, groupInfo.First, enforceLimit)
-	if err == nil && len(firstOverviews) > 0 {
-		firstArticleDate := ParseNNTPDate(firstOverviews[0].Date)
-		if !firstArticleDate.IsZero() && targetDate.Before(firstArticleDate) {
-			log.Printf("Target date %s is before first article %d (date: %s), returning first article. ng: %s",
-				targetDate.Format("2006-01-02"), groupInfo.First, firstArticleDate.Format("2006-01-02"), groupName)
-			return groupInfo.First, nil
-		} else {
-			log.Printf("Target date %s is after first article %d (date: %s), checking last article. ng: %s",
-				targetDate.Format("2006-01-02"), groupInfo.First, firstArticleDate.Format("2006-01-02"), groupName)
-		}
-	}
 
-	// Check if target date is after the last article
-	lastOverviews, err := proc.Pool.XOver(groupName, groupInfo.Last, groupInfo.Last, enforceLimit)
-	if err == nil && len(lastOverviews) > 0 {
-		lastArticleDate := ParseNNTPDate(lastOverviews[0].Date)
-		if !lastArticleDate.IsZero() && targetDate.After(lastArticleDate) {
-			log.Printf("Target date %s is after last article %d (date: %s), returning last article. ng: %s",
-				targetDate.Format("2006-01-02"), groupInfo.Last, lastArticleDate.Format("2006-01-02"), groupName)
-			return groupInfo.Last, nil
-		} else {
-			log.Printf("Target date %s is before last article %d (date: %s), starting search. ng: %s",
-				targetDate.Format("2006-01-02"), groupInfo.Last, lastArticleDate.Format("2006-01-02"), groupName)
-		}
-	}
-	groupInfo.FetchStart = groupInfo.First
+	// Every article up to FetchStart is before the target (by window evidence); FetchEnd is an
+	// upper bound of the start. Every step moves one of them strictly.
+	groupInfo.FetchStart = groupInfo.First - 1
 	groupInfo.FetchEnd = groupInfo.Last
-
-	// Binary search using 50% approach
 	for groupInfo.FetchEnd-groupInfo.FetchStart > 1 {
 		if common.WantShutdown() {
 			return 0, fmt.Errorf("FindStartArticleByDate: common.WantShutdown() group '%s'", groupName)
 		}
 		mid := groupInfo.FetchStart + (groupInfo.FetchEnd-groupInfo.FetchStart)/2
+		upper := groupInfo.FetchEnd - 1
 
-		// Get XOVER for this article
-		overviews, err := proc.Pool.XOver(groupName, mid, mid, enforceLimit)
-		if err != nil || len(overviews) == 0 {
-			// Article doesn't exist, try moving up
-			groupInfo.FetchStart = mid
+		w, err := proc.probeDateRight(groupName, mid, upper, targetDate, enforceLimit)
+		if err != nil {
+			return 0, fmt.Errorf("FindStartArticleByDate: group '%s': articles from %d: %w", groupName, mid, err)
+		}
+		if w.existing {
+			decideDateWindow(groupInfo, w)
 			continue
 		}
 
-		articleDate := ParseNNTPDate(overviews[0].Date)
-		if articleDate.IsZero() {
-			groupInfo.FetchStart = mid
-			continue
+		// mid..w.to holds no article. The numbers just below mid decide whether the hole may
+		// be crossed upward.
+		l, err := proc.probeDateLeft(groupName, groupInfo.FetchStart+1, mid-1, targetDate, enforceLimit)
+		if err != nil {
+			return 0, fmt.Errorf("FindStartArticleByDate: group '%s': articles below %d: %w", groupName, mid, err)
 		}
-
-		log.Printf("Scanning: %s - Article %d has date %s", groupName, mid, articleDate.Format("2006-01-02"))
-
-		if articleDate.Before(targetDate) {
-			groupInfo.FetchStart = mid
-		} else {
+		// A hole is crossed only as far as a narrow window showed it empty: a provider may
+		// silently serve only the first part of a wide XOVER range, so an empty wide window
+		// proves nothing about its upper part. Wide windows only help to find articles.
+		crossTo := w.narrowTo // cross the hole: everything up to crossTo is before the target or absent
+		if crossTo >= upper {
+			crossTo = upper // mid..FetchEnd-1 is empty: crossing it makes FetchEnd the start
+		}
+		switch {
+		case !l.wide && !l.existing && l.from <= groupInfo.FetchStart+1 && l.to >= mid-1:
+			// FetchStart+1..crossTo is empty (a narrow left window covered FetchStart+1..mid-1)
+			groupInfo.FetchStart = crossTo
+		case !l.wide && l.allBefore():
+			// the articles right below the hole are before the target
+			groupInfo.FetchStart = crossTo
+		case (l.existing && !(l.wide && l.allBefore())) || w.narrowTo >= upper:
+			// an article right below the hole is on/after the target or undated, or there is
+			// nothing above the hole: start lower
 			groupInfo.FetchEnd = mid
+		default:
+			// empty around mid (or only a wide window below it, all before the target) and the
+			// range goes on (a purge, a stale low water mark): find the next articles above the
+			// hole and decide there
+			g, err := proc.probeDateFind(groupName, w.narrowTo+1, upper, targetDate, enforceLimit)
+			if err != nil {
+				return 0, fmt.Errorf("FindStartArticleByDate: group '%s': articles above %d: %w", groupName, w.narrowTo, err)
+			}
+			if g.existing {
+				decideDateWindow(groupInfo, g)
+			} else {
+				groupInfo.FetchEnd = mid
+			}
 		}
 	}
 	if common.WantShutdown() {
 		return 0, fmt.Errorf("FindStartArticleByDate: common.WantShutdown() group '%s'", groupName)
 	}
-	log.Printf("Found start article: %d, ng: %s", groupInfo.FetchEnd, groupName)
-	return groupInfo.FetchEnd, nil
+	start := groupInfo.FetchEnd
+	if start < groupInfo.First {
+		start = groupInfo.First
+	}
+	log.Printf("Found start article: %d, ng: %s", start, groupName)
+	return start, nil
+}
+
+// dateProbeWindow is how many article numbers one date probe reads; dateProbeWide is the
+// second, wider probe over a window with fewer than dateMinReadable readable Dates (holes cost
+// little to read). Both are capped at nntp.MaxReadLinesXover (the fetcher's -max-batch), which
+// XOver's enforceLimit applies.
+const (
+	dateProbeWindow = 64
+	dateProbeWide   = 1000
+	dateMinReadable = 2
+)
+
+// dateWindow is what one XOVER window from..to showed, measured against the target date.
+type dateWindow struct {
+	from, to      int64 // the numbers asked for
+	existing      bool  // any article in the window
+	firstExisting int64 // lowest article number in the window
+	lastExisting  int64 // highest article number in the window
+	readable      int   // articles with a readable Date
+	before        int   // of them, dated before the target
+	lastReadable  int64 // highest article number with a readable Date
+	lowerMedian   int64 // number of the readable article at the lower median (number order)
+	prefixBefore  int   // readable articles before the target at the start of the window, in a row
+	prefixLast    int64 // the last of them
+	// narrowTo: the end of the narrow window of a probeDateRight (an empty reply proves only
+	// that much); wide: a probeDateLeft window that is the wide one (its emptiness proves
+	// nothing about its upper part)
+	narrowTo int64
+	wide     bool
+}
+
+// enough reports whether the window has enough readable Dates to decide anything.
+func (w dateWindow) enough() bool { return w.readable >= dateMinReadable }
+
+// medianBefore reports whether most readable Dates of the window are before the target and the
+// window starts with a run of at least dateMinReadable of them (the lower bound only moves over
+// articles that are before the target in number order: never onto an on/after one above an old
+// outlier).
+func (w dateWindow) medianBefore() bool {
+	return w.enough() && 2*w.before > w.readable && w.prefixBefore >= dateMinReadable
+}
+
+// allBefore reports whether every article of the window has a readable Date before the target.
+func (w dateWindow) allBefore() bool {
+	return w.enough() && w.before == w.readable && w.lastReadable == w.lastExisting
+}
+
+// decideDateWindow moves gi.FetchStart or gi.FetchEnd by a window that holds articles and lies
+// in FetchStart+1..FetchEnd-1: up to its last readable article when every article is before
+// the target, up to its lower median when most Dates are before it, otherwise (most on/after
+// the target, or too few readable Dates) down to its first article.
+func decideDateWindow(gi *nntp.GroupInfo, w dateWindow) {
+	switch {
+	case w.allBefore():
+		gi.FetchStart = w.lastReadable
+	case w.medianBefore():
+		gi.FetchStart = min(w.lowerMedian, w.prefixLast)
+	default:
+		gi.FetchEnd = w.firstExisting
+	}
+}
+
+// probeDateWindow reads the overview of from..min(from+size-1, upTo). A 423 is an empty
+// window; any other XOVER failure (timeout, dropped connection, 4xx/5xx) is returned: the
+// caller must not take it for "nothing there".
+func (proc *Processor) probeDateWindow(groupName string, from, upTo, size int64, target time.Time, enforceLimit bool) (dateWindow, error) {
+	size = dateWindowSize(size, enforceLimit) // XOver would cut the range there: never claim more than was read
+	to := from + size - 1
+	if to > upTo {
+		to = upTo
+	}
+	if to < from {
+		to = from
+	}
+	w := dateWindow{from: from, to: to}
+	overviews, err := proc.Pool.XOver(groupName, from, to, enforceLimit)
+	if err != nil {
+		if errors.Is(err, nntp.ErrNoArticlesInRange) {
+			return w, nil
+		}
+		return w, err
+	}
+	inRange := make([]nntp.OverviewLine, 0, len(overviews))
+	for _, ov := range overviews {
+		if ov.ArticleNum >= from && ov.ArticleNum <= to {
+			inRange = append(inRange, ov)
+		}
+	}
+	sort.Slice(inRange, func(i, j int) bool { return inRange[i].ArticleNum < inRange[j].ArticleNum })
+	var readableNums []int64
+	prefixOpen := true
+	for _, ov := range inRange {
+		if !w.existing {
+			w.firstExisting = ov.ArticleNum
+		}
+		w.existing = true
+		w.lastExisting = ov.ArticleNum
+		d := ParseNNTPDate(ov.Date)
+		if d.IsZero() {
+			prefixOpen = false
+			continue
+		}
+		w.readable++
+		w.lastReadable = ov.ArticleNum
+		readableNums = append(readableNums, ov.ArticleNum)
+		if d.Before(target) {
+			w.before++
+			if prefixOpen {
+				w.prefixBefore++
+				w.prefixLast = ov.ArticleNum
+			}
+		} else {
+			prefixOpen = false
+		}
+	}
+	if len(readableNums) > 0 {
+		w.lowerMedian = readableNums[(len(readableNums)-1)/2]
+	}
+	return w, nil
+}
+
+// dateWindowSize is size capped at nntp.MaxReadLinesXover when XOver enforces that limit.
+func dateWindowSize(size int64, enforceLimit bool) int64 {
+	if enforceLimit && nntp.MaxReadLinesXover > 0 && size > nntp.MaxReadLinesXover {
+		return nntp.MaxReadLinesXover
+	}
+	return size
+}
+
+// probeDateRight probes from upward: a dateProbeWindow window, and a dateProbeWide one when
+// that held fewer than dateMinReadable readable Dates.
+func (proc *Processor) probeDateRight(groupName string, from, upTo int64, target time.Time, enforceLimit bool) (dateWindow, error) {
+	w, err := proc.probeDateWindow(groupName, from, upTo, dateProbeWindow, target, enforceLimit)
+	w.narrowTo = w.to
+	if err != nil || w.enough() || w.to >= upTo {
+		return w, err
+	}
+	wide, err := proc.probeDateWindow(groupName, from, upTo, dateProbeWide, target, enforceLimit)
+	wide.narrowTo = w.to
+	return wide, err
+}
+
+// probeDateLeft probes the numbers just below hi (down to lo): a dateProbeWindow window, and
+// a dateProbeWide one when that held fewer than dateMinReadable readable Dates.
+func (proc *Processor) probeDateLeft(groupName string, lo, hi int64, target time.Time, enforceLimit bool) (dateWindow, error) {
+	if hi < lo {
+		return dateWindow{from: lo, to: hi}, nil
+	}
+	// the windows end at hi; their size is what XOver really reads (capped), so from..hi is
+	// what a returned window covers
+	size := dateWindowSize(dateProbeWindow, enforceLimit)
+	from := max(lo, hi-size+1)
+	w, err := proc.probeDateWindow(groupName, from, hi, size, target, enforceLimit)
+	if err != nil || w.enough() || from <= lo {
+		return w, err
+	}
+	size = dateWindowSize(dateProbeWide, enforceLimit)
+	if wideFrom := max(lo, hi-size+1); wideFrom < from {
+		wide, err := proc.probeDateWindow(groupName, wideFrom, hi, size, target, enforceLimit)
+		wide.wide = true
+		return wide, err
+	}
+	return w, nil
+}
+
+// probeDateFind looks for the next articles in from..upTo above an empty window: windows of
+// dateProbeWindow at from, from+1000, from+3000, ... (the step doubling); when a step passes
+// upTo it bisects between the last empty window and upTo. It returns the first window found
+// that holds any article, or an empty window when none was found.
+func (proc *Processor) probeDateFind(groupName string, from, upTo int64, target time.Time, enforceLimit bool) (dateWindow, error) {
+	empty := dateWindow{from: from, to: upTo}
+	lo, step := from, int64(dateProbeWide)
+	for lo <= upTo {
+		if common.WantShutdown() {
+			return empty, fmt.Errorf("probeDateFind: shutdown")
+		}
+		w, err := proc.probeDateWindow(groupName, lo, upTo, dateProbeWindow, target, enforceLimit)
+		if err != nil || w.existing {
+			return w, err
+		}
+		if w.to >= upTo {
+			return empty, nil
+		}
+		if step <= upTo-lo { // lo+step stays <= upTo: no overflow
+			lo += step
+			if step <= math.MaxInt64/2 {
+				step *= 2
+			}
+			continue
+		}
+		// bisect w.to+1..upTo for a window with articles
+		a, b := w.to+1, upTo
+		for a <= b {
+			if common.WantShutdown() {
+				return empty, fmt.Errorf("probeDateFind: shutdown")
+			}
+			m := a + (b-a)/2
+			w, err := proc.probeDateWindow(groupName, m, b, dateProbeWindow, target, enforceLimit)
+			if err != nil || w.existing {
+				return w, err
+			}
+			if w.to >= b {
+				b = m - 1 // m..b is empty: look lower
+			} else {
+				a = w.to + 1
+			}
+		}
+		return empty, nil
+	}
+	return empty, nil
 }
 
 var ErrIsEmptyGroup = fmt.Errorf("isEmptyGroup")

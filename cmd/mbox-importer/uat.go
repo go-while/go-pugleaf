@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-while/go-pugleaf/internal/common"
 	"github.com/go-while/mbox2nntp/uat"
 )
 
@@ -100,6 +101,12 @@ func importUAT(path string, opts *runOptions, sink articleSink, stop <-chan stru
 	}
 	log.Printf("[MBOX-IMPORT] importing file=%q", path)
 	log.Printf("[MBOX-IMPORT] uat file=%q group=%q version=%d messages=%d", path, p.Name, p.Version, p.Count())
+	if opts.group == "" && p.Name != opts.sourceGroup && common.IsValidGroupName(p.Name) {
+		// the package names its group: better than the file name (targetGroup)
+		in := *opts
+		in.sourceGroup = p.Name
+		opts = &in
+	}
 
 	c = newCounters(path)
 	c.Group = opts.group

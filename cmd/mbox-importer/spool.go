@@ -82,8 +82,10 @@ func (e *spoolErrReader) Read(p []byte) (int, error) {
 // buffers, which are reused for every file (a disc holds millions of them).
 type spoolWalker struct {
 	fsys  fs.FS
-	label string // the input as the log names it (the image or directory)
-	opts  *runOptions
+	label string      // the input as the log names it (the image or directory)
+	base  *runOptions // the options of the input
+	opts  *runOptions // base with the source group and directory of the file being read
+	file  runOptions  // the storage behind opts
 	sink  inputSink
 	stop  <-chan struct{}
 	c     *counters
@@ -119,6 +121,7 @@ func readSpool(fsys fs.FS, label string, opts *runOptions, sink inputSink, stop 
 	w := &spoolWalker{
 		fsys:  fsys,
 		label: label,
+		base:  opts,
 		opts:  opts,
 		sink:  sink,
 		stop:  stop,
@@ -140,6 +143,19 @@ func (w *spoolWalker) stopped() bool {
 	default:
 		return false
 	}
+}
+
+// setFileSource points w.opts at the input's options plus the source of file name: its
+// directory (SPOOL/alt/test/1 -> alt.test) and, for an mbox file in the spool, the group
+// of its name (targetGroup prefers them when the article lists them).
+func (w *spoolWalker) setFileSource(name string) {
+	w.file = *w.base
+	w.file.sourceDir = path.Dir(name)
+	w.file.sourceGroup = ""
+	if g, err := groupFromFileName(name); err == nil {
+		w.file.sourceGroup = g
+	}
+	w.opts = &w.file
 }
 
 // fileError counts and logs a file or directory of the spool that could not be read.
@@ -196,6 +212,7 @@ func (w *spoolWalker) readFile(name string) error {
 		return nil
 	}
 	defer func() { _ = f.Close() }()
+	w.setFileSource(name)
 
 	n, err := io.ReadFull(f, w.buf)
 	truncated := err == nil // the peek filled the buffer: the file may hold more
