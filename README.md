@@ -2,7 +2,7 @@
 
 **A modern NNTP server and web gateway for Usenet/NetNews built in Go**
 
-[![Go Version](https://img.shields.io/badge/Go-1.27.1+-blue.svg)](https://golang.org)
+[![Go Version](https://img.shields.io/badge/Go-1.27.4+-blue.svg)](https://golang.org)
 [![Development Status](https://img.shields.io/badge/Status-Testing-green.svg)](#development-status)
 [![License](https://img.shields.io/badge/License-GPL%20v2-blue.svg)](LICENSE)
 
@@ -19,7 +19,7 @@ go-pugleaf provides a complete newsgroup platform with:
 Read [BUGS.md](BUGS.md) first!
 
 ### Prerequisites
-- Go 1.27.1+ (for building from source; `go.mod` pins `toolchain go1.27.2`, downloaded automatically with GOTOOLCHAIN=auto)
+- Go 1.27.4+ (for building from source; `go.mod` requires go 1.27.4, downloaded automatically with GOTOOLCHAIN=auto)
 - A C compiler (gcc): the SQLite driver uses cgo
 - Linux/Unix system (Windows support not tested)
 - At least 1-256GB RAM, 1-10000GB+ disk space
