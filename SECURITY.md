@@ -4,8 +4,9 @@
 
 go-pugleaf is developed on the `testing-001` branch of
 [go-while/go-pugleaf](https://github.com/go-while/go-pugleaf). Releases are
-merged into `main` and tagged (`v0.6.19` is the latest release; the notes for
-each release are in `docs/RELEASE-v<version>.md`). Security fixes go into
+merged into `main` and tagged; the latest one is on the
+[Releases](https://github.com/go-while/go-pugleaf/releases) page, and the notes
+for each release are in `docs/RELEASE-v<version>.md`. Security fixes go into
 `testing-001` and the next release.
 
 | Version | Security support |
