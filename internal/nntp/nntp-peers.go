@@ -598,7 +598,9 @@ func (c *ClientConnection) peerStatsAdd(delta peerstats.Counters) {
 // once; accepted articles and the deferrals (436/431/400) log nothing. messageID is the id of
 // the command as received (the collector prints "(null)" for an invalid one), text the reply
 // text after the code; the id in front of a TAKETHIS text from intakeReply is dropped, as
-// innd's log text carries none (innd/art.c:2050, "439 Illegal path element").
+// innd's log text carries none (innd/art.c:2050, "439 Illegal path element"). Only a valid id
+// is ever put in front of a text, so an invalid one is never stripped: "TAKETHIS Rejected"
+// must keep the "Rejected" of its "Rejected (invalid message-id)".
 func (c *ClientConnection) peerStatsFeed(offer bool, messageID string, code int, size int64, dup bool, text string) {
 	c.peerStatsAdd(peerFeedCounters(offer, code, size, dup))
 	if code != 437 && code != 439 {
@@ -608,7 +610,7 @@ func (c *ClientConnection) peerStatsFeed(offer bool, messageID string, code int,
 	if c.pstats != nil {
 		ref = c.pstats.ref
 	}
-	if messageID != "" {
+	if common.ValidMessageID(messageID) {
 		text = strings.TrimPrefix(text, messageID+" ")
 	}
 	c.peerStatsCollector().Article(ref, messageID, code, text)

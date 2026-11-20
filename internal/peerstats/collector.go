@@ -184,6 +184,17 @@ func New(cfg Config) (*Service, error) {
 			}
 			return nil, err
 		}
+		// The article lines would be unknown lines to innreport in the INN log: refuse the
+		// same file under another name (symlink, hard link, relative path).
+		if sameLogFile(s.innlog, l) {
+			if cerr := l.Close(); cerr != nil {
+				log.Printf("[PEERSTATS] closing the inn article log: %v", cerr)
+			}
+			if cerr := s.innlog.Close(); cerr != nil {
+				log.Printf("[PEERSTATS] closing the inn log: %v", cerr)
+			}
+			return nil, fmt.Errorf("peerstats inn article log %s is the inn log %s: use another file", cfg.ArtLogPath, cfg.INNLogPath)
+		}
 		s.artlog = l
 		log.Printf("[PEERSTATS] inn article log=%q (rejected articles)", cfg.ArtLogPath)
 	}

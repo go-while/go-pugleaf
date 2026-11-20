@@ -16,6 +16,7 @@ package peerstats
 import (
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -58,9 +59,12 @@ func artMessageID(id string) string {
 // artText is the reply text of a line: the text the peer was sent after the code, without a
 // leading message-id (a TAKETHIS reply carries "<id> Rejected (...)", and innd's text is the
 // reply without it, e.g. "439 Illegal path element", innd/art.c:2050), on one line (control
-// characters become spaces) and at most artTextMax bytes, cut at a rune boundary.
+// characters become spaces) and at most artTextMax bytes, cut at a rune boundary. Only a
+// valid id (the one artMessageID prints) is dropped: an invalid id is never put in front of
+// a reply, and one that equals the first word of the text ("TAKETHIS Rejected") must not
+// eat that word.
 func artText(id, text string) string {
-	if id != "" {
+	if common.ValidMessageID(id) {
 		text = strings.TrimPrefix(text, id+" ")
 	}
 	text = strings.Map(func(r rune) rune {
@@ -155,6 +159,21 @@ func (s *Service) drainArtLog() {
 	}
 	s.artlog.reopenIfRotated()
 	s.artlog.writeLines(q)
+}
+
+// sameLogFile reports whether the two open logs are one file (a symlink, a hard link or
+// another spelling of the same path). Either may be nil.
+func sameLogFile(a, b *innLog) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	a.mu.Lock()
+	afi := a.fi
+	a.mu.Unlock()
+	b.mu.Lock()
+	bfi := b.fi
+	b.mu.Unlock()
+	return afi != nil && bfi != nil && os.SameFile(afi, bfi)
 }
 
 // openArtLog opens (and creates) the article log file at path.

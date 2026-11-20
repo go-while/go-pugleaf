@@ -210,7 +210,8 @@ cmd/history-rebuild/README.md); new articles get them on arrival.
 included) in the format of innd's `news` log, e.g.
 `Nov 20 15:17:19.123 - <peer> <message-id> 439 Rejected (control messages not accepted)`, so the
 reason of a reject can be looked up by message-id. Both files are appended to and reopened after
-logrotate moves them; they must be two different files.
+logrotate moves them; they must be two different files. The logging is best effort: a failed write
+(missing directory, full disk) drops that batch of lines and logs a `[PEERSTATS]` error.
 
 ### Available Tools
 

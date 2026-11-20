@@ -226,6 +226,20 @@ func TestArtLogTakeThis(t *testing.T) {
 	if arts := col.articles()[before:]; len(arts) != 1 || arts[0] != want {
 		t.Errorf("Article calls %+v, want exactly %+v", arts, want)
 	}
+	// An invalid id that equals the first word of the reply text: the text keeps that word
+	// (only a valid id is in front of a reply, round-0 F2).
+	before = len(col.articles())
+	if err := c.Send("TAKETHIS Rejected\r\n" + string(client.StuffBytes(alArticleRaw(alID("x"), alPath, "al.grp")))); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	code, line, err = c.ReadStatus()
+	if err != nil || code != 439 {
+		t.Fatalf("TAKETHIS Rejected: %d %q %v, want 439", code, line, err)
+	}
+	want = psArticleEvent{Peer: psRef(peer), MessageID: "Rejected", Code: 439, Text: "Rejected (invalid message-id)"}
+	if arts := col.articles()[before:]; len(arts) != 1 || arts[0] != want {
+		t.Errorf("TAKETHIS Rejected: Article calls %+v, want exactly %+v", arts, want)
+	}
 
 	// CHECK refusals (438) are no transfers and log nothing.
 	before = len(col.articles())

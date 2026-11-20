@@ -74,7 +74,14 @@ func TestArtRejectLineFields(t *testing.T) {
 			"p1 <a@b> 439 Rejected (control messages not accepted)"},
 		{"another id stays", "p1", "<a@b>", 439, "<x@y> Rejected", "p1 <a@b> 439 <x@y> Rejected"},
 		{"no id", "p1", "", 439, "Rejected (invalid message-id)", "p1 (null) 439 Rejected (invalid message-id)"},
-		{"invalid id", "p1", "not-an-id", 439, "not-an-id Rejected (invalid message-id)",
+		{"invalid id", "p1", "not-an-id", 439, "Rejected (invalid message-id)",
+			"p1 (null) 439 Rejected (invalid message-id)"},
+		// An invalid id is never put in front of a reply, so it is not stripped either.
+		{"invalid id in front stays", "p1", "not-an-id", 439, "not-an-id Rejected",
+			"p1 (null) 439 not-an-id Rejected"},
+		// An invalid id equal to the first word of the text is no id in front of it: only a
+		// valid id is ever put in front of a reply (TAKETHIS Rejected, round-0 F2).
+		{"invalid id equal to the first word", "p1", "Rejected", 439, "Rejected (invalid message-id)",
 			"p1 (null) 439 Rejected (invalid message-id)"},
 		{"id with a control char", "p1", "<a\x01@b>", 437, "Rejected (invalid article)",
 			"p1 (null) 437 Rejected (invalid article)"},
@@ -287,6 +294,33 @@ func TestArtLogConcurrent(t *testing.T) {
 			t.Fatalf("broken line %q", l)
 		}
 	}
+}
+
+// TestArtLogSameFileAsINNLog: New refuses an article log that is the INN log under another
+// name (a symlink here; a hard link or another spelling of the path is the same file too), so
+// innreport never sees article lines, and it closes what it had opened.
+func TestArtLogSameFileAsINNLog(t *testing.T) {
+	dir := t.TempDir()
+	innPath := filepath.Join(dir, "news.notice")
+	link := filepath.Join(dir, "news")
+	if err := os.WriteFile(innPath, nil, 0o644); err != nil {
+		t.Fatalf("create %s: %v", innPath, err)
+	}
+	if err := os.Symlink(innPath, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	for _, art := range []string{link, innPath, filepath.Join(dir, ".", "news.notice")} {
+		if svc, err := New(Config{INNLogPath: innPath, ArtLogPath: art}); err == nil {
+			svc.Stop()
+			t.Errorf("New with -inn-artlog %s, the inn log %s: no error", art, innPath)
+		}
+	}
+	// Two different files are fine.
+	svc, err := New(Config{INNLogPath: innPath, ArtLogPath: filepath.Join(dir, "other")})
+	if err != nil {
+		t.Fatalf("New with two files: %v", err)
+	}
+	svc.Stop()
 }
 
 // TestArtLogMissingDir: New fails when the article log cannot be opened.
