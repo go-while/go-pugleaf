@@ -205,6 +205,13 @@ database); `=false` restores the per-line lookup for comparison. The numbers com
 index: existing data shows them in `full` only after a full `history-rebuild` run (see
 cmd/history-rebuild/README.md); new articles get them on arrival.
 
+`-inn-log FILE` writes the peer statistics as innd/innfeed notices for INN's innreport.
+`-inn-artlog FILE` writes one line per rejected incoming feed article (437/439, duplicates
+included) in the format of innd's `news` log, e.g.
+`Nov 20 15:17:19.123 - <peer> <message-id> 439 Rejected (control messages not accepted)`, so the
+reason of a reject can be looked up by message-id. Both files are appended to and reopened after
+logrotate moves them; they must be two different files.
+
 ### Available Tools
 
 The following binaries are built by `build_ALL.sh` (names as in `build/`):
