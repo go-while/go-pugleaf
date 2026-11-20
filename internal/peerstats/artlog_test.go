@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -265,10 +266,11 @@ func TestArtLogAfterStop(t *testing.T) {
 	}
 }
 
-// TestArtLogConcurrent: Article from many goroutines while drains run between them. Every
-// producer hands a drain request to the drainer goroutine after each block of lines and waits
-// until the drain is done, while the other producers go on queueing, so drains overlap the
-// producers by construction (no clock). Every line is in the file exactly once (go test -race).
+// TestArtLogConcurrent: Article from many goroutines with drains interleaved: every producer
+// hands a drain request to the drainer goroutine after each block of lines and waits until the
+// drain is done, while the other producers may go on queueing (whether a drain and an Article
+// actually run at the same instant is up to the scheduler; TestArtLogArticleDuringDrain forces
+// that case). Every id is in the file exactly once, none lost or doubled (go test -race).
 func TestArtLogConcurrent(t *testing.T) {
 	artPath := filepath.Join(t.TempDir(), "news")
 	clk := newClock(time.Date(2026, 11, 20, 19, 0, 0, 0, time.UTC))
@@ -332,6 +334,92 @@ func TestArtLogConcurrent(t *testing.T) {
 	}
 }
 
+// TestArtLogArticleDuringDrain: Article never waits for a drain that is writing. The test holds
+// the log file's mutex, so a drain that took the queue blocks before it writes; while it is
+// blocked there the producers queue more lines, which must neither block nor get lost: after
+// the file is released, the first batch and the later lines are each in the file exactly once.
+func TestArtLogArticleDuringDrain(t *testing.T) {
+	artPath := filepath.Join(t.TempDir(), "news")
+	clk := newClock(time.Date(2026, 12, 31, 23, 0, 0, 0, time.UTC))
+	svc, err := New(Config{ArtLogPath: artPath, Now: clk.now})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	peer := PeerRef{ID: 1, Name: "p1"}
+	const first, later, workers = 50, 40, 4
+	for i := 0; i < first; i++ {
+		svc.Article(peer, fmt.Sprintf("<a%d@b>", i), 439, "Not wanted")
+	}
+	svc.artlog.mu.Lock() // the drain below takes the queue, then waits here before it writes
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		svc.drainArtLog()
+	}()
+	// Wait (no clock: a hang guard is the test timeout) until the drain has taken the queue.
+	for {
+		svc.mu.Lock()
+		n := len(svc.artq)
+		svc.mu.Unlock()
+		if n == 0 {
+			break
+		}
+		runtime.Gosched()
+	}
+	// The drain holds its batch and waits for the file: Article must go on regardless.
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for i := 0; i < later/workers; i++ {
+				svc.Article(peer, fmt.Sprintf("<l%d.%d@b>", w, i), 439, "Not wanted")
+			}
+		}(w)
+	}
+	wg.Wait() // would hang if Article waited for the blocked drain
+	svc.mu.Lock()
+	queued := len(svc.artq)
+	svc.mu.Unlock()
+	if queued != later {
+		t.Errorf("queued %d lines while the drain was blocked, want %d", queued, later)
+	}
+	select {
+	case <-drained:
+		t.Error("the drain finished while the file was held")
+	default:
+	}
+	svc.artlog.mu.Unlock()
+	<-drained
+	svc.Stop() // writes the later lines
+	seen := make(map[string]int)
+	for _, id := range strings.Fields(artIDs(t, artPath)) {
+		seen[id]++
+	}
+	want := make([]string, 0, first+later)
+	for i := 0; i < first; i++ {
+		want = append(want, fmt.Sprintf("<a%d@b>", i))
+	}
+	for w := 0; w < workers; w++ {
+		for i := 0; i < later/workers; i++ {
+			want = append(want, fmt.Sprintf("<l%d.%d@b>", w, i))
+		}
+	}
+	for _, id := range want {
+		if seen[id] != 1 {
+			t.Errorf("%s is %d times in the file, want once", id, seen[id])
+		}
+		delete(seen, id)
+	}
+	if len(seen) != 0 {
+		t.Errorf("unexpected ids in the file: %v", seen)
+	}
+	// The first batch was written before the later lines (one drain, then Stop).
+	if ids := strings.Fields(artIDs(t, artPath)); len(ids) != first+later || ids[first-1] != fmt.Sprintf("<a%d@b>", first-1) {
+		t.Errorf("the first batch is not in front of the later lines: %v", ids)
+	}
+}
+
 // artWriteThenDrain queues one line for id and drains it.
 func artWriteThenDrain(svc *Service, id string) {
 	svc.Article(PeerRef{ID: 1, Name: "p1"}, id, 437, "Rejected")
@@ -352,7 +440,10 @@ func artIDs(t *testing.T, path string) string {
 // O_APPEND, so the next lines start at the beginning of the empty file and nothing is lost.
 func TestArtLogCopytruncate(t *testing.T) {
 	artPath := filepath.Join(t.TempDir(), "news")
-	svc, err := New(Config{ArtLogPath: artPath})
+	// a pinned clock, in another month and with a padded day, so the test never depends on
+	// the real date
+	clk := newClock(time.Date(2027, 3, 5, 4, 5, 6, 0, time.UTC))
+	svc, err := New(Config{ArtLogPath: artPath, Now: clk.now})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -369,7 +460,7 @@ func TestArtLogCopytruncate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
-	if !strings.HasPrefix(string(data), "Nov ") || strings.ContainsRune(string(data), 0) {
+	if !strings.HasPrefix(string(data), "Mar  5 04:05:06.000 - ") || strings.ContainsRune(string(data), 0) {
 		t.Errorf("the file after the truncate does not start with a line (a hole?): %q", data)
 	}
 	if got, want := artIDs(t, artPath), "<3@b> <4@b>"; got != want {
@@ -381,7 +472,8 @@ func TestArtLogCopytruncate(t *testing.T) {
 // drain that has lines.
 func TestArtLogUnlinked(t *testing.T) {
 	artPath := filepath.Join(t.TempDir(), "news")
-	svc, err := New(Config{ArtLogPath: artPath})
+	clk := newClock(time.Date(2027, 1, 9, 23, 59, 59, 999e6, time.UTC))
+	svc, err := New(Config{ArtLogPath: artPath, Now: clk.now})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -437,7 +529,8 @@ func TestArtLogDirectoryGone(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 	artPath := filepath.Join(dir, "news")
-	svc, err := New(Config{ArtLogPath: artPath})
+	clk := newClock(time.Date(2027, 7, 1, 0, 0, 0, 0, time.UTC))
+	svc, err := New(Config{ArtLogPath: artPath, Now: clk.now})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -504,7 +597,10 @@ func TestArtLogSameFileAsINNLog(t *testing.T) {
 		}
 	}
 	// The refused New closed both files again.
-	if n := openFDsTo(t, innPath); n > 0 {
+	switch n := openFDsTo(t, innPath); {
+	case n < 0:
+		t.Log("no /proc/self/fd: descriptor check skipped")
+	case n > 0:
 		t.Errorf("%d descriptors still open on %s after the refused New", n, innPath)
 	}
 	// Two different files are fine.
