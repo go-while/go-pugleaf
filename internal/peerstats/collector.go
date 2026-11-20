@@ -26,12 +26,16 @@ const (
 
 // Config configures New. Every field is optional: without a Store the collector only writes
 // log lines, without an INNLogPath it only fills the store, and with neither it is a sink
-// that keeps counters nobody reads (use Nop for that instead).
+// that keeps counters nobody reads (use Nop for that instead). ArtLogPath is independent of
+// both.
 type Config struct {
 	// Store takes the hourly buckets. nil: count in memory and never write them.
 	Store Store
 	// INNLogPath is the INN-style log file. "": no log file.
 	INNLogPath string
+	// ArtLogPath is the INN-style article log (artlog.go): one line per rejected incoming
+	// article, in the format of innd's news log. "": no article log.
+	ArtLogPath string
 	// Host is the hostname of the syslog header of the log lines. "": this machine's.
 	Host string
 	// FlushEvery, CheckpointEvery and Retention default to DefaultFlushEvery,
@@ -121,6 +125,13 @@ type Service struct {
 	logAfterStop int64 // lines dropped because the log file is already closed
 	logClosed    bool
 
+	// artlog is the article log file (artlog.go), nil when none is configured; artq holds
+	// its lines like logq holds those of innlog, and logClosed covers both files.
+	artlog       *innLog
+	artq         []string
+	artDropped   int64 // article log lines dropped because artq was full
+	artAfterStop int64 // article log lines dropped because the file is already closed
+
 	stopCh chan struct{}
 	done   chan struct{}
 }
@@ -164,6 +175,17 @@ func New(cfg Config) (*Service, error) {
 		}
 		s.innlog = l
 		log.Printf("[PEERSTATS] inn log=%q host=%s", cfg.INNLogPath, cfg.Host)
+	}
+	if cfg.ArtLogPath != "" {
+		l, err := openArtLog(cfg.ArtLogPath)
+		if err != nil {
+			if cerr := s.innlog.Close(); cerr != nil {
+				log.Printf("[PEERSTATS] closing the inn log: %v", cerr)
+			}
+			return nil, err
+		}
+		s.artlog = l
+		log.Printf("[PEERSTATS] inn article log=%q (rejected articles)", cfg.ArtLogPath)
 	}
 	return s, nil
 }
@@ -210,12 +232,18 @@ func (s *Service) Stop() {
 	s.mu.Lock()
 	s.logClosed = true
 	s.mu.Unlock()
+	// logClosed is set: no article log line can be queued any more, so this drain writes
+	// the last ones and nothing is left behind in artq.
+	s.drainArtLog()
 	if err := s.innlog.Close(); err != nil {
 		log.Printf("[PEERSTATS] closing the inn log: %v", err)
 	}
+	if err := s.artlog.Close(); err != nil {
+		log.Printf("[PEERSTATS] closing the inn article log: %v", err)
+	}
 }
 
-// loop is the one goroutine: flush, checkpoint, prune.
+// loop is the one goroutine: flush, checkpoint, prune, article log.
 func (s *Service) loop() {
 	defer close(s.done)
 	flushT := time.NewTicker(s.cfg.FlushEvery)
@@ -224,6 +252,14 @@ func (s *Service) loop() {
 	defer cpT.Stop()
 	pruneT := time.NewTicker(pruneEvery)
 	defer pruneT.Stop()
+	// The article log is written once a second (artDrainEvery); without one the channel
+	// stays nil and its case never fires.
+	var artC <-chan time.Time
+	if s.artlog != nil {
+		artT := time.NewTicker(artDrainEvery)
+		defer artT.Stop()
+		artC = artT.C
+	}
 	// Prune once at startup: a server that is restarted every day would otherwise never
 	// reach the daily tick and keep every bucket for ever.
 	s.prune()
@@ -238,6 +274,8 @@ func (s *Service) loop() {
 			s.checkpointTick()
 		case <-pruneT.C:
 			s.prune()
+		case <-artC:
+			s.drainArtLog()
 		}
 	}
 }
@@ -486,11 +524,14 @@ func (s *Service) drainLog() {
 }
 
 // checkpointTick is the checkpoint timer's work: notice a log file that was rotated away,
-// build the checkpoint lines and write out everything queued, in event order.
+// build the checkpoint lines and write out everything queued, in event order (the article
+// log too).
 func (s *Service) checkpointTick() {
 	s.innlog.reopenIfRotated()
 	s.checkpointLines()
 	s.drainLog()
+	s.artlog.reopenIfRotated()
+	s.drainArtLog()
 }
 
 // lineReq is one log line to write, built under the mutex and written without it.

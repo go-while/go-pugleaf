@@ -235,6 +235,33 @@ func (l *innLog) write(t time.Time, tag, msg string) {
 	}
 }
 
+// writeLines appends lines as they are, without the syslog header, with one write call: the
+// article log (artlog.go), whose lines carry their own timestamp the way innd's news log does.
+func (l *innLog) writeLines(lines []string) {
+	if l == nil || len(lines) == 0 {
+		return
+	}
+	var b strings.Builder
+	for _, line := range lines {
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed {
+		return
+	}
+	if l.f == nil {
+		if err := l.openLocked(); err != nil {
+			log.Printf("[PEERSTATS] %v", err)
+			return
+		}
+	}
+	if _, err := l.f.WriteString(b.String()); err != nil {
+		log.Printf("[PEERSTATS] writing to %s: %v", l.path, err)
+	}
+}
+
 // innd and innfeed write one line of the respective daemon.
 func (l *innLog) innd(t time.Time, msg string)    { l.write(t, "innd", msg) }
 func (l *innLog) innfeed(t time.Time, msg string) { l.write(t, "innfeed", msg) }

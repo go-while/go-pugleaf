@@ -591,6 +591,29 @@ func (c *ClientConnection) peerStatsAdd(delta peerstats.Counters) {
 	c.peerStatsCollector().Add(ps.ref, peerstats.In, delta)
 }
 
+// peerStatsFeed counts the answer to one IHAVE or TAKETHIS transfer (peerFeedCounters) and,
+// when it is a rejection (437/439, duplicates included), writes its article log line with the
+// reply text the peer gets (plan inn-reject-log: the INN news-log line of innd/art.c:292).
+// Every 437/439 of these commands goes through here, so each rejected article logs exactly
+// once; accepted articles and the deferrals (436/431/400) log nothing. messageID is the id of
+// the command as received (the collector prints "(null)" for an invalid one), text the reply
+// text after the code; the id in front of a TAKETHIS text from intakeReply is dropped, as
+// innd's log text carries none (innd/art.c:2050, "439 Illegal path element").
+func (c *ClientConnection) peerStatsFeed(offer bool, messageID string, code int, size int64, dup bool, text string) {
+	c.peerStatsAdd(peerFeedCounters(offer, code, size, dup))
+	if code != 437 && code != 439 {
+		return
+	}
+	ref := peerstats.UnknownPeer
+	if c.pstats != nil {
+		ref = c.pstats.ref
+	}
+	if messageID != "" {
+		text = strings.TrimPrefix(text, messageID+" ")
+	}
+	c.peerStatsCollector().Article(ref, messageID, code, text)
+}
+
 // peerStatsDenied counts one feed command (IHAVE, CHECK, TAKETHIS, MODE STREAM) that was
 // refused because this connection is no enabled peer; code is the reply (502 or 480). It is
 // attributed to the peer row this address is configured as, enabled or not, and to

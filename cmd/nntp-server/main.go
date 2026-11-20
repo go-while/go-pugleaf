@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -32,6 +33,7 @@ var (
 	dataDir         string
 	feedOut         bool
 	innLogPath      string
+	innArtLogPath   string
 	peerStatsDays   int
 	noPostThreads   bool
 	useHistory      bool
@@ -80,6 +82,7 @@ func main() {
 	flag.BoolVar(&noPostThreads, "disable-webserver-post-threads", false, "do not build the threads of stored articles (threads, thread_cache, reply_count): only the web view needs them; for a standalone NNTP server (recover-db -rebuild-threads builds them later)")
 	flag.BoolVar(&feedOut, "feed", true, "outgoing transit feed: queue accepted feed and POST articles for the peers with an outgoing feed (out_enabled) and send them (data/cfg/feed-queue.sq3)")
 	flag.StringVar(&innLogPath, "inn-log", "", "write peer statistics lines in INN's innd/innfeed log format to this file (for innreport); empty = off")
+	flag.StringVar(&innArtLogPath, "inn-artlog", "", "write one line per rejected incoming feed article (437/439, with the reason) in the format of INN's news log to this file; empty = off")
 	flag.IntVar(&peerStatsDays, "peer-stats-days", 90, "keep the hourly peer statistics (data/cfg/peer-stats.sq3, web /admin/peers/stats) this many days")
 	flag.DurationVar(&postCommitWait, "post-commit-wait", nntp.DefaultPostCommitWait, "wait for the batch writer to commit a POSTed article before answering 240 (0 = answer at once, the article is still stored)")
 	flag.Parse()
@@ -242,10 +245,16 @@ func main() {
 	// or POST article to the enqueuer (database.SetFeedHook), the sender drains the queue to
 	// the peers with out_enabled. Without such a peer both stay idle.
 	// Peer statistics (plan peering-stats): hourly counters of what peers send us and what we
-	// send them, for the web page and the optional INN-style log. Started before the server and
+	// send them, for the web page and the optional INN-style logs (-inn-log: innd/innfeed
+	// notices for innreport; -inn-artlog: the rejected incoming articles with their reason, in
+	// innd's news log format, plan inn-reject-log). Started before the server and
 	// the sender so their first events are counted.
 	if peerStatsDays < 1 {
 		log.Fatalf("[PEERSTATS] -peer-stats-days must be at least 1")
+	}
+	// The article log lines would be unknown lines to innreport in the -inn-log file.
+	if innLogPath != "" && innArtLogPath != "" && filepath.Clean(innLogPath) == filepath.Clean(innArtLogPath) {
+		log.Fatalf("[PEERSTATS] -inn-artlog must name another file than -inn-log")
 	}
 	peerStore, err := peerstats.Open(peerstats.Path(dataDir))
 	if err != nil {
@@ -254,6 +263,7 @@ func main() {
 	peerStats, err := peerstats.New(peerstats.Config{
 		Store:      peerStore,
 		INNLogPath: innLogPath,
+		ArtLogPath: innArtLogPath,
 		Host:       processor.LocalNNTPHostname,
 		Retention:  time.Duration(peerStatsDays) * 24 * time.Hour,
 	})
@@ -262,7 +272,7 @@ func main() {
 	}
 	peerStats.Start()
 	nntpServer.SetPeerStats(peerStats)
-	log.Printf("[PEERSTATS] on (%s, %d days, inn-log %q)", peerstats.Path(dataDir), peerStatsDays, innLogPath)
+	log.Printf("[PEERSTATS] on (%s, %d days, inn-log %q, inn-artlog %q)", peerstats.Path(dataDir), peerStatsDays, innLogPath, innArtLogPath)
 
 	var feedQueue *feed.SQLiteQueue
 	var feedEnq *feed.Enqueuer
