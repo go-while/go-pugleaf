@@ -262,12 +262,23 @@ func TestArtLogTakeThis(t *testing.T) {
 
 // TestArtLogFile: the end-to-end path with a real collector: one good article and one control
 // message by TAKETHIS give one "-" line for the control message in innd's news log format,
-// none for the good one, and the counters are unchanged by the log.
+// none for the good one, and the same collector still counts both as before (its store holds
+// two offers, one accepted and one rejected article with their octets).
 func TestArtLogFile(t *testing.T) {
 	peer := psRow("127.0.0.1", true)
 	hs := newTestServer(t, hServerOpts{Proc: alProcessor(), Peers: psRegistry(peer), Hostname: "us.ps.invalid"})
-	path := filepath.Join(t.TempDir(), "news")
-	svc, err := peerstats.New(peerstats.Config{ArtLogPath: path})
+	dir := t.TempDir()
+	path := filepath.Join(dir, "news")
+	store, err := peerstats.Open(filepath.Join(dir, "cfg", peerstats.DefaultFile))
+	if err != nil {
+		t.Fatalf("peerstats.Open: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("closing the store: %v", err)
+		}
+	})
+	svc, err := peerstats.New(peerstats.Config{Store: store, ArtLogPath: path})
 	if err != nil {
 		t.Fatalf("peerstats.New: %v", err)
 	}
@@ -299,5 +310,21 @@ func TestArtLogFile(t *testing.T) {
 	}
 	if strings.Contains(string(data), good) {
 		t.Errorf("the accepted article %s is in the article log", good)
+	}
+
+	// Stop flushed the counters into the store.
+	buckets, err := store.ReadRange(0, 1<<62)
+	if err != nil {
+		t.Fatalf("ReadRange: %v", err)
+	}
+	var got peerstats.Counters
+	for _, b := range buckets {
+		if b.Peer.ID == peer.ID && b.Dir == peerstats.In {
+			got.Add(b.Counters)
+		}
+	}
+	if got.Offered != 2 || got.Accepted != 1 || got.Rejected != 1 || got.Duplicate != 0 ||
+		got.AccBytes <= 0 || got.RejBytes <= 0 {
+		t.Errorf("counters = %+v, want offered 2, accepted 1, rejected 1, both with their octets", got)
 	}
 }

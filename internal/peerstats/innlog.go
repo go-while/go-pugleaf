@@ -166,6 +166,8 @@ func innfeedGlobalLine(peer string, seconds int64, c Counters) string {
 type innLog struct {
 	mu   sync.Mutex
 	path string
+	// kind names the file in the [PEERSTATS] messages: "inn log" or "article log".
+	kind string
 	host string
 	pid  int
 	f    *os.File
@@ -188,7 +190,7 @@ func openINNLog(path, host string) (*innLog, error) {
 			host = "localhost"
 		}
 	}
-	l := &innLog{path: path, host: logLabel(host), pid: os.Getpid()}
+	l := &innLog{path: path, kind: "inn log", host: logLabel(host), pid: os.Getpid()}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if err := l.openLocked(); err != nil {
@@ -201,14 +203,14 @@ func openINNLog(path, host string) (*innLog, error) {
 func (l *innLog) openLocked() error {
 	f, err := os.OpenFile(l.path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o644)
 	if err != nil {
-		return fmt.Errorf("peerstats inn log %s: %w", l.path, err)
+		return fmt.Errorf("peerstats %s %s: %w", l.kind, l.path, err)
 	}
 	fi, err := f.Stat()
 	if err != nil {
 		if cerr := f.Close(); cerr != nil {
 			log.Printf("[PEERSTATS] closing %s after a failed stat: %v", l.path, cerr)
 		}
-		return fmt.Errorf("peerstats inn log %s: %w", l.path, err)
+		return fmt.Errorf("peerstats %s %s: %w", l.kind, l.path, err)
 	}
 	l.f, l.fi = f, fi
 	return nil
@@ -291,7 +293,7 @@ func (l *innLog) reopenIfRotated() {
 		log.Printf("[PEERSTATS] reopening %s: %v", l.path, err)
 		return
 	}
-	log.Printf("[PEERSTATS] reopened inn log %s", l.path)
+	log.Printf("[PEERSTATS] reopened %s %s", l.kind, l.path)
 }
 
 // Close closes the file. It is safe to call on a nil *innLog and twice.

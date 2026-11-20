@@ -5,7 +5,9 @@ package peerstats
 // rotation, Stop). No test looks at the wall clock: the times are pinned.
 
 import (
+	"bytes"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -89,6 +91,8 @@ func TestArtRejectLineFields(t *testing.T) {
 		{"empty text", "p1", "<a@b>", 437, "", "p1 <a@b> 437"},
 		{"capped", "p1", "<a@b>", 437, long, "p1 <a@b> 437 " + long[:artTextMax]},
 		{"capped at a rune", "p1", "<a@b>", 437, runeCut, "p1 <a@b> 437 " + strings.Repeat("a", artTextMax-1)},
+		{"capped after a space", "p1", "<a@b>", 437, strings.Repeat("a", artTextMax-2) + "  tail",
+			"p1 <a@b> 437 " + strings.Repeat("a", artTextMax-2)},
 		{"peer with spaces", " web lax1 ", "<a@b>", 437, "Rejected", "web_lax1 <a@b> 437 Rejected"},
 		{"no peer name", "", "<a@b>", 437, "Rejected", "unknown <a@b> 437 Rejected"},
 	} {
@@ -261,8 +265,10 @@ func TestArtLogAfterStop(t *testing.T) {
 	}
 }
 
-// TestArtLogConcurrent: Article from many goroutines while the background goroutine drains;
-// every line arrives whole (go test -race).
+// TestArtLogConcurrent: Article from many goroutines while drains run between them. Every
+// producer hands a drain request to the drainer goroutine after each block of lines and waits
+// until the drain is done, while the other producers go on queueing, so drains overlap the
+// producers by construction (no clock). Every line is in the file exactly once (go test -race).
 func TestArtLogConcurrent(t *testing.T) {
 	artPath := filepath.Join(t.TempDir(), "news")
 	clk := newClock(time.Date(2026, 11, 20, 19, 0, 0, 0, time.UTC))
@@ -270,8 +276,18 @@ func TestArtLogConcurrent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	svc.Start()
-	const workers, per = 8, 200
+	const workers, per, block = 8, 200, 25
+	drainReq := make(chan chan struct{})
+	drainerDone := make(chan struct{})
+	drains := 0
+	go func() {
+		defer close(drainerDone)
+		for done := range drainReq {
+			svc.drainArtLog()
+			drains++
+			close(done)
+		}
+	}()
 	var wg sync.WaitGroup
 	for w := 0; w < workers; w++ {
 		wg.Add(1)
@@ -280,20 +296,192 @@ func TestArtLogConcurrent(t *testing.T) {
 			peer := PeerRef{ID: int64(w), Name: fmt.Sprintf("p%d", w)}
 			for i := 0; i < per; i++ {
 				svc.Article(peer, fmt.Sprintf("<%d.%d@b>", w, i), 439, "Not wanted")
+				if (i+1)%block == 0 {
+					done := make(chan struct{})
+					drainReq <- done
+					<-done
+				}
 			}
 		}(w)
 	}
 	wg.Wait()
-	svc.Stop()
-	lines := readArtLog(t, artPath)
-	if len(lines) != workers*per {
-		t.Fatalf("file has %d lines, want %d", len(lines), workers*per)
+	close(drainReq)
+	<-drainerDone
+	svc.Stop() // writes the tail, if any
+	if want := workers * per / block; drains != want {
+		t.Errorf("%d drains ran, want %d", drains, want)
 	}
-	for _, l := range lines {
+	seen := make(map[string]int)
+	for _, l := range readArtLog(t, artPath) {
 		if !strings.HasPrefix(l, "Nov 20 19:00:00.000 - p") || !strings.HasSuffix(l, " 439 Not wanted") {
 			t.Fatalf("broken line %q", l)
 		}
+		seen[strings.Fields(l)[5]]++ // Nov, 20, time, -, peer, id, ...
 	}
+	for w := 0; w < workers; w++ {
+		for i := 0; i < per; i++ {
+			id := fmt.Sprintf("<%d.%d@b>", w, i)
+			if n := seen[id]; n != 1 {
+				t.Errorf("%s is %d times in the file, want once", id, n)
+			}
+			delete(seen, id)
+		}
+	}
+	if len(seen) != 0 {
+		t.Errorf("unexpected ids in the file: %v", seen)
+	}
+}
+
+// artWriteThenDrain queues one line for id and drains it.
+func artWriteThenDrain(svc *Service, id string) {
+	svc.Article(PeerRef{ID: 1, Name: "p1"}, id, 437, "Rejected")
+	svc.drainArtLog()
+}
+
+// artIDs returns the message-ids of the lines of the article log at path, space separated.
+func artIDs(t *testing.T, path string) string {
+	t.Helper()
+	var ids []string
+	for _, l := range readArtLog(t, path) {
+		ids = append(ids, strings.Fields(l)[5])
+	}
+	return strings.Join(ids, " ")
+}
+
+// TestArtLogCopytruncate: logrotate's copytruncate empties the file in place; the file is
+// O_APPEND, so the next lines start at the beginning of the empty file and nothing is lost.
+func TestArtLogCopytruncate(t *testing.T) {
+	artPath := filepath.Join(t.TempDir(), "news")
+	svc, err := New(Config{ArtLogPath: artPath})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	artWriteThenDrain(svc, "<1@b>")
+	artWriteThenDrain(svc, "<2@b>")
+	if err := os.Truncate(artPath, 0); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+	artWriteThenDrain(svc, "<3@b>")
+	svc.checkpointTick() // the same file: no reopen
+	artWriteThenDrain(svc, "<4@b>")
+	svc.Stop()
+	data, err := os.ReadFile(artPath)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !strings.HasPrefix(string(data), "Nov ") || strings.ContainsRune(string(data), 0) {
+		t.Errorf("the file after the truncate does not start with a line (a hole?): %q", data)
+	}
+	if got, want := artIDs(t, artPath), "<3@b> <4@b>"; got != want {
+		t.Errorf("ids after the truncate = %q, want %q", got, want)
+	}
+}
+
+// TestArtLogUnlinked: a file removed under the open log is recreated at its path by the next
+// drain that has lines.
+func TestArtLogUnlinked(t *testing.T) {
+	artPath := filepath.Join(t.TempDir(), "news")
+	svc, err := New(Config{ArtLogPath: artPath})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	artWriteThenDrain(svc, "<1@b>")
+	if err := os.Remove(artPath); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	artWriteThenDrain(svc, "<2@b>")
+	svc.Stop()
+	if got, want := artIDs(t, artPath), "<2@b>"; got != want {
+		t.Errorf("ids in the recreated file = %q, want %q", got, want)
+	}
+}
+
+// syncBuffer is a bytes.Buffer safe for the logger's concurrent writes.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.String()
+}
+
+// captureLog sends the standard logger to a buffer for the rest of the test.
+func captureLog(t *testing.T) *syncBuffer {
+	t.Helper()
+	buf := &syncBuffer{}
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(buf)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(prevOut)
+		log.SetFlags(prevFlags)
+	})
+	return buf
+}
+
+// TestArtLogDirectoryGone: while the directory of the file is missing, a drain cannot reopen
+// it: that batch is dropped with a [PEERSTATS] error naming the article log, and writing goes
+// on once the directory is back. No message calls the article log the inn log.
+func TestArtLogDirectoryGone(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "log")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	artPath := filepath.Join(dir, "news")
+	svc, err := New(Config{ArtLogPath: artPath})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	logged := captureLog(t)
+	artWriteThenDrain(svc, "<1@b>")
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatalf("remove the directory: %v", err)
+	}
+	artWriteThenDrain(svc, "<2@b>") // dropped: the file cannot be opened
+	if out := logged.String(); !strings.Contains(out, "[PEERSTATS] peerstats article log "+artPath) {
+		t.Errorf("no [PEERSTATS] error naming the article log for the dropped batch; log:\n%s", out)
+	}
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatalf("mkdir again: %v", err)
+	}
+	artWriteThenDrain(svc, "<3@b>")
+	svc.Stop()
+	if got, want := artIDs(t, artPath), "<3@b>"; got != want {
+		t.Errorf("ids after the directory came back = %q, want %q", got, want)
+	}
+	if out := logged.String(); !strings.Contains(out, "[PEERSTATS] reopened article log "+artPath) || strings.Contains(out, "inn log") {
+		t.Errorf("the messages do not name the article log; log:\n%s", out)
+	}
+}
+
+// openFDsTo counts the descriptors of this process open on the file at path, -1 when the
+// platform has no /proc/self/fd.
+func openFDsTo(t *testing.T, path string) int {
+	t.Helper()
+	want, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatalf("EvalSymlinks %s: %v", path, err)
+	}
+	ents, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		return -1
+	}
+	n := 0
+	for _, e := range ents {
+		if target, err := os.Readlink(filepath.Join("/proc/self/fd", e.Name())); err == nil && target == want {
+			n++
+		}
+	}
+	return n
 }
 
 // TestArtLogSameFileAsINNLog: New refuses an article log that is the INN log under another
@@ -315,6 +503,10 @@ func TestArtLogSameFileAsINNLog(t *testing.T) {
 			t.Errorf("New with -inn-artlog %s, the inn log %s: no error", art, innPath)
 		}
 	}
+	// The refused New closed both files again.
+	if n := openFDsTo(t, innPath); n > 0 {
+		t.Errorf("%d descriptors still open on %s after the refused New", n, innPath)
+	}
 	// Two different files are fine.
 	svc, err := New(Config{INNLogPath: innPath, ArtLogPath: filepath.Join(dir, "other")})
 	if err != nil {
@@ -330,7 +522,15 @@ func TestArtLogMissingDir(t *testing.T) {
 	if _, err := New(Config{ArtLogPath: path}); err == nil {
 		t.Error("New with an unopenable article log path succeeded")
 	}
-	if _, err := New(Config{INNLogPath: filepath.Join(dir, "news.notice"), ArtLogPath: path}); err == nil {
+	innPath := filepath.Join(dir, "news.notice")
+	if _, err := New(Config{INNLogPath: innPath, ArtLogPath: path}); err == nil {
 		t.Error("New with an unopenable article log path and an inn log succeeded")
+	}
+	// The inn log New had opened first is closed again: no descriptor leaks.
+	switch n := openFDsTo(t, innPath); {
+	case n < 0:
+		t.Log("no /proc/self/fd: descriptor check skipped")
+	case n > 0:
+		t.Errorf("%d descriptors still open on %s after the failed New", n, innPath)
 	}
 }

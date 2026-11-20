@@ -19,6 +19,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/go-while/go-pugleaf/internal/common"
@@ -79,7 +80,8 @@ func artText(id, text string) string {
 		for n > 0 && !utf8.RuneStart(text[n]) {
 			n--
 		}
-		text = text[:n]
+		// a cut right after a space must not leave it at the end of the line
+		text = strings.TrimRightFunc(text[:n], unicode.IsSpace)
 	}
 	return text
 }
@@ -178,7 +180,7 @@ func sameLogFile(a, b *innLog) bool {
 
 // openArtLog opens (and creates) the article log file at path.
 func openArtLog(path string) (*innLog, error) {
-	l := &innLog{path: path}
+	l := &innLog{path: path, kind: "article log"}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if err := l.openLocked(); err != nil {
