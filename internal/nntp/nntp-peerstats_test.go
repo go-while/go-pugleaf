@@ -38,6 +38,15 @@ type psCollector struct {
 	closes []psEvent
 	adds   []peerstats.Bucket // one entry per Add, with the ref and direction
 	queues map[int64]int64
+	arts   []psArticleEvent // one entry per Article (plan inn-reject-log)
+}
+
+// psArticleEvent is one recorded Article call.
+type psArticleEvent struct {
+	Peer      peerstats.PeerRef
+	MessageID string
+	Code      int
+	Text      string
 }
 
 func newPsCollector() *psCollector {
@@ -66,6 +75,18 @@ func (c *psCollector) SetQueue(p peerstats.PeerRef, depth int64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.queues[p.ID] = depth
+}
+
+func (c *psCollector) Article(p peerstats.PeerRef, messageID string, code int, text string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.arts = append(c.arts, psArticleEvent{Peer: p, MessageID: messageID, Code: code, Text: text})
+}
+
+func (c *psCollector) articles() []psArticleEvent {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]psArticleEvent(nil), c.arts...)
 }
 
 // total sums the Add deltas of one peer and direction.

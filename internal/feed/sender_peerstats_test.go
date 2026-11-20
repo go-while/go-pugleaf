@@ -64,6 +64,9 @@ func (c *spsCollector) SetQueue(p peerstats.PeerRef, depth int64) {
 	c.queues = append(c.queues, depth)
 }
 
+// Article is the incoming article log (plan inn-reject-log); the sender never calls it.
+func (c *spsCollector) Article(peerstats.PeerRef, string, int, string) {}
+
 // total sums the Add deltas of one direction, whatever the peer, and also returns the refs
 // the deltas were counted for.
 func (c *spsCollector) total(d peerstats.Dir) (peerstats.Counters, []peerstats.PeerRef) {

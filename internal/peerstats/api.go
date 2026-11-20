@@ -1,9 +1,10 @@
 // Package peerstats counts what peers send us and what we send them (plan peering-stats): per
 // peer, per direction and per hour, kept in data/cfg/peer-stats.sq3, written by nntp-server and
-// read by the web admin page, plus an optional log file in INN's innd/innfeed line format.
+// read by the web admin page, plus an optional log file in INN's innd/innfeed line format and an
+// optional article log of the rejected incoming articles in the format of innd's news log.
 //
 // This file is the contract the other files and packages code against; the implementation is in
-// collector.go (Service), store.go (Open, OpenReadOnly) and innlog.go.
+// collector.go (Service), store.go (Open, OpenReadOnly), innlog.go and artlog.go.
 package peerstats
 
 import (
@@ -117,6 +118,12 @@ type Collector interface {
 	Closed(p PeerRef, d Dir, conn Counters, dur time.Duration)
 	// SetQueue reports the outgoing queue depth of p (innfeed "queue" field, page column).
 	SetQueue(p PeerRef, depth int64)
+	// Article writes the article log line of one incoming article p fed us and we rejected:
+	// code is the reply (437 after IHAVE, 439 after TAKETHIS; other codes are ignored), text
+	// the reply text after the code as the peer got it (a leading messageID is dropped).
+	// messageID is the id the peer offered; an empty or invalid one is logged as "(null)".
+	// It counts nothing: the counters go through Add.
+	Article(p PeerRef, messageID string, code int, text string)
 }
 
 // Store keeps the hourly buckets. Open (read-write, nntp-server) and OpenReadOnly (web) return one.
@@ -139,3 +146,4 @@ func (nop) Connected(PeerRef, Dir, string)               {}
 func (nop) Add(PeerRef, Dir, Counters)                   {}
 func (nop) Closed(PeerRef, Dir, Counters, time.Duration) {}
 func (nop) SetQueue(PeerRef, int64)                      {}
+func (nop) Article(PeerRef, string, int, string)         {}

@@ -168,8 +168,9 @@ func (c *ClientConnection) handleIHave(args []string) error {
 	case errors.Is(err, ErrArticleTooLarge):
 		c.rememberReject(messageID) // permanent for this article (plan nntp-peering)
 		c.rateLimitOnError()
-		c.peerStatsAdd(peerFeedCounters(offer, 437, 0, false))
-		return c.sendResponse(437, "Rejected (article too large)")
+		text := "Rejected (article too large)"
+		c.peerStatsFeed(offer, messageID, 437, 0, false, text)
+		return c.sendResponse(437, text)
 	case err != nil:
 		return err // I/O error: nothing can be written
 	}
@@ -180,8 +181,9 @@ func (c *ClientConnection) handleIHave(args []string) error {
 	if reason := c.feedCheck(head); reason != "" {
 		log.Printf("[NNTP-PEER] IHAVE %s from peer %q refused: %s", messageID, c.peerName(), reason)
 		c.rememberReject(messageID)
-		c.peerStatsAdd(peerFeedCounters(offer, 437, size, false))
-		return c.sendResponse(437, "Rejected ("+reason+")")
+		text := "Rejected (" + reason + ")"
+		c.peerStatsFeed(offer, messageID, 437, size, false, text)
+		return c.sendResponse(437, text)
 	}
 	head = c.feedPath(head)
 
@@ -190,15 +192,17 @@ func (c *ClientConnection) handleIHave(args []string) error {
 		log.Printf("[NNTP] IHAVE %s: invalid article: %v", messageID, err)
 		c.rememberReject(messageID)
 		c.rateLimitOnError()
-		c.peerStatsAdd(peerFeedCounters(offer, 437, size, false))
-		return c.sendResponse(437, "Rejected (invalid article)")
+		text := "Rejected (invalid article)"
+		c.peerStatsFeed(offer, messageID, 437, size, false, text)
+		return c.sendResponse(437, text)
 	}
 	c.setIntakePolicy(article, size)
 	if !reconcileMessageID(article, messageID) {
 		log.Printf("IHAVE message-id mismatch: command '%s' article '%s'", messageID, article.MessageID)
 		c.rememberReject(messageID)
-		c.peerStatsAdd(peerFeedCounters(offer, 437, size, false))
-		return c.sendResponse(437, "Rejected (Message-ID mismatch)")
+		text := "Rejected (Message-ID mismatch)"
+		c.peerStatsFeed(offer, messageID, 437, size, false, text)
+		return c.sendResponse(437, text)
 	}
 
 	groups := articleGroupNames(article) // before the hand-off, see handlePost
@@ -207,7 +211,8 @@ func (c *ClientConnection) handleIHave(args []string) error {
 	if reply == 235 {
 		c.server.noteArrival(messageID, groups)
 	}
-	c.peerStatsAdd(peerFeedCounters(offer, reply, size, intakeDuplicate(code, perr)))
+	// The processor's rejections (e.g. a control message) are logged here with their reason.
+	c.peerStatsFeed(offer, messageID, reply, size, intakeDuplicate(code, perr), text)
 	if closeConn {
 		return c.closeAfterReply(reply, text)
 	}
@@ -314,14 +319,16 @@ func (c *ClientConnection) handleTakeThis(args []string) error {
 	size := feedWireSize(head, body)
 	if !common.ValidMessageID(id) {
 		c.rateLimitOnError()
-		c.peerStatsAdd(peerFeedCounters(offer, 439, size, false))
-		return reply(439, "Rejected (invalid message-id)")
+		text := "Rejected (invalid message-id)"
+		c.peerStatsFeed(offer, id, 439, size, false, text)
+		return reply(439, text)
 	}
 	if tooLarge {
 		c.rememberReject(id) // permanent for this article (plan nntp-peering)
 		c.rateLimitOnError()
-		c.peerStatsAdd(peerFeedCounters(offer, 439, size, false))
-		return reply(439, "Rejected (article too large)")
+		text := "Rejected (article too large)"
+		c.peerStatsFeed(offer, id, 439, size, false, text)
+		return reply(439, text)
 	}
 
 	// Check if we want this article
@@ -331,11 +338,13 @@ func (c *ClientConnection) handleTakeThis(args []string) error {
 	case history.CaseDupes:
 		// The body was already on the wire, so this is a duplicate the peer sent us and
 		// not a refusal before the transfer (plan peering-stats).
-		c.peerStatsAdd(peerFeedCounters(offer, 439, size, true))
-		return reply(439, "Not wanted")
+		text := "Not wanted"
+		c.peerStatsFeed(offer, id, 439, size, true, text)
+		return reply(439, text)
 	case history.CaseRetry:
-		c.peerStatsAdd(peerFeedCounters(offer, 439, size, false))
-		return reply(439, "In progress")
+		text := "In progress"
+		c.peerStatsFeed(offer, id, 439, size, false, text)
+		return reply(439, text)
 	default: // history.CaseError: RFC 4644 §2.5.2, a temporary failure is 400 and a close
 		log.Printf("[NNTP] TAKETHIS %s: error checking article history, closing", id)
 		c.peerStatsAdd(peerFeedCounters(offer, 400, size, false))
@@ -345,8 +354,9 @@ func (c *ClientConnection) handleTakeThis(args []string) error {
 	if reason := c.feedCheck(head); reason != "" {
 		log.Printf("[NNTP-PEER] TAKETHIS %s from peer %q refused: %s", id, c.peerName(), reason)
 		c.rememberReject(id)
-		c.peerStatsAdd(peerFeedCounters(offer, 439, size, false))
-		return reply(439, "Rejected ("+reason+")")
+		text := "Rejected (" + reason + ")"
+		c.peerStatsFeed(offer, id, 439, size, false, text)
+		return reply(439, text)
 	}
 	head = c.feedPath(head)
 
@@ -354,15 +364,17 @@ func (c *ClientConnection) handleTakeThis(args []string) error {
 	if err != nil {
 		log.Printf("Failed to parse TAKETHIS article data: %v", err)
 		c.rememberReject(id)
-		c.peerStatsAdd(peerFeedCounters(offer, 439, size, false))
-		return reply(439, "Rejected (invalid article)")
+		text := "Rejected (invalid article)"
+		c.peerStatsFeed(offer, id, 439, size, false, text)
+		return reply(439, text)
 	}
 	c.setIntakePolicy(article, size)
 	if !reconcileMessageID(article, id) {
 		log.Printf("TAKETHIS message-id mismatch: command '%s' article '%s'", id, article.MessageID)
 		c.rememberReject(id)
-		c.peerStatsAdd(peerFeedCounters(offer, 439, size, false))
-		return reply(439, "Transfer failed (Message-ID mismatch)")
+		text := "Transfer failed (Message-ID mismatch)"
+		c.peerStatsFeed(offer, id, 439, size, false, text)
+		return reply(439, text)
 	}
 
 	groups := articleGroupNames(article) // before the hand-off, see handlePost
@@ -371,7 +383,9 @@ func (c *ClientConnection) handleTakeThis(args []string) error {
 	if r == 239 {
 		c.server.noteArrival(id, groups)
 	}
-	c.peerStatsAdd(peerFeedCounters(offer, r, size, intakeDuplicate(code, perr)))
+	// The processor's rejections (e.g. a control message) are logged here with their reason;
+	// text carries the id in front, which the article log drops.
+	c.peerStatsFeed(offer, id, r, size, intakeDuplicate(code, perr), text)
 	if closeConn {
 		return c.closeAfterReply(r, text)
 	}
