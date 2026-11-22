@@ -81,6 +81,7 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		verifyMD5       = fs.Bool("verify-md5", false, "check the md5 iafetch recorded before an input is imported (needs -from-iafetch)")
 		follow          = fs.Duration("follow", 0, "after the inputs of a scan are done, wait this long and scan again, until a signal stops the run (0 = one scan; needs -from-iafetch)")
 		pprofAddr       = fs.String("pprof", "", "debug: serve net/http/pprof on this address (e.g. 127.0.0.1:6061), with block and mutex profiling on")
+		dropEmpty       = fs.String("drop-empty-groups", "", "cleanup instead of an import: delete the groups named in this file (one per line) that have no articles (newsgroups row with message_count 0 and no article in the group database): their row, the dependent rows and the group database files; any other listed group is skipped and reported. Honours -dry-run (lists only). Never while an importer or another go-pugleaf process writes to the same -data: a running import of the tracking database refuses it, one with -trackdb off is not seen")
 	)
 	fs.Usage = func() { usage(fs) }
 	if err := fs.Parse(args); err != nil {
@@ -105,6 +106,13 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		defer stopPprof()
 	}
 	trackPath := trackDBPath(*trackDBFlag, *dataDir)
+	if *dropEmpty != "" {
+		if fs.NArg() > 0 || *fromIAFetch != "" || *statusFlag {
+			fmt.Fprintln(fs.Output(), "mbox-importer: -drop-empty-groups imports nothing: not with inputs, -from-iafetch or -status")
+			return 2
+		}
+		return runDropEmptyGroups(*dropEmpty, *dataDir, trackPath, *dryRun)
+	}
 	if *statusFlag {
 		if trackPath == "" {
 			fmt.Fprintln(fs.Output(), "mbox-importer: -status needs a tracking database (-trackdb off)")
@@ -470,6 +478,7 @@ func usage(fs *flag.FlagSet) {
 	fmt.Fprintln(out, "Usage: mbox-importer [flags] INPUT...")
 	fmt.Fprintln(out, "       mbox-importer [flags] -from-iafetch DB [-from-iafetch-base DIR]   (inputs from iafetch's download database)")
 	fmt.Fprintln(out, "       mbox-importer [flags] -status [-json]   (prints the tracking database, imports nothing)")
+	fmt.Fprintln(out, "       mbox-importer -data DIR [-dry-run] -drop-empty-groups FILE   (deletes the listed groups without articles, imports nothing)")
 	fmt.Fprintln(out, "  INPUT: NAME.mbox, NAME.bag, NAME.mbox.gz, NAME.mbox.zip, NAME.mbox.7z (via -7z),")
 	fmt.Fprintln(out, "         UAT archives NAME.usenet, NAME.usenet.xz (via -xz), NAME.usenet.7z (via -7z), all via -zstd,")
 	fmt.Fprintln(out, "         disc images IMAGE.iso, IMAGE.cdr, IMAGE.sqsh, IMAGE.img (news spools, unpacked into -tmpdir via -7z),")
@@ -486,6 +495,7 @@ func usage(fs *flag.FlagSet) {
 	fmt.Fprintln(out, "  mbox-importer -data ./data-test-mbox -parallel 4 -max-batch 500 /archive/usenet/")
 	fmt.Fprintln(out, "  mbox-importer -data ./data-test-mbox -group-from-name -parallel 4 /archive/uat-mbox/   # de.comm.foo.mbox.gz -> de.comm.foo")
 	fmt.Fprintln(out, "  mbox-importer -data ./data-test-mbox -status                                         # what the tracking database knows")
+	fmt.Fprintln(out, "  mbox-importer -data ./data-test-mbox -dry-run -drop-empty-groups empty.txt          # then again without -dry-run")
 	fmt.Fprintln(out, "  mbox-importer -data ./data-test-mbox -from-iafetch /archive.org/.iafetch/iafetch.sqlite -group-from-name -parallel 4 -follow 10m")
 	fmt.Fprintln(out, "Exit codes: 0 ok, 1 input, article, commit or database error, 2 bad command line, 130 stopped by a signal")
 	fmt.Fprintln(out, "Flags:")
