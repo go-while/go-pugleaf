@@ -61,7 +61,7 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		xzProg          = fs.String("xz", "xz", "program used to unpack .usenet.xz inputs; when it is not found, -7z is used (7z e -txz)")
 		tmpDir          = fs.String("tmpdir", "", "directory for the unpacked copy of a .usenet.xz / .usenet.7z input or of a disc image (as large as the unpacked contents) and the zstd dictionary (\"\" = system temp dir)")
 		spoolFlag       = fs.Bool("spool", false, "read a positional directory or .zip input as a news spool (one article per file, as on a CD image) instead of scanning the directory for *.mbox* files; disc images (.iso, .cdr, .sqsh, .img) are always read this way")
-		dryRun          = fs.Bool("dry-run", false, "parse and count only: no database is opened, no input is renamed (with -drop-empty-groups: list only, the databases are opened read-only)")
+		dryRun          = fs.Bool("dry-run", false, "parse, check and count only: no database is opened, no input is renamed; the processor's article-only checks run as in a real run, with the default crosspost limit (9) instead of the database setting, and no article is looked up as present (with -drop-empty-groups: list only, the databases are opened read-only)")
 		keepBinary      = fs.Bool("keep-binary", false, "import yEnc binary articles (=ybegin) instead of skipping them")
 		markDoneFlag    = fs.Bool("mark-done", true, "rename a fully imported input to INPUT.done")
 		strictMsgID     = fs.Bool("strict-msgid", false, "require Message-IDs that pass go-pugleaf's validator instead of the lax mbox2nntp rules")

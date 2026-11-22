@@ -411,3 +411,115 @@ func TestMboxCmdDropEmptyGroupsChunkFailure(t *testing.T) {
 		t.Errorf("group database of %s (with an article) removed", orphanFull)
 	}
 }
+
+// TestMboxCmdDropEmptyGroupsEdgeCases: a row with message_count 0 whose group database has an
+// article (a stale count) is skipped and kept; message_count NULL with an empty group database
+// is deleted; a name with odd characters maps to its sanitized file name and its files are
+// removed; a group database that cannot be read (a corrupt file) is a check error: skipped,
+// row and file kept, exit 1.
+func TestMboxCmdDropEmptyGroupsEdgeCases(t *testing.T) {
+	miNeedDB(t)
+	miSetup(t)
+	data := filepath.Join(t.TempDir(), "data")
+	const (
+		stale   = "t.edge.stale"                // imported article, message_count set to 0
+		nullCnt = "t.edge.null"                 // message_count NULL, empty group database
+		odd     = "t.Edge+Odd--name__x.Mixed_C" // dots, '+', '-', '_' runs, mixed case
+		oddFile = "t_Edge_Odd--name_x_Mixed_C.db"
+		corrupt = "t.edge.corrupt" // group database file that is no SQLite database
+		idStale = "<stale@edge.test.invalid>"
+	)
+	in := miWrite(t, t.TempDir(), "g.mbox", miArticle(idStale, stale, "stale"))
+	if code, _ := miRun(t, "-data", data, in); code != 0 {
+		t.Fatalf("import exit %d", code)
+	}
+	miWithDB(t, data, func(db *database.Database) {
+		deMakeGroup(t, db, nullCnt, true)
+		deMakeGroup(t, db, odd, true)
+		deMakeGroup(t, db, corrupt, false)
+		for q, arg := range map[string]string{
+			`UPDATE newsgroups SET message_count = 0 WHERE name = ?`:    stale,
+			`UPDATE newsgroups SET message_count = NULL WHERE name = ?`: nullCnt,
+		} {
+			if _, err := database.RetryableExec(db.GetMainDB(), q, arg); err != nil {
+				t.Fatalf("%s %s: %v", q, arg, err)
+			}
+		}
+	})
+	oddDir := filepath.Join(data, "db", database.MD5Hash(odd))
+	if !miExists(filepath.Join(oddDir, oddFile)) {
+		t.Fatalf("setup: no group database %s for %q", filepath.Join(oddDir, oddFile), odd)
+	}
+	corruptDir, corruptFile := groupDBFiles(data, corrupt)
+	if err := os.MkdirAll(corruptDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	junk := bytes.Repeat([]byte("this is not an SQLite database\n"), 256)
+	if err := os.WriteFile(corruptFile, junk, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, staleFile := groupDBFiles(data, stale)
+	list := miWrite(t, t.TempDir(), "drop.txt", strings.Join([]string{stale, nullCnt, odd, corrupt}, "\n")+"\n")
+
+	code, _ := miRun(t, "-data", data, "-drop-empty-groups", list)
+	if code != 1 {
+		t.Errorf("exit %d, want 1 (the corrupt group database is a check error)", code)
+	}
+	res := lastDrop
+	if res == nil {
+		t.Fatal("no result")
+	}
+	if got := strings.Join(res.deleted, ","); got != nullCnt+","+odd {
+		t.Errorf("deleted %q, want %s,%s", got, nullCnt, odd)
+	}
+	skipped := map[string]string{}
+	for _, sk := range res.skipped {
+		skipped[sk.group] = sk.reason
+	}
+	if r := skipped[stale]; !strings.HasPrefix(r, "group database has articles (message_count=0") {
+		t.Errorf("stale count skipped with %q, want the group database has articles", r)
+	}
+	if r := skipped[corrupt]; res.checkErrors != 1 || !strings.HasPrefix(r, "check failed: ") {
+		t.Errorf("corrupt group database: check errors %d, reason %q; want 1 and a check failure", res.checkErrors, r)
+	}
+	if miExists(filepath.Join(oddDir, oddFile)) || miExists(oddDir) {
+		t.Errorf("files of %q still there", odd)
+	}
+	if dir, f := groupDBFiles(data, nullCnt); miExists(f) || miExists(dir) {
+		t.Errorf("files of %s still there", nullCnt)
+	}
+	for _, f := range []string{staleFile, corruptFile} {
+		if !miExists(f) {
+			t.Errorf("%s removed", f)
+		}
+	}
+	if b, err := os.ReadFile(corruptFile); err != nil || !bytes.Equal(b, junk) {
+		t.Errorf("corrupt file changed: %v", err)
+	}
+	miCheckGroups(t, data, map[string][]string{stale: {idStale}}, []string{idStale}, nullCnt, odd)
+	miWithDB(t, data, func(db *database.Database) {
+		if _, err := db.MainDBGetNewsgroup(corrupt); err != nil {
+			t.Errorf("row of %s: %v, want kept", corrupt, err)
+		}
+	})
+}
+
+// TestMboxCmdDryRunChecks: the dry run applies the processor's article-only checks like a real
+// run (a control message and an unreadable date are rejected), without a database.
+func TestMboxCmdDryRunChecks(t *testing.T) {
+	data := filepath.Join(t.TempDir(), "data")
+	const date = "Date: Tue, 24 Jun 2003 19:30:12 +0200"
+	mbox := miArticle(miID1, miAlpha, "good") +
+		miArticle(miID2, miBeta, "cmsg cancel <x@y.invalid>", "Control: cancel <x@y.invalid>") +
+		strings.Replace(miArticle(miID3, miAlpha, "bad date"), date, "Date: garbage", 1)
+	in := miWrite(t, t.TempDir(), "g.mbox", mbox)
+
+	code, sum := miRun(t, "-data", data, "-dry-run", in)
+	if code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	miCheck(t, sum, 3, 1, 0, 2, 0, "-")
+	if miExists(data) {
+		t.Errorf("dry run created %s", data)
+	}
+}

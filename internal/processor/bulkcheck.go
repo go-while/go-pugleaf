@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/common"
+	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
@@ -26,7 +27,8 @@ type bulkChecked struct {
 // every one is a refusal ProcessArticle remembers (rememberBulkReject).
 //
 // It changes neither the article nor the history, the message-id cache or a database: it
-// reads the MaxCrossPosts setting (which logs when that read fails), and under
+// reads the MaxCrossPosts setting (which logs when that read fails; a processor without a
+// database uses config.DefaultMaxCrossPosts, the setting's default), and under
 // RunRSLIGHTImport extractGroupsFromHeaders reads the sections and registers a batch group
 // pointer for each name. verbose prints ProcessArticle's log lines (the reject lines, the
 // accepted header defects, the date fallback and the once-per-group control line for
@@ -90,7 +92,10 @@ func (proc *Processor) bulkArticleChecks(article *models.Article, legacyNewsgrou
 		return res, rejected("missing mandatory header")
 	}
 	ngs := proc.extractGroupsFromHeaders(article.MessageID, newsgroupsStr)
-	res.maxCross = proc.DB.MaxCrossPosts()
+	res.maxCross = config.DefaultMaxCrossPosts // a processor without a database (the importer's dry run)
+	if proc.DB != nil {
+		res.maxCross = proc.DB.MaxCrossPosts()
+	}
 	if len(ngs) == 0 || len(ngs) > res.maxCross {
 		logf("[SPAM:EMP] Article '%s' newsgroups=%d", article.MessageID, len(ngs))
 		if len(ngs) == 0 {
@@ -137,7 +142,9 @@ func (proc *Processor) bulkArticleChecks(article *models.Article, legacyNewsgrou
 // cache, the capture slots or a database (no write), and it logs no line of its own, with
 // these exceptions: the group parser still logs an invalid name in Newsgroups, the
 // MaxCrossPosts read logs when it fails, and under RunRSLIGHTImport the group parser reads
-// the sections and registers a batch group pointer per name. The caller owns the article (it is
+// the sections and registers a batch group pointer per name. A Processor without a
+// database (the importer's dry run uses the zero value) runs the same checks with the
+// default crosspost limit, config.DefaultMaxCrossPosts, instead of the database setting. The caller owns the article (it is
 // not locked here). An article it passes may still be refused by ProcessArticle for a reason
 // of the group. ProcessArticle refuses an article it refuses the same way and also remembers
 // the message-id as rejected (rememberBulkReject): a caller that drops the article instead of

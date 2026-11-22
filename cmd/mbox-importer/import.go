@@ -901,20 +901,28 @@ func logDryRunGroups(groups map[string]int) {
 	}
 }
 
-// countingSink is the dry run's sink: it builds every article (a build error is a
-// rejection) and counts it for its target group as stored. One countingSink serves every
-// input of the run (the counts are per run), so the map is locked.
+// countingSink is the dry run's sink: it builds every article and runs the processor's
+// article-only bulk checks on it like the real run (CheckBulkArticle, on a processor without
+// a database: the default crosspost limit instead of the database setting); a build error or
+// a refusal is a rejection, the rest is counted for its target group as stored (an article
+// already in the group is not looked up). One countingSink serves every input of the run
+// (the counts are per run), so the map is locked.
 type countingSink struct {
 	mu     sync.Mutex
 	groups map[string]int
+	proc   *processor.Processor // no database, no history: only CheckBulkArticle is used
 }
 
 func newCountingSink() *countingSink {
-	return &countingSink{groups: make(map[string]int)}
+	return &countingSink{groups: make(map[string]int), proc: &processor.Processor{}}
 }
 
 func (s *countingSink) Handle(msgid string, art func() (*models.Article, error), group string) (bool, bool, error) {
-	if _, err := art(); err != nil {
+	article, err := art()
+	if err != nil {
+		return false, false, fmt.Errorf("%w: %v", errRejected, err)
+	}
+	if err := s.proc.CheckBulkArticle(article); err != nil {
 		return false, false, fmt.Errorf("%w: %v", errRejected, err)
 	}
 	s.mu.Lock()

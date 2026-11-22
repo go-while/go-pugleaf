@@ -101,9 +101,87 @@ func TestBulkCheckSameReasonsAsProcessArticle(t *testing.T) {
 			if !errors.Is(err, common.ErrIntakeRejected) || !strings.HasSuffix(err.Error(), ": "+tc.reason) {
 				t.Fatalf("CheckBulkArticle = %v, want ErrIntakeRejected with reason %q", err, tc.reason)
 			}
+			slots := CaptureInFlight()
 			code, perr := proc.ProcessArticle(bcArticle(t, msgid, lines), group, true)
 			if code != history.CaseError || perr == nil || perr.Error() != err.Error() {
 				t.Fatalf("ProcessArticle = %d, %v; CheckBulkArticle = %v: want the same refusal", code, perr, err)
+			}
+			// the refusal frees its capture slot and leaves the id CaseDupes, never CaseLock
+			// (more slots than before is a leak; fewer can be an earlier test's capture ending)
+			if n := CaptureInFlight(); n > slots {
+				t.Errorf("capture slots in flight %d after the refusal, want at most %d", n, slots)
+			}
+			if state := wiringTestState(history.MsgIdCache.GetORCreate(msgid)); state != history.CaseDupes {
+				t.Errorf("message-id cache state %d after the refusal, want CaseDupes (%d)", state, history.CaseDupes)
+			}
+		})
+	}
+}
+
+// TestBulkCheckPassingArticleStored: an article CheckBulkArticle passes is stored by
+// ProcessArticle's bulk path with what the checks produced, as the inline code did before
+// the checks moved: the date (the Date header, or the fallback header when Date is
+// unusable), the header block without the line the fetch-mode check drops, and the Path
+// prefixed with the local hostname.
+func TestBulkCheckPassingArticleStored(t *testing.T) {
+	history.NewMsgIdItemCache()
+	db := flNntpdbOpenDB(t)
+	h := wiringTestHistory(t)
+	proc := &Processor{DB: db, History: h, MsgIdCache: history.MsgIdCache}
+	db.Batch.SetProcessor(proc)
+	group := fmt.Sprintf("bc.pass.%d", time.Now().UnixNano())
+	if err := db.InsertNewsgroup(&models.Newsgroup{Name: group, Description: "bulk check", Active: true, Status: "y", LowWater: 1}); err != nil {
+		t.Fatalf("InsertNewsgroup: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name     string
+		replace  map[string]string
+		extra    []string
+		headers  map[string]string // put into the parsed header map (the parser keeps only a few)
+		wantDate string            // date_sent as stored (UTC)
+	}{
+		{name: "date header", wantDate: "2026-10-11 12:00:00"},
+		{name: "date fallback", replace: map[string]string{"Date": "garbage"},
+			headers: map[string]string{"nntp-posting-date": "Mon, 12 Oct 2026 08:30:00 +0000"}, wantDate: "2026-10-12 08:30:00"},
+		{name: "dropped junk line", extra: []string{"junk line without a colon"}, wantDate: "2026-10-11 12:00:00"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			msgid := fmt.Sprintf("<bc-pass-%d@test.invalid>", time.Now().UnixNano())
+			lines := bcLines(msgid, group, tc.replace, tc.extra, "stored body")
+			build := func() *models.Article {
+				art := bcArticle(t, msgid, lines)
+				for k, v := range tc.headers {
+					art.Headers[k] = []string{v}
+				}
+				return art
+			}
+			if err := proc.CheckBulkArticle(build()); err != nil {
+				t.Fatalf("CheckBulkArticle = %v, want nil", err)
+			}
+			mark := db.Batch.CommitMark(group)
+			if code, err := proc.ProcessArticle(build(), group, true); code != history.CasePass || err != nil {
+				t.Fatalf("ProcessArticle = %d, %v; want CasePass, nil", code, err)
+			}
+			if err := db.Batch.WaitCommitted(mark, nil, testWait); err != nil {
+				t.Fatalf("WaitCommitted: %v", err)
+			}
+			g, err := db.GetGroupDB(group)
+			if err != nil {
+				t.Fatalf("GetGroupDB: %v", err)
+			}
+			defer g.Return()
+			var date, headers string
+			if err := g.DB.QueryRow(`SELECT strftime('%Y-%m-%d %H:%M:%S', date_sent), COALESCE(headers_json, '') FROM articles WHERE message_id = ?`,
+				msgid).Scan(&date, &headers); err != nil {
+				t.Fatalf("read stored article: %v", err)
+			}
+			if date != tc.wantDate {
+				t.Errorf("date_sent %q, want %q", date, tc.wantDate)
+			}
+			wantPath := "Path: " + LocalNNTPHostname + "!peer.test.invalid!not-for-mail"
+			if !strings.Contains(headers, wantPath) || !strings.Contains(headers, "Subject: bulk check") || strings.Contains(headers, "junk line") {
+				t.Errorf("stored headers %q: want %q, the Subject and no junk line", headers, wantPath)
 			}
 		})
 	}

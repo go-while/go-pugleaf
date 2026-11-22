@@ -52,7 +52,10 @@ database. When testing, always use a scratch root such as `-data ./data-test-<na
 ```
 
 Opens no database, renames nothing, and prints the per-group counts, the skip reasons and the
-near-miss samples (see [Near-misses](#near-misses)).
+near-miss samples (see [Near-misses](#near-misses)). The processor's article-only checks run as
+in a real run (`rejected`: control messages, broken header blocks, bad dates, ...), with two
+differences: the crosspost limit is the default 9, not the database setting, and no article is
+looked up, so one already in its group counts as `stored`, not `present`.
 
 ### Plain mbox
 
@@ -151,7 +154,7 @@ one-article groups and left the other groups without the article.
 | `-xz` | `xz` | Program used to unpack `.usenet.xz` inputs; when it is not found, 7-Zip (`-7z`) is used with `-txz` |
 | `-tmpdir` | (system temp dir) | Where `.usenet.xz`, `.usenet.7z` and disc image inputs are unpacked, into a private subdirectory that is removed afterwards, and where the zstd dictionary is written. A `.usenet.xz` or `.usenet.7z` needs free space there for its whole unpacked `.usenet` file; a disc image for its whole unpacked contents (`utzoo.sqsh`: 5.2 GB in 2.08M files) |
 | `-spool` | `false` | Read a positional **directory** or **`.zip`** input as a news spool (one article per file) instead of scanning the directory for `*.mbox*` files: one input per argument, walked article by article like an unpacked disc image. Disc images (`.iso`, `.cdr`, `.sqsh`, `.img`) are read that way without the flag. Not together with `-from-iafetch` (which has no positional inputs). With `-spool` **every** `.zip` argument is a spool, so import mbox zips in a run of their own. See [Disc images and news spools](#disc-images-and-news-spools) |
-| `-dry-run` | `false` | Parse and count only: no database is opened, no input is renamed. With `-drop-empty-groups`: list only, the main and group databases are opened read-only |
+| `-dry-run` | `false` | Parse, check and count only: no database is opened, no input is renamed; the processor's article-only checks run with the default crosspost limit (9), nothing is looked up as `present` (see [Dry run first](#dry-run-first)). With `-drop-empty-groups`: list only, the main and group databases are opened read-only |
 | `-keep-binary` | `false` | Import yEnc binary articles (`=ybegin`) instead of skipping them |
 | `-mark-done` | `true` | Rename a fully imported input to `INPUT.done` (see below) |
 | `-strict-msgid` | `false` | Require Message-IDs that pass go-pugleaf's own validator instead of the lax mbox2nntp rules |
