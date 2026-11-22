@@ -121,68 +121,19 @@ func (proc *Processor) ProcessArticle(article *models.Article, legacyNewsgroup s
 		msgIdItem.Response = history.CaseLock
 		msgIdItem.Mux.Unlock()
 
-		// D2: a NUL octet in the body refuses a fetched or imported article too
-		// (decision 2026-11-11: the fetch path follows the relay rules). rejectArticle
-		// remembers it on the bulk path, like the header-block reject below, so a re-import
-		// or a peer offering the same id does not read and refuse it again.
-		if intakeBodyHasNUL(article) {
-			log.Printf("[INTAKE] article '%s' (bulk) rejected: article contains NUL", article.MessageID)
+		// The checks of the article alone (bulkcheck.go): NUL, header block, Message-ID,
+		// Control, Newsgroups, Subject, From and the date, with their log lines. Bulk callers
+		// run the same checks without side effects before they create a group
+		// (CheckBulkArticle). Every refusal of them is remembered (rememberBulkReject).
+		checked, err := proc.bulkArticleChecks(article, legacyNewsgroup, true)
+		if err != nil {
 			proc.setCaseDupes(msgIdItem, bulkmode)
-			return history.CaseError, rejectArticle("article contains NUL")
+			proc.rememberBulkReject(article)
+			return history.CaseError, err
 		}
-
-		// D12: fetch-mode header block check; malformed lines are dropped from the stored
-		// block, a bare CR or LF is kept verbatim and logged (relay rules)
-		if article.HeadersJSON != "" {
-			normalized, defects, err := common.CheckHeaderBlockDefects(strings.Split(article.HeadersJSON, "\n"), common.HeaderBlockFetch)
-			if err != nil {
-				log.Printf("[INTAKE] article '%s' (bulk) rejected: %v", article.MessageID, err)
-				proc.rememberBulkReject(article)
-				proc.setCaseDupes(msgIdItem, bulkmode)
-				return history.CaseError, err
-			}
-			logHeaderDefects(article.MessageID, defects)
-			// A-intake-3: the fetched Message-ID header must be the requested id
-			if mid := common.HeaderValue(normalized, "Message-ID"); mid != "" && mid != article.MessageID {
-				log.Printf("[INTAKE] article '%s' (bulk) rejected: Message-ID header %q differs", article.MessageID, mid)
-				proc.setCaseDupes(msgIdItem, bulkmode)
-				return history.CaseError, rejectArticle("invalid message-id")
-			}
-			lines = normalized
-		}
-
-		// D3 and decision 6 of plan nntp-peering: the bulk (fetcher/importer) path refuses a
-		// control message exactly like NNTP intake does (validateIntakeHeaders), logs it once
-		// per group per run and remembers it as rejected. A Supersedes header stays ignored.
-		if ctl := bulkControlHeader(article, lines); ctl != "" {
-			if controlRefusals.first(legacyNewsgroup) {
-				log.Printf("[INTAKE] control message %s (%s) in '%s' refused: control messages are not processed (logged once per group)",
-					article.MessageID, ctl, legacyNewsgroup)
-			}
-			proc.setCaseDupes(msgIdItem, bulkmode)
-			return history.CaseError, rejectArticle("control messages not accepted")
-		}
-
-		// dont process crossposts if we downloaded articles in bulkmode
-		// Use legacy newsgroup in bulkmode. add article only to single newsgroup db.
-
-		newsgroupsStr := common.GetHeaderFirst(article.Headers, "newsgroups")
-		if newsgroupsStr == "" {
-			log.Printf("[SPAM:HDR] Article '%s' no newsgroups header", article.MessageID)
-			proc.setCaseDupes(msgIdItem, bulkmode)
-			return history.CaseError, rejectArticle("missing mandatory header")
-		}
-
-		ngs := proc.extractGroupsFromHeaders(article.MessageID, newsgroupsStr)
-		maxCross = proc.DB.MaxCrossPosts()
-		if len(ngs) == 0 || len(ngs) > maxCross {
-			log.Printf("[SPAM:EMP] Article '%s' newsgroups=%d", article.MessageID, len(ngs))
-			proc.setCaseDupes(msgIdItem, bulkmode)
-			if len(ngs) == 0 {
-				return history.CaseError, rejectArticle("invalid newsgroups")
-			}
-			return history.CaseError, rejectArticle("too many newsgroups")
-		}
+		lines = checked.lines
+		maxCross = checked.maxCross
+		article.DateSent = checked.dateSent
 		newsgroups = append(newsgroups, legacyNewsgroup)
 
 	} else if !RunRSLIGHTImport {
@@ -267,6 +218,7 @@ func (proc *Processor) ProcessArticle(article *models.Article, legacyNewsgroup s
 		proc.setCaseDupes(msgIdItem, bulkmode)
 		return history.CaseError, rejected("invalid article")
 	}
+	// the bulk path checked Subject and From (and the date) in bulkArticleChecks already
 	if article.Subject == "" {
 		log.Printf("[HDR-SPAM] Article '%s' empty subject... headers='%#v'", article.MessageID, article.Headers)
 		//article.Subject = "No Subject" // Fallback to a default value
@@ -277,27 +229,6 @@ func (proc *Processor) ProcessArticle(article *models.Article, legacyNewsgroup s
 		log.Printf("[HDR-SPAM] Article '%s' empty from header... headers='%#v'", article.MessageID, article.Headers)
 		proc.setCaseDupes(msgIdItem, bulkmode)
 		return history.CaseError, rejectArticle("missing mandatory header")
-	}
-
-	if bulkmode {
-		// the bulk paths keep the lenient parser (archives, D10); an unreadable or
-		// pre-Usenet Date is taken from Posted, Date-Received, ... when one is usable
-		var dateFrom string
-		article.DateSent, dateFrom = bulkArticleDate(article.DateString, article.Headers)
-		if dateFrom != "" {
-			log.Printf("[HDR-DATE] Article '%s': Date '%s' unusable, using %s '%s'", article.MessageID, article.DateString, dateFrom, common.GetHeaderFirst(article.Headers, dateFrom))
-		}
-		if article.DateSent.IsZero() {
-			log.Printf("[ERROR-HDR] Article '%s' no valid date... headerDate='%v' dateString='%s'", article.MessageID, article.DateSent, article.DateString)
-			proc.setCaseDupes(msgIdItem, bulkmode)
-			return history.CaseError, rejectArticle("invalid date")
-		}
-		// Check for future posts (more than MaxFutureDate in the future) and skip processing
-		if article.DateSent.After(time.Now().Add(MaxFutureDate)) {
-			log.Printf("[SPAM-HDR:FUTURE] Article '%s' posted too far in future (date: %v), skipping", article.MessageID, article.DateSent)
-			proc.setCaseDupes(msgIdItem, bulkmode)
-			return history.CaseError, rejectArticle("date in the future")
-		}
 	}
 
 	// part of parsing data moved to nntp-client-commands.go:L~850 (func ParseLegacyArticleLines)
