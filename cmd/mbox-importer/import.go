@@ -172,8 +172,8 @@ type articleSink interface {
 	beginInput() inputSink
 }
 
-// inputSink is the sink of one input: the dry run counts, the real run looks the id up,
-// creates the group, takes the commit mark and calls ProcessArticle.
+// inputSink is the sink of one input: the dry run counts, the real run checks the article,
+// creates the group, takes the commit mark, looks the id up and calls ProcessArticle.
 // A Handle error wrapping errRejected counts as rejected, any other error as an error.
 type inputSink interface {
 	Handle(msgid string, art func() (*models.Article, error), group string) (stored, present bool, err error)
@@ -901,20 +901,28 @@ func logDryRunGroups(groups map[string]int) {
 	}
 }
 
-// countingSink is the dry run's sink: it builds every article (a build error is a
-// rejection) and counts it for its target group as stored. One countingSink serves every
-// input of the run (the counts are per run), so the map is locked.
+// countingSink is the dry run's sink: it builds every article and runs the processor's
+// article-only bulk checks on it like the real run (CheckBulkArticle, on a processor without
+// a database: the default crosspost limit instead of the database setting); a build error or
+// a refusal is a rejection, the rest is counted for its target group as stored (an article
+// already in the group is not looked up). One countingSink serves every input of the run
+// (the counts are per run), so the map is locked.
 type countingSink struct {
 	mu     sync.Mutex
 	groups map[string]int
+	proc   *processor.Processor // no database, no history: only CheckBulkArticle is used
 }
 
 func newCountingSink() *countingSink {
-	return &countingSink{groups: make(map[string]int)}
+	return &countingSink{groups: make(map[string]int), proc: &processor.Processor{}}
 }
 
 func (s *countingSink) Handle(msgid string, art func() (*models.Article, error), group string) (bool, bool, error) {
-	if _, err := art(); err != nil {
+	article, err := art()
+	if err != nil {
+		return false, false, fmt.Errorf("%w: %v", errRejected, err)
+	}
+	if err := s.proc.CheckBulkArticle(article); err != nil {
 		return false, false, fmt.Errorf("%w: %v", errRejected, err)
 	}
 	s.mu.Lock()
@@ -929,7 +937,8 @@ func (s *countingSink) endInput(time.Duration) error { return nil }
 
 // processorSink is the real run's sink: it creates each group once per run and hands out
 // one processorInput per input, which takes a commit mark per group, skips articles already
-// in the group and passes the rest to ProcessArticle in bulk mode. Inputs may run at the
+// in the group and passes the rest to ProcessArticle in bulk mode (an article the bulk checks
+// refuse gets neither a group nor a lookup, see processorInput.Handle). Inputs may run at the
 // same time (-parallel): ProcessArticle and the batch writer are built for concurrent callers,
 // the per-run group set is locked here.
 type processorSink struct {
@@ -969,8 +978,26 @@ type processorInput struct {
 	order []string                       // groups of this input, first sight order
 }
 
+// Handle builds the article and runs the processor's article-only bulk checks first: an
+// article they refuse (a control message, a broken header block, a bad date, ...) counts as
+// rejected and never creates its group or the group's database (plan importer-empty-groups).
+// Only then the group is created, an article already in it counts as present, and the rest
+// goes to ProcessArticle. A group can still stay empty when ProcessArticle fails after that
+// for another reason (no group database could be opened) or when a broken article passes
+// every check.
 func (p *processorInput) Handle(msgid string, art func() (*models.Article, error), group string) (bool, bool, error) {
 	s := p.sink
+	article, err := art()
+	if err != nil {
+		return false, false, fmt.Errorf("%w: %v", errRejected, err)
+	}
+	if err := s.proc.CheckBulkArticle(article); err != nil {
+		// ProcessArticle refuses it the same way and remembers the id as rejected, so a
+		// peer offering it later gets "not wanted": keep that without calling it
+		s.proc.RememberReject(article.MessageID)
+		return false, false, fmt.Errorf("%w: %v", errRejected, err)
+	}
+
 	if err := s.ensure(group); err != nil {
 		return false, false, fmt.Errorf("create newsgroup: %w", err)
 	}
@@ -995,10 +1022,6 @@ func (p *processorInput) Handle(msgid string, art func() (*models.Article, error
 		return false, true, nil
 	}
 
-	article, err := art()
-	if err != nil {
-		return false, false, fmt.Errorf("%w: %v", errRejected, err)
-	}
 	// the capture goroutine owns the article after the call: never read it again
 	res, err := s.proc.ProcessArticle(article, group, true)
 	switch {

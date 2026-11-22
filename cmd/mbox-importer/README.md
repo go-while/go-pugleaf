@@ -52,7 +52,10 @@ database. When testing, always use a scratch root such as `-data ./data-test-<na
 ```
 
 Opens no database, renames nothing, and prints the per-group counts, the skip reasons and the
-near-miss samples (see [Near-misses](#near-misses)).
+near-miss samples (see [Near-misses](#near-misses)). The processor's article-only checks run as
+in a real run (`rejected`: control messages, broken header blocks, bad dates, ...), with two
+differences: the crosspost limit is the default 9, not the database setting, and no article is
+looked up, so one already in its group counts as `stored`, not `present`.
 
 ### Plain mbox
 
@@ -151,7 +154,7 @@ one-article groups and left the other groups without the article.
 | `-xz` | `xz` | Program used to unpack `.usenet.xz` inputs; when it is not found, 7-Zip (`-7z`) is used with `-txz` |
 | `-tmpdir` | (system temp dir) | Where `.usenet.xz`, `.usenet.7z` and disc image inputs are unpacked, into a private subdirectory that is removed afterwards, and where the zstd dictionary is written. A `.usenet.xz` or `.usenet.7z` needs free space there for its whole unpacked `.usenet` file; a disc image for its whole unpacked contents (`utzoo.sqsh`: 5.2 GB in 2.08M files) |
 | `-spool` | `false` | Read a positional **directory** or **`.zip`** input as a news spool (one article per file) instead of scanning the directory for `*.mbox*` files: one input per argument, walked article by article like an unpacked disc image. Disc images (`.iso`, `.cdr`, `.sqsh`, `.img`) are read that way without the flag. Not together with `-from-iafetch` (which has no positional inputs). With `-spool` **every** `.zip` argument is a spool, so import mbox zips in a run of their own. See [Disc images and news spools](#disc-images-and-news-spools) |
-| `-dry-run` | `false` | Parse and count only: no database is opened, no input is renamed |
+| `-dry-run` | `false` | Parse, check and count only: no database is opened, no input is renamed; the processor's article-only checks run with the default crosspost limit (9), nothing is looked up as `present` (see [Dry run first](#dry-run-first)). With `-drop-empty-groups`: list only, the main and group databases are opened read-only |
 | `-keep-binary` | `false` | Import yEnc binary articles (`=ybegin`) instead of skipping them |
 | `-mark-done` | `true` | Rename a fully imported input to `INPUT.done` (see below) |
 | `-strict-msgid` | `false` | Require Message-IDs that pass go-pugleaf's own validator instead of the lax mbox2nntp rules |
@@ -170,6 +173,8 @@ one-article groups and left the other groups without the article.
 | `-from-iafetch-base` | (none) | iafetch's working directory: a relative `files.path` of its database is resolved against it. Needed when iafetch ran with a relative `-o`; it is never guessed. Only with `-from-iafetch` |
 | `-verify-md5` | `false` | Hash an input and compare it with the md5 iafetch recorded, after the run has taken the input and before it reads it: a file the tracking database knows as `done`, or one another run holds, is never hashed. A mismatch is no error: the input becomes `pending` with the reason `md5-mismatch`, its sum is remembered (`md5_seen`) and the file is not hashed again while it is unchanged. A row without a recorded md5 cannot be checked and is logged and imported. Only with `-from-iafetch` (nothing else records an md5) |
 | `-follow` | `0` | After the inputs of a scan are done, wait this long and scan iafetch's database again, until SIGINT/SIGTERM stops the run. `0` means one scan. Only with `-from-iafetch`; ignored in a dry run |
+| `-drop-empty-groups` | (none) | Cleanup instead of an import: delete the groups named in this file (one per line) that have no articles; see [Dropping empty groups](#dropping-empty-groups). Honours `-dry-run`. Needs an explicit `-data`. Not together with inputs, `-from-iafetch` or `-status` |
+| `-force-stale-runs` | `false` | With `-drop-empty-groups` only: take the unfinished runs of the tracking database that are not alive on this host (another host, a killed or crashed importer) as dead instead of refusing. A run still alive on this host is always refused |
 | `-help` | | Print the usage and exit |
 
 Positional arguments are the inputs; at least one is required (except with `-status` and
@@ -291,8 +296,8 @@ Exit codes:
 | Code | Meaning |
 |------|---------|
 | `0` | every input was read without an article error (marked done or not, see the log; also when there was nothing to import) |
-| `1` | an input could not be opened or read (open, unpack, 7z exit status, close or rename error; for a UAT input also a missing zstd, a zstd failure or a size mismatch; for a disc image a failed `7z x`, for a spool a failed walk), an article could not be stored (`errors` > 0), or the commit wait failed; a database/processor/hostname error, or the tracking database could not be opened |
-| `2` | bad command line (unknown flag, no input, invalid `-group` name, `-group` with `-group-from-name`, `-spool` with `-from-iafetch`, `-useshorthashlen` outside 2-7, negative `-commit-timeout`, `-parallel` outside 1-32, `-max-batch` outside 100-1000, `-max-queue` outside 16-100000, negative `-max-article-size`, negative `-log-keep-runs`, `-status` with `-trackdb off`, `-from-iafetch` with positional inputs or with `-trackdb off`, negative `-follow`, `-from-iafetch-base`/`-verify-md5`/`-follow` without `-from-iafetch`, and the first scan of `-from-iafetch` failing: a database that cannot be read or a relative path without `-from-iafetch-base`) |
+| `1` | an input could not be opened or read (open, unpack, 7z exit status, close or rename error; for a UAT input also a missing zstd, a zstd failure or a size mismatch; for a disc image a failed `7z x`, for a spool a failed walk), an article could not be stored (`errors` > 0), or the commit wait failed; a database/processor/hostname error, or the tracking database could not be opened; `-drop-empty-groups`: see [Dropping empty groups](#dropping-empty-groups) |
+| `2` | bad command line (unknown flag, no input, invalid `-group` name, `-group` with `-group-from-name`, `-spool` with `-from-iafetch`, `-useshorthashlen` outside 2-7, negative `-commit-timeout`, `-parallel` outside 1-32, `-max-batch` outside 100-1000, `-max-queue` outside 16-100000, negative `-max-article-size`, negative `-log-keep-runs`, `-status` with `-trackdb off`, `-drop-empty-groups` with inputs, `-from-iafetch` or `-status` or without an explicit `-data`, `-force-stale-runs` without `-drop-empty-groups`, `-from-iafetch` with positional inputs or with `-trackdb off`, negative `-follow`, `-from-iafetch-base`/`-verify-md5`/`-follow` without `-from-iafetch`, and the first scan of `-from-iafetch` failing: a database that cannot be read or a relative path without `-from-iafetch-base`) |
 | `130` | stopped by SIGINT/SIGTERM while an input was being imported. A signal that reaches a `-follow` run between two inputs ends it with `0`: while it waits for the next scan, while it scans, and while it was hashing an input for `-verify-md5` (that input is left `stopped` in the tracking database) |
 
 ## Tracking database
@@ -546,7 +551,12 @@ mbox-importer -data /tank0/go-pugleaf/data -status
 
 - **One group per article.** The target group is the first group of the article's `Newsgroups:`
   header, or `-group NAME`. Crossposts are not processed: the article is filed in that one group
-  only, which is how the fetcher's bulk mode works. Missing groups are created (active) on the fly.
+  only, which is how the fetcher's bulk mode works. Missing groups are created (active) on the fly,
+  but only for an article that passed the processor's bulk checks (see **Rejected** below): an
+  article these checks refuse creates no group and no group database. A group can still stay
+  empty when the processor fails after it was created for another reason (no group database
+  could be opened: counted as an error) or when a broken article passes every check (a glued
+  `Newsgroups:` with no duplicate header after it).
 - **Header rewrite** before the article is handed to the processor:
   - `Xref:`, `Expires:`, `X-Mbox2nntp-Format:` and stray `From ` lines (with their continuation
     lines) are dropped;
@@ -567,7 +577,9 @@ mbox-importer -data /tank0/go-pugleaf/data -status
   taken off every header and body line that starts with `>`s followed by `From ` or `#! rnews `
   (old archive mboxes are not quoted: there a `>From ` line is part of the article as posted).
 - **Already present** articles (the Message-ID is already in the target group) are counted as
-  `present` and not processed again.
+  `present` and not processed again. The lookup runs after the processor's bulk checks, so an
+  article stored by an older version that the checks refuse now (a control message, for example)
+  counts as `rejected`, not as `present`, when it is read again. Its stored copy is not touched.
 - **Threading uses `References:` only.** A reply that is imported before its parent gets no thread
   root. Import the files of a group in chronological order (archive mbox files usually are);
   `recover-db -data <dir> -group NAME -rebuild-threads -force` rebuilds the thread relationships
@@ -597,7 +609,57 @@ still applies, because the processor requires the header.
 9 groups in `Newsgroups:`, no valid group name at all in `Newsgroups:` (only possible with
 `-group`), an empty `From:`, a `Date:` that cannot be parsed or lies more than 24 h
 in the future, or a duplicate core header (`Date`, `From`, `Message-ID`, `Newsgroups`, `Path`,
-`Subject`). Each rejection is logged with the processor's error.
+`Subject`), a control message (`Control:` header) or a NUL in the body. Each rejection is logged
+with the processor's error (`[MBOX-IMPORT] rejected msgid=… group=…: rejected: …`) and its
+Message-ID is remembered in the history index, like the fetcher does. The importer runs these
+checks (`processor.CheckBulkArticle`) before it creates the target group, so a rejected article
+creates no group (the cases above that can still leave an empty group remain); the versions up
+to 0.6.20 created the group first (see [Dropping empty groups](#dropping-empty-groups)).
+
+## Dropping empty groups
+
+Up to version 0.6.20 the importer created the target group before the processor checked the
+article, so every group that only ever saw rejected articles (cancel and newgroup control
+messages, `comp.sys.cbm.ctl`, truncated articles with the next message's `From ` line glued onto
+`Newsgroups:`) stayed behind empty. `-drop-empty-groups FILE` deletes them again:
+
+```bash
+# FILE: one group name per line, blank lines and lines starting with # are ignored
+mbox-importer -data /path/to/data -dry-run -drop-empty-groups empty-groups.txt   # what would go
+mbox-importer -data /path/to/data -drop-empty-groups empty-groups.txt
+```
+
+- A listed group is deleted only when its `newsgroups` row exists with `message_count` 0 (or NULL)
+  **and** its group database has no article (it is opened read-only; a missing file counts as
+  empty). Every other listed group is skipped and logged with the reason (`no newsgroups row`,
+  `message_count=…`, `group database has articles`); groups not in the list are never looked at.
+  A group database with an article is never removed.
+- The deletable groups are deleted in chunks of 500 like the web admin's bulk delete: set
+  inactive, then `BulkDeleteNewsgroups` (the row, its section memberships, spam flags and spam
+  rows), then each row is checked gone. If the delete of a chunk fails, its groups get their
+  earlier `active` value back and are skipped; the other chunks still run (exit 1). Only for a
+  group whose row is gone are the group database files (`.db`, `-wal`, `-shm`) removed, and the
+  `db/<md5>` directory when it is empty then; this also happens for the deleted chunks when a
+  later chunk failed.
+- **File-only cleanup:** a listed name without a `newsgroups` row whose group database file is
+  still there and holds no article (an earlier cleanup deleted the row and then stopped) gets
+  its files removed (`removed the files of group=… (file-only cleanup)`). Without a file it is
+  skipped as `no newsgroups row`; with articles it is kept.
+- `-dry-run` opens the main and group databases read-only and only lists (`would delete
+  group=…`, `would remove the files of group=…`).
+- One summary line: `[MBOX-IMPORT] drop-empty-groups done: listed=… empty=… deleted=…
+  file-only=… files-removed=… skipped=… check-errors=… file-errors=… dry-run=…`. Exit code 0
+  (skipped groups included), 1 when the list or a database could not be read, a group's check
+  or a chunk's delete failed, a file could not be removed, or an import run is unfinished.
+- `-data` must be given explicitly (exit 2 otherwise), and a `-data` without
+  `cfg/pugleaf.sq3` is refused: nothing is created.
+- Never run it while an importer or another go-pugleaf process writes to the same `-data`: a
+  group could get its first article between the check and the delete. Every unfinished run in
+  the tracking database refuses the cleanup (exit 1): a run whose process is still alive on this
+  host always; a run of another host (it cannot be checked from here) or of a process of this
+  host that is gone (killed, crashed) unless `-force-stale-runs` says these runs are known to be
+  dead. A dry run only logs what a real run would refuse. An importer with `-trackdb off`
+  cannot be seen.
 
 ## Near-misses
 
