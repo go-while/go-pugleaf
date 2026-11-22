@@ -972,9 +972,11 @@ type processorInput struct {
 
 // Handle builds the article and runs the processor's article-only bulk checks first: an
 // article they refuse (a control message, a broken header block, a bad date, ...) counts as
-// rejected and never creates its group or the group's database, so a run leaves no empty
-// group behind (plan importer-empty-groups). Only then the group is created, an article
-// already in it counts as present, and the rest goes to ProcessArticle.
+// rejected and never creates its group or the group's database (plan importer-empty-groups).
+// Only then the group is created, an article already in it counts as present, and the rest
+// goes to ProcessArticle. A group can still stay empty when ProcessArticle fails after that
+// for another reason (no group database could be opened) or when a broken article passes
+// every check.
 func (p *processorInput) Handle(msgid string, art func() (*models.Article, error), group string) (bool, bool, error) {
 	s := p.sink
 	article, err := art()

@@ -26,10 +26,12 @@ type bulkChecked struct {
 // every one is a refusal ProcessArticle remembers (rememberBulkReject).
 //
 // It changes neither the article nor the history, the message-id cache or a database: it
-// reads the MaxCrossPosts setting (and under RunRSLIGHTImport extractGroupsFromHeaders reads
-// the sections). verbose prints ProcessArticle's log lines (the reject lines, the accepted
-// header defects, the date fallback and the once-per-group control line for legacyNewsgroup);
-// without it only extractGroupsFromHeaders still logs an invalid group name.
+// reads the MaxCrossPosts setting (which logs when that read fails), and under
+// RunRSLIGHTImport extractGroupsFromHeaders reads the sections and registers a batch group
+// pointer for each name. verbose prints ProcessArticle's log lines (the reject lines, the
+// accepted header defects, the date fallback and the once-per-group control line for
+// legacyNewsgroup); without it only extractGroupsFromHeaders still logs an invalid group
+// name.
 func (proc *Processor) bulkArticleChecks(article *models.Article, legacyNewsgroup string, verbose bool) (bulkChecked, error) {
 	var res bulkChecked
 	rejected := func(reason string) error {
@@ -128,12 +130,14 @@ func (proc *Processor) bulkArticleChecks(article *models.Article, legacyNewsgrou
 // CheckBulkArticle reports whether ProcessArticle's bulk path refuses article for a reason of
 // the article alone: nil, or the error ProcessArticle(article, group, true) returns for it
 // (wrapping common.ErrIntakeRejected, with the same reason). A bulk caller runs it before it
-// creates the target group or opens the group's database, so an article that can never be
-// stored leaves no empty group behind (plan importer-empty-groups).
+// creates the target group or opens the group's database, so an article these checks refuse
+// creates no group (plan importer-empty-groups).
 //
-// It has no side effects: no history lookup or write, no message-id cache entry, no capture
-// slot, no database write and no log line of its own (an invalid name in Newsgroups is still
-// logged by the group parser); the article is not changed. The caller owns the article (it is
+// It has no side effects on the article, the history (no lookup or write), the message-id
+// cache, the capture slots or a database (no write), and it logs no line of its own, with
+// these exceptions: the group parser still logs an invalid name in Newsgroups, the
+// MaxCrossPosts read logs when it fails, and under RunRSLIGHTImport the group parser reads
+// the sections and registers a batch group pointer per name. The caller owns the article (it is
 // not locked here). An article it passes may still be refused by ProcessArticle for a reason
 // of the group. ProcessArticle refuses an article it refuses the same way and also remembers
 // the message-id as rejected (rememberBulkReject): a caller that drops the article instead of

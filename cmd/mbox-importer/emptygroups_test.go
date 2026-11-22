@@ -81,7 +81,13 @@ func TestMboxCmdRejectedCreatesNoGroup(t *testing.T) {
 // group database.
 func deMakeGroup(t *testing.T, db *database.Database, name string, withFile bool) {
 	t.Helper()
-	if err := db.InsertNewsgroup(&models.Newsgroup{Name: name, Description: "drop-empty-groups", Active: true, Status: "y", LowWater: 1}); err != nil {
+	deMakeGroupActive(t, db, name, withFile, true)
+}
+
+// deMakeGroupActive is deMakeGroup with the given active value.
+func deMakeGroupActive(t *testing.T, db *database.Database, name string, withFile, active bool) {
+	t.Helper()
+	if err := db.InsertNewsgroup(&models.Newsgroup{Name: name, Description: "drop-empty-groups", Active: active, Status: "y", LowWater: 1}); err != nil {
 		t.Fatalf("InsertNewsgroup %s: %v", name, err)
 	}
 	if withFile {
@@ -182,7 +188,7 @@ func TestMboxCmdDropEmptyGroups(t *testing.T) {
 	for _, want := range []string{
 		fmt.Sprintf("[MBOX-IMPORT] drop-empty-groups: deleted group=%q", empty),
 		fmt.Sprintf("[MBOX-IMPORT] drop-empty-groups: skipped group=%q: no newsgroups row", missing),
-		"[MBOX-IMPORT] drop-empty-groups done: listed=4 empty=2 deleted=2 skipped=2 check-errors=0 file-errors=0 dry-run=false",
+		"[MBOX-IMPORT] drop-empty-groups done: listed=4 empty=2 deleted=2 file-only=0 files-removed=0 skipped=2 check-errors=0 file-errors=0 dry-run=false",
 	} {
 		if !strings.Contains(logs.String(), want) {
 			t.Errorf("log lacks %q\n%s", want, logs.String())
@@ -204,14 +210,19 @@ func TestMboxCmdDropEmptyGroups(t *testing.T) {
 	}
 }
 
-// TestMboxCmdDropEmptyGroupsRefused: bad command lines exit 2; a -data without a main
-// database and a live import run of the tracking database exit 1 and change nothing.
+// TestMboxCmdDropEmptyGroupsRefused: bad command lines exit 2 (also without an explicit
+// -data); a -data without a main database exits 1 and creates nothing; an unfinished run of
+// the tracking database refuses the cleanup: one alive on this host always, one of another
+// host unless -force-stale-runs; a dry run only logs it.
 func TestMboxCmdDropEmptyGroupsRefused(t *testing.T) {
 	list := miWrite(t, t.TempDir(), "drop.txt", "t.refused.a\n")
 	for _, args := range [][]string{
 		{"-drop-empty-groups", list, "x.mbox"},
 		{"-drop-empty-groups", list, "-status"},
 		{"-drop-empty-groups", list, "-from-iafetch", "ia.sqlite"},
+		{"-drop-empty-groups", list},             // no explicit -data
+		{"-drop-empty-groups", list, "-dry-run"}, // no explicit -data
+		{"-force-stale-runs", "x.mbox"},          // only with -drop-empty-groups
 	} {
 		if code, _ := miRun(t, args...); code != 2 {
 			t.Errorf("%q: exit %d, want 2", args, code)
@@ -234,15 +245,169 @@ func TestMboxCmdDropEmptyGroupsRefused(t *testing.T) {
 		t.Fatalf("import exit %d", code)
 	}
 	miWithDB(t, data, func(db *database.Database) { deMakeGroup(t, db, "t.refused.a", false) })
-	// a run row of this very process, not finished: a live import
-	self := trackSelf()
 	raw := mtRaw(t, filepath.Join(data, "cfg"))
-	if _, err := database.RetryableExec(raw, `INSERT INTO runs (started, host, pid, boot_id, pstart) VALUES (?, ?, ?, ?, ?)`,
-		trackNow(), self.host, self.pid, self.bootID, self.pstart); err != nil {
-		t.Fatalf("insert run: %v", err)
+	insertRun := func(host string, pid int, bootID string, pstart int64) int64 {
+		t.Helper()
+		res, err := database.RetryableExec(raw, `INSERT INTO runs (started, host, pid, boot_id, pstart) VALUES (?, ?, ?, ?, ?)`,
+			trackNow(), host, pid, bootID, pstart)
+		if err != nil {
+			t.Fatalf("insert run: %v", err)
+		}
+		id, err := res.LastInsertId()
+		if err != nil {
+			t.Fatalf("insert run: %v", err)
+		}
+		return id
 	}
-	if code, _ := miRun(t, "-data", data, "-drop-empty-groups", list); code != 1 {
-		t.Errorf("live import run: exit %d, want 1", code)
+
+	// a run row of this very process, not finished: a live import, refused even with -force-stale-runs
+	self := trackSelf()
+	liveID := insertRun(self.host, self.pid, self.bootID, self.pstart)
+	for _, args := range [][]string{
+		{"-data", data, "-drop-empty-groups", list},
+		{"-data", data, "-force-stale-runs", "-drop-empty-groups", list},
+	} {
+		if code, _ := miRun(t, args...); code != 1 {
+			t.Errorf("live import run %q: exit %d, want 1", args, code)
+		}
+	}
+	// a dry run goes on (it changes nothing) and lists
+	if code, _ := miRun(t, "-data", data, "-dry-run", "-drop-empty-groups", list); code != 0 || lastDrop == nil || len(lastDrop.deletable) != 1 {
+		t.Errorf("dry run next to a live run: exit %d, result %+v; want 0 and the group listed", code, lastDrop)
 	}
 	miCheckGroups(t, data, map[string][]string{"t.refused.a": nil}, nil)
+
+	// the live run ends; an unfinished run of another host is refused unless -force-stale-runs
+	if _, err := database.RetryableExec(raw, `UPDATE runs SET finished = ? WHERE id = ?`, trackNow(), liveID); err != nil {
+		t.Fatalf("finish run: %v", err)
+	}
+	insertRun("other-host.invalid", 4242, "", 0)
+	if code, _ := miRun(t, "-data", data, "-drop-empty-groups", list); code != 1 {
+		t.Errorf("stale run of another host: exit %d, want 1", code)
+	}
+	miCheckGroups(t, data, map[string][]string{"t.refused.a": nil}, nil)
+	if code, _ := miRun(t, "-data", data, "-force-stale-runs", "-drop-empty-groups", list); code != 0 {
+		t.Errorf("-force-stale-runs: exit %d, want 0", code)
+	}
+	miCheckGroups(t, data, nil, nil, "t.refused.a")
+}
+
+// TestMboxCmdDropEmptyGroupsChunkFailure: with several chunks, a chunk whose delete fails (a
+// test trigger refuses the delete of one of its rows) keeps its groups with their earlier
+// active values and their files, while the chunks before and after it are deleted with their
+// files, and the summary says so. A re-run removes the files of a listed name whose row is
+// gone (file-only cleanup) but keeps a group database that holds articles.
+func TestMboxCmdDropEmptyGroupsChunkFailure(t *testing.T) {
+	miNeedDB(t)
+	miSetup(t)
+	oldChunk := dropChunk
+	dropChunk = 2
+	t.Cleanup(func() { dropChunk = oldChunk })
+	data := filepath.Join(t.TempDir(), "data")
+	const (
+		c1a, c1b    = "t.chunk.c1a", "t.chunk.c1b"
+		c2a, c2b    = "t.chunk.c2a", "t.chunk.c2b" // c2a: delete refused; c2b: inactive before
+		c3a         = "t.chunk.c3a"
+		orphan      = "t.chunk.orphan"     // row deleted, empty group database left
+		orphanFull  = "t.chunk.orphanfull" // row deleted, group database with an article left
+		idOrphanArt = "<orphanfull@chunk.test.invalid>"
+	)
+	in := miWrite(t, t.TempDir(), "g.mbox", miArticle(idOrphanArt, orphanFull, "full"))
+	if code, _ := miRun(t, "-data", data, in); code != 0 {
+		t.Fatalf("import exit %d", code)
+	}
+	miWithDB(t, data, func(db *database.Database) {
+		for _, g := range []string{c1a, c1b, c2a, c3a, orphan} {
+			deMakeGroup(t, db, g, true)
+		}
+		deMakeGroupActive(t, db, c2b, true, false)
+		// the crash between row delete and file removal: rows gone, files left
+		for _, g := range []string{orphan, orphanFull} {
+			if err := db.UpdateNewsgroupActive(g, false); err != nil {
+				t.Fatalf("deactivate %s: %v", g, err)
+			}
+			if ok, err := db.DeleteNewsgroup(g); err != nil || !ok {
+				t.Fatalf("DeleteNewsgroup %s: %t, %v", g, ok, err)
+			}
+		}
+		if _, err := db.GetMainDB().Exec(`CREATE TRIGGER drop_test_block BEFORE DELETE ON newsgroups
+			WHEN old.name = '` + c2a + `' BEGIN SELECT RAISE(ABORT, 'drop test: delete refused'); END`); err != nil {
+			t.Fatalf("create trigger: %v", err)
+		}
+	})
+	file := func(g string) string { _, f := groupDBFiles(data, g); return f }
+	list := miWrite(t, t.TempDir(), "drop.txt", strings.Join([]string{c1a, c1b, c2a, c2b, c3a}, "\n")+"\n")
+
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	code, _ := miRun(t, "-data", data, "-drop-empty-groups", list)
+	log.SetOutput(os.Stderr)
+	if code != 1 {
+		t.Fatalf("exit %d, want 1 (a chunk failed)\n%s", code, logs.String())
+	}
+	res := lastDrop
+	if res == nil || strings.Join(res.deleted, ",") != strings.Join([]string{c1a, c1b, c3a}, ",") || res.fileErrors != 0 {
+		t.Fatalf("result %+v, want %s,%s,%s deleted", res, c1a, c1b, c3a)
+	}
+	if want := "deleted=3 file-only=0 files-removed=0 skipped=2"; !strings.Contains(logs.String(), want) {
+		t.Errorf("summary lacks %q\n%s", want, logs.String())
+	}
+	for _, g := range []string{c1a, c1b, c3a} {
+		if miExists(file(g)) {
+			t.Errorf("files of deleted %s still there", g)
+		}
+	}
+	for _, g := range []string{c2a, c2b} {
+		if !miExists(file(g)) {
+			t.Errorf("files of %s (failed chunk) removed", g)
+		}
+	}
+	miWithDB(t, data, func(db *database.Database) {
+		for g, want := range map[string]bool{c2a: true, c2b: false} {
+			ng, err := db.MainDBGetNewsgroup(g)
+			if err != nil {
+				t.Errorf("group %s of the failed chunk: %v", g, err)
+				continue
+			}
+			if ng.Active != want {
+				t.Errorf("group %s active=%t, want %t (its value before the cleanup)", g, ng.Active, want)
+			}
+		}
+		for _, g := range []string{c1a, c1b, c3a} {
+			if _, err := db.MainDBGetNewsgroup(g); err == nil {
+				t.Errorf("group %s still there", g)
+			}
+		}
+	})
+
+	// re-run on the leftovers of an interrupted cleanup
+	list2 := miWrite(t, t.TempDir(), "drop2.txt", orphan+"\n"+orphanFull+"\n"+c1a+"\n")
+	logs.Reset()
+	log.SetOutput(&logs)
+	code, _ = miRun(t, "-data", data, "-drop-empty-groups", list2)
+	log.SetOutput(os.Stderr)
+	if code != 0 {
+		t.Fatalf("re-run exit %d\n%s", code, logs.String())
+	}
+	res = lastDrop
+	if res == nil || strings.Join(res.filesGone, ",") != orphan || len(res.deleted) != 0 {
+		t.Fatalf("re-run result %+v, want file-only cleanup of %s", res, orphan)
+	}
+	skipped := map[string]string{}
+	for _, sk := range res.skipped {
+		skipped[sk.group] = sk.reason
+	}
+	if skipped[orphanFull] != "no newsgroups row, group database has articles (kept)" || skipped[c1a] != "no newsgroups row" {
+		t.Errorf("re-run skipped %v", skipped)
+	}
+	if want := fmt.Sprintf("[MBOX-IMPORT] drop-empty-groups: removed the files of group=%q (no newsgroups row, file-only cleanup)", orphan); !strings.Contains(logs.String(), want) {
+		t.Errorf("log lacks %q\n%s", want, logs.String())
+	}
+	if dir, f := groupDBFiles(data, orphan); miExists(f) || miExists(dir) {
+		t.Errorf("files of %s still there", orphan)
+	}
+	if !miExists(file(orphanFull)) {
+		t.Errorf("group database of %s (with an article) removed", orphanFull)
+	}
 }

@@ -21,8 +21,9 @@ import (
 	"github.com/go-while/go-pugleaf/internal/database"
 )
 
-// dropChunk is the most group names one IN (...) statement of the delete gets.
-const dropChunk = 500
+// dropChunk is the most group names one IN (...) statement of the delete gets (a variable
+// only so the tests can split a short list into several chunks).
+var dropChunk = 500
 
 // dropSkip is a listed group that is not deleted, and why.
 type dropSkip struct {
@@ -31,21 +32,24 @@ type dropSkip struct {
 
 // dropResult is the outcome of one -drop-empty-groups run (tests read it as lastDrop).
 type dropResult struct {
-	listed      int        // distinct names in the list
-	deletable   []string   // passed every check (with -dry-run: would be deleted)
-	deleted     []string   // newsgroups row gone after the delete
-	skipped     []dropSkip // not deleted, with the reason
-	checkErrors int        // listed groups whose check failed (skipped as well)
-	fileErrors  int        // group database files or directories that could not be removed
+	listed      int             // distinct names in the list
+	deletable   []string        // passed every check (with -dry-run: would be deleted)
+	wasActive   map[string]bool // active value of each deletable group as the check read it
+	deleted     []string        // newsgroups row gone after the delete of its chunk
+	fileOnly    []string        // no newsgroups row, but a group database without articles: files only
+	filesGone   []string        // fileOnly groups whose files were removed
+	skipped     []dropSkip      // not deleted, with the reason
+	checkErrors int             // listed groups whose check failed (skipped as well)
+	fileErrors  int             // group database files or directories that could not be removed
 }
 
 // lastDrop is the result of the last -drop-empty-groups run of runWith (tests).
 var lastDrop *dropResult
 
 // runDropEmptyGroups runs -drop-empty-groups and returns the exit code: 0 done (skipped
-// groups included), 1 on an error (list, database, a check that failed, a live import run,
-// a file that could not be removed).
-func runDropEmptyGroups(listPath, dataDir, trackPath string, dryRun bool) int {
+// groups included), 1 on an error (list, database, a check that failed, an unfinished
+// import run, a delete that failed, a file that could not be removed).
+func runDropEmptyGroups(listPath, dataDir, trackPath string, dryRun, forceStale bool) int {
 	lastDrop = nil
 	names, err := readGroupList(listPath)
 	if err != nil {
@@ -58,9 +62,12 @@ func runDropEmptyGroups(listPath, dataDir, trackPath string, dryRun bool) int {
 		log.Printf("[MBOX-IMPORT] -drop-empty-groups: no main database at %q: %v", mainDB, err)
 		return 1
 	}
-	if err := checkNoLiveImport(trackPath); err != nil {
-		log.Printf("[MBOX-IMPORT] -drop-empty-groups: %v", err)
-		return 1
+	if err := checkNoImportRuns(trackPath, forceStale); err != nil {
+		if !dryRun {
+			log.Printf("[MBOX-IMPORT] -drop-empty-groups: %v", err)
+			return 1
+		}
+		log.Printf("[MBOX-IMPORT] drop-empty-groups: dry run goes on (it changes nothing), a real run would refuse: %v", err)
 	}
 	log.Printf("[MBOX-IMPORT] drop-empty-groups: list=%q groups=%d data=%q dry-run=%t", listPath, len(names), dataDir, dryRun)
 	res, err := dropEmptyGroups(names, dataDir, mainDB, dryRun)
@@ -103,10 +110,13 @@ func readGroupList(path string) ([]string, error) {
 	return names, nil
 }
 
-// checkNoLiveImport refuses the cleanup while a run of the tracking database is still going
-// on this host. Without a tracking database (none yet, or -trackdb off) nothing can be
-// checked: the -h text says not to run it next to an importer.
-func checkNoLiveImport(trackPath string) error {
+// checkNoImportRuns refuses the cleanup while the tracking database has an unfinished run.
+// A run whose process is still alive on this host is always refused. Any other unfinished
+// run (of another host, which cannot be checked from here, or of a process of this host
+// that is gone, e.g. killed or crashed) is refused too unless forceStale says these runs
+// are known to be dead. Without a tracking database (none yet, or -trackdb off) nothing can
+// be checked: the -h text says not to run the cleanup next to an importer.
+func checkNoImportRuns(trackPath string, forceStale bool) error {
 	if trackPath == "" {
 		log.Printf("[MBOX-IMPORT] drop-empty-groups: -trackdb off: cannot check for a running import")
 		return nil
@@ -125,22 +135,55 @@ func checkNoLiveImport(trackPath string) error {
 			log.Printf("[MBOX-IMPORT] drop-empty-groups: close tracking database %q: %v", trackPath, cerr)
 		}
 	}()
-	t := &tracker{db: db, path: trackPath} // runID 0: no row of this process
-	live, foreign, err := t.liveRuns()
+	live, stale, err := unfinishedRuns(db)
 	if err != nil {
 		return fmt.Errorf("tracking database %q: %w", trackPath, err)
 	}
-	for id, host := range foreign {
-		log.Printf("[MBOX-IMPORT] drop-empty-groups: run %d of host %q is not finished in the tracking database (not checked: another host)", id, host)
-	}
 	if len(live) > 0 {
-		ids := make([]string, 0, len(live))
-		for id := range live {
-			ids = append(ids, fmt.Sprint(id))
-		}
-		return fmt.Errorf("import run(s) %s of the tracking database %q still running: stop them first", strings.Join(ids, ","), trackPath)
+		return fmt.Errorf("import run(s) %s of the tracking database %q still running on this host: stop them first",
+			strings.Join(live, ", "), trackPath)
 	}
+	if len(stale) == 0 {
+		return nil
+	}
+	if !forceStale {
+		return fmt.Errorf("unfinished import run(s) %s in the tracking database %q (another host, or a process that is gone): "+
+			"stop them first, or, when they are known to be dead (crashed), run again with -force-stale-runs",
+			strings.Join(stale, ", "), trackPath)
+	}
+	log.Printf("[MBOX-IMPORT] drop-empty-groups: -force-stale-runs: unfinished run(s) %s taken as dead", strings.Join(stale, ", "))
 	return nil
+}
+
+// unfinishedRuns reads the runs rows without a finished time: live are the ones whose
+// process still runs on this host (trackProcAlive), stale all others. Each entry reads
+// "id (host pid)".
+func unfinishedRuns(db *sql.DB) (live, stale []string, err error) {
+	rows, err := database.RetryableQuery(db,
+		`SELECT id, COALESCE(host, ''), COALESCE(pid, 0), COALESCE(boot_id, ''), COALESCE(pstart, 0)
+			FROM runs WHERE finished IS NULL ORDER BY id`)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read runs: %w", err)
+	}
+	defer rows.Close()
+	self := trackSelf()
+	for rows.Next() {
+		var row trackProc
+		var id int64
+		if err := rows.Scan(&id, &row.host, &row.pid, &row.bootID, &row.pstart); err != nil {
+			return nil, nil, fmt.Errorf("read runs: %w", err)
+		}
+		desc := fmt.Sprintf("%d (host %q pid %d)", id, row.host, row.pid)
+		if trackProcAlive(row, self) {
+			live = append(live, desc)
+		} else {
+			stale = append(stale, desc)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("read runs: %w", err)
+	}
+	return live, stale, nil
 }
 
 // groupDBFiles returns the directory and the database file of group, the layout GetGroupDB
@@ -155,84 +198,116 @@ func roDSN(path string) string {
 	return "file:" + (&url.URL{Path: path}).EscapedPath() + "?mode=ro&_busy_timeout=10000"
 }
 
-// dropEmptyGroups checks every name and, unless dryRun, deletes the ones that passed: they
-// are set inactive and deleted with BulkDeleteNewsgroups (the dependent rows of the web
-// admin's bulk delete), then the files of every group whose row is really gone are removed.
-// The checks only read (the main database and the group databases are opened read-only).
+// dropVerdict is what dropCheck decided for one listed group.
+type dropVerdict int
+
+const (
+	dropSkipIt   dropVerdict = iota // leave it alone (reason says why)
+	dropDelete                      // row with 0 articles, no article in the group database
+	dropFileOnly                    // no row, a group database without articles: remove its files
+)
+
+// dropEmptyGroups checks every name and, unless dryRun, deletes the ones that passed, chunk by
+// chunk: set inactive, deleted with BulkDeleteNewsgroups (the dependent rows of the web
+// admin's bulk delete), the rows checked gone. A chunk whose delete fails gets its groups'
+// earlier active values back, and the next chunks still run. Then the files of every group
+// whose row is really gone, and of every file-only group, are removed. The checks only read
+// (the main database and the group databases are opened read-only).
 func dropEmptyGroups(names []string, dataDir, mainDB string, dryRun bool) (*dropResult, error) {
-	res := &dropResult{listed: len(names)}
+	res := &dropResult{listed: len(names), wasActive: make(map[string]bool)}
 	ro, err := sql.Open("sqlite3", roDSN(mainDB))
 	if err != nil {
 		return res, fmt.Errorf("open %s: %w", mainDB, err)
 	}
 	for _, name := range names {
-		reason, err := dropCheck(ro, dataDir, name)
-		if err != nil {
+		verdict, reason, active, err := dropCheck(ro, dataDir, name)
+		switch {
+		case err != nil:
 			res.checkErrors++
 			res.skipped = append(res.skipped, dropSkip{name, "check failed: " + err.Error()})
-			continue
-		}
-		if reason != "" {
+		case verdict == dropDelete:
+			res.deletable = append(res.deletable, name)
+			res.wasActive[name] = active
+		case verdict == dropFileOnly:
+			res.fileOnly = append(res.fileOnly, name)
+		default:
 			res.skipped = append(res.skipped, dropSkip{name, reason})
-			continue
 		}
-		res.deletable = append(res.deletable, name)
 	}
 	if err := ro.Close(); err != nil {
 		return res, fmt.Errorf("close %s: %w", mainDB, err)
 	}
-	if dryRun || len(res.deletable) == 0 {
+	if dryRun {
 		return res, nil
 	}
 
-	cfg := database.DefaultDBConfig()
-	cfg.DataDir = dataDir
-	cfg.BackupDir = filepath.Join(dataDir, "backups")
-	db, err := database.OpenDatabase(cfg)
-	if err != nil {
-		return res, fmt.Errorf("open database: %w", err)
+	var deleteErr error
+	if len(res.deletable) > 0 {
+		cfg := database.DefaultDBConfig()
+		cfg.DataDir = dataDir
+		cfg.BackupDir = filepath.Join(dataDir, "backups")
+		db, err := database.OpenDatabase(cfg)
+		if err != nil {
+			return res, fmt.Errorf("open database: %w", err)
+		}
+		deleteErr = dropRows(db, res)
+		if !shutdown(nil, db) {
+			deleteErr = errors.Join(deleteErr, errors.New("database shutdown failed"))
+		}
 	}
-	deleteErr := dropRows(db, res)
-	if !shutdown(nil, db) && deleteErr == nil {
-		deleteErr = errors.New("database shutdown failed")
-	}
-	// the files go only after the rows are gone (res.deleted) and the database is closed
+	// the files go only after the rows are gone (res.deleted) and the database is closed;
+	// also when a later chunk failed, so no deleted group keeps orphan files
 	for _, name := range res.deleted {
 		res.fileErrors += removeGroupDBFiles(dataDir, name)
+	}
+	for _, name := range res.fileOnly {
+		if n := removeGroupDBFiles(dataDir, name); n > 0 {
+			res.fileErrors += n
+			continue
+		}
+		res.filesGone = append(res.filesGone, name)
 	}
 	return res, deleteErr
 }
 
-// dropCheck returns "" when group may be deleted, else the reason it is skipped. An error is
-// a check that could not be made (the group is skipped with it).
-func dropCheck(ro *sql.DB, dataDir, group string) (string, error) {
+// dropCheck decides for one listed group: dropDelete when its row says 0 articles (active is
+// the row's active value) and its group database has none, dropFileOnly when it has no row
+// but a group database without articles (a group whose row an earlier cleanup deleted before
+// it could remove the files), else dropSkipIt with the reason. A group database with an
+// article is never touched. An error is a check that could not be made.
+func dropCheck(ro *sql.DB, dataDir, group string) (verdict dropVerdict, reason string, active bool, err error) {
 	var count int64
-	var active bool
-	err := database.RetryableQueryRowScan(ro, `SELECT COALESCE(message_count, 0), active FROM newsgroups WHERE name = ?`,
+	err = database.RetryableQueryRowScan(ro, `SELECT COALESCE(message_count, 0), active FROM newsgroups WHERE name = ?`,
 		[]interface{}{group}, &count, &active)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "no newsgroups row", nil
+	noRow := errors.Is(err, sql.ErrNoRows)
+	if err != nil && !noRow {
+		return dropSkipIt, "", false, fmt.Errorf("read newsgroups row: %w", err)
 	}
-	if err != nil {
-		return "", fmt.Errorf("read newsgroups row: %w", err)
-	}
-	if count != 0 {
-		return fmt.Sprintf("message_count=%d (active=%t)", count, active), nil
+	if !noRow && count != 0 {
+		return dropSkipIt, fmt.Sprintf("message_count=%d (active=%t)", count, active), active, nil
 	}
 	_, file := groupDBFiles(dataDir, group)
 	if _, err := os.Stat(file); errors.Is(err, os.ErrNotExist) {
-		return "", nil // no group database: nothing in it
+		if noRow {
+			return dropSkipIt, "no newsgroups row", false, nil
+		}
+		return dropDelete, "", active, nil // no group database: nothing in it
 	} else if err != nil {
-		return "", fmt.Errorf("group database %s: %w", file, err)
+		return dropSkipIt, "", false, fmt.Errorf("group database %s: %w", file, err)
 	}
 	has, err := groupDBHasArticles(file)
 	if err != nil {
-		return "", fmt.Errorf("group database %s: %w", file, err)
+		return dropSkipIt, "", false, fmt.Errorf("group database %s: %w", file, err)
 	}
-	if has {
-		return fmt.Sprintf("group database has articles (message_count=0, active=%t)", active), nil
+	switch {
+	case has && noRow:
+		return dropSkipIt, "no newsgroups row, group database has articles (kept)", false, nil
+	case has:
+		return dropSkipIt, fmt.Sprintf("group database has articles (message_count=0, active=%t)", active), active, nil
+	case noRow:
+		return dropFileOnly, "", false, nil
 	}
-	return "", nil
+	return dropDelete, "", active, nil
 }
 
 // groupDBHasArticles opens a group database read-only and reports whether its articles
@@ -250,33 +325,69 @@ func groupDBHasArticles(file string) (bool, error) {
 	return has, err
 }
 
-// dropRows sets the deletable groups inactive and deletes them (BulkDeleteNewsgroups only
-// deletes inactive ones), in chunks of dropChunk, then puts every group whose row is gone
-// into res.deleted. A group whose row is still there is skipped (it stays inactive).
+// dropRows deletes the deletable groups in chunks of dropChunk: set inactive
+// (BulkDeleteNewsgroups only deletes inactive groups), delete, then every group of the chunk
+// whose row is gone goes into res.deleted right away. When the delete of a chunk fails (its
+// transaction normally rolled back), the groups of the chunk that were active are set active
+// again and the rows are checked all the same (a row that is gone anyway still counts as
+// deleted); the remaining chunks still run. The errors of all chunks are returned together.
 func dropRows(db *database.Database, res *dropResult) error {
+	var errs []error
 	for start := 0; start < len(res.deletable); start += dropChunk {
 		chunk := res.deletable[start:min(start+dropChunk, len(res.deletable))]
 		if _, err := db.BulkUpdateNewsgroupActive(chunk, false); err != nil {
-			return fmt.Errorf("set %d groups inactive: %w", len(chunk), err)
+			// one transaction: nothing changed
+			errs = append(errs, fmt.Errorf("set %d groups inactive: %w", len(chunk), err))
+			dropSkipChunk(res, chunk, fmt.Sprintf("set inactive failed (unchanged): %v", err))
+			continue
 		}
+		stillThere := "row still there after the delete (now inactive, files kept)"
 		n, err := db.BulkDeleteNewsgroups(chunk)
 		if err != nil {
-			return fmt.Errorf("delete %d groups (set inactive already): %w", len(chunk), err)
+			errs = append(errs, fmt.Errorf("delete %d groups: %w", len(chunk), err))
+			stillThere = fmt.Sprintf("delete failed (%v): %s, files kept", err, dropRestoreActive(db, res, chunk))
+		} else {
+			log.Printf("[MBOX-IMPORT] drop-empty-groups: deleted %d of %d newsgroups rows", n, len(chunk))
 		}
-		log.Printf("[MBOX-IMPORT] drop-empty-groups: deleted %d of %d newsgroups rows", n, len(chunk))
-	}
-	for _, name := range res.deletable {
-		_, err := db.MainDBGetNewsgroup(name)
-		switch {
-		case errors.Is(err, sql.ErrNoRows):
-			res.deleted = append(res.deleted, name)
-		case err != nil:
-			res.skipped = append(res.skipped, dropSkip{name, fmt.Sprintf("row check after the delete failed (files kept): %v", err)})
-		default:
-			res.skipped = append(res.skipped, dropSkip{name, "row still there after the delete (now inactive, files kept)"})
+		for _, name := range chunk {
+			_, err := db.MainDBGetNewsgroup(name)
+			switch {
+			case errors.Is(err, sql.ErrNoRows):
+				res.deleted = append(res.deleted, name)
+			case err != nil:
+				res.skipped = append(res.skipped, dropSkip{name, fmt.Sprintf("row check after the delete failed (files kept): %v", err)})
+			default:
+				res.skipped = append(res.skipped, dropSkip{name, stillThere})
+			}
 		}
 	}
-	return nil
+	return errors.Join(errs...)
+}
+
+// dropRestoreActive sets the groups of chunk that were active before the cleanup active
+// again (the inactive ones stay as they were) and says how that went.
+func dropRestoreActive(db *database.Database, res *dropResult, chunk []string) string {
+	var wasActive []string
+	for _, name := range chunk {
+		if res.wasActive[name] {
+			wasActive = append(wasActive, name)
+		}
+	}
+	if len(wasActive) == 0 {
+		return "none was active before"
+	}
+	if _, err := db.BulkUpdateNewsgroupActive(wasActive, true); err != nil {
+		log.Printf("[MBOX-IMPORT] drop-empty-groups: restoring active=1 of %d groups failed, they stay inactive: %v", len(wasActive), err)
+		return fmt.Sprintf("restoring active=1 of %d groups failed, they stay inactive: %v", len(wasActive), err)
+	}
+	return fmt.Sprintf("active=1 restored for %d groups", len(wasActive))
+}
+
+// dropSkipChunk reports every group of a chunk that was not deleted.
+func dropSkipChunk(res *dropResult, chunk []string, reason string) {
+	for _, name := range chunk {
+		res.skipped = append(res.skipped, dropSkip{name, reason})
+	}
 }
 
 // removeGroupDBFiles removes the database files of group (.db, -wal, -shm) and its md5
@@ -314,11 +425,17 @@ func logDropResult(res *dropResult, dryRun bool) {
 		for _, g := range res.deletable {
 			log.Printf("[MBOX-IMPORT] drop-empty-groups: would delete group=%q", g)
 		}
+		for _, g := range res.fileOnly {
+			log.Printf("[MBOX-IMPORT] drop-empty-groups: would remove the files of group=%q (no newsgroups row, no article in its group database)", g)
+		}
 	} else {
 		for _, g := range res.deleted {
 			log.Printf("[MBOX-IMPORT] drop-empty-groups: deleted group=%q", g)
 		}
+		for _, g := range res.filesGone {
+			log.Printf("[MBOX-IMPORT] drop-empty-groups: removed the files of group=%q (no newsgroups row, file-only cleanup)", g)
+		}
 	}
-	log.Printf("[MBOX-IMPORT] drop-empty-groups done: listed=%d empty=%d deleted=%d skipped=%d check-errors=%d file-errors=%d dry-run=%t",
-		res.listed, len(res.deletable), len(res.deleted), len(res.skipped), res.checkErrors, res.fileErrors, dryRun)
+	log.Printf("[MBOX-IMPORT] drop-empty-groups done: listed=%d empty=%d deleted=%d file-only=%d files-removed=%d skipped=%d check-errors=%d file-errors=%d dry-run=%t",
+		res.listed, len(res.deletable), len(res.deleted), len(res.fileOnly), len(res.filesGone), len(res.skipped), res.checkErrors, res.fileErrors, dryRun)
 }
