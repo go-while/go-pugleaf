@@ -124,7 +124,7 @@ func importSpool(path string, kind spoolKind, opts *runOptions, sink articleSink
 		c = newCounters(path)
 	}
 	c.Group = opts.group
-	stopped = errors.Is(readErr, errStopped)
+	stopped = errors.Is(readErr, errStopped) || c.admissionStopped
 	if readErr != nil && !stopped {
 		// a 7z of the terminal's process group is killed by Ctrl-C as well; a walk that
 		// ended with another error only stopped when the signal is what ended it

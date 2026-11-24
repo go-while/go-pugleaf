@@ -242,14 +242,18 @@ summary line. The log lines of parallel inputs interleave; each carries its `fil
 
 ### Throughput
 
-The batch writer commits a group's articles as soon as `-max-batch` of them are queued for that
-group, otherwise every 3 seconds. It stops taking articles from the readers when 80 % of
-`-max-queue` are queued over all groups and resumes at 20 %. The two limits have to fit together:
-with N inputs in flight the N groups share the queue, so N × `-max-batch` must stay below 80 % of
-`-max-queue`, or no group ever fills a batch and the import crawls along at the 3-second timer
-(about `-max-queue` articles per 3 seconds, whatever `-parallel` is). The default `-max-queue 0`
-keeps that invariant by itself; set it explicitly only to bound memory (each queued article is
-held in full) or when `-group` funnels all inputs into one group.
+The batch writer can start a group as soon as `-max-batch` articles are queued for it. Smaller
+groups flush on a timer that runs sooner as the backlog grows. The writer brakes the readers
+when the total across groups reaches 80 % of `-max-queue` and resumes at 20 %. The default
+`-max-queue 0` sizes the queue for multiple full batches. A lower explicit limit uses less queue
+memory when backlogged and can produce more partial batches. Each queued article is held in
+full.
+
+With history enabled, readers reserve capacity in a separate 20,000-operation history budget
+before sending articles to the batch writer. Committed articles enter history with their assigned
+group and article numbers. The history writer releases capacity after each flush. Raising
+`-max-queue` leaves the history budget at 20,000. If a history write fails and the writer can
+shut down normally, the importer logs the error and exits with an error status.
 
 The input is renamed to `INPUT.done` when all of these hold:
 

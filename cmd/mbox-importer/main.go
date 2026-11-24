@@ -339,7 +339,7 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		return 1
 	}
 
-	res := importScans(planned, scan, opts, newProcessorSink(db, proc), stop, track)
+	res := importScans(planned, scan, opts, newProcessorSink(db, proc, stop), stop, track)
 	res.InputErrors += len(expandErrs)
 	res.Inputs += len(expandErrs)
 	logTotals(res)

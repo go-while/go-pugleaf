@@ -120,8 +120,13 @@ func miSetup(t *testing.T) {
 // miNewProcessor is processor.NewProcessorE without the hostname check
 // (cmd/nntp-server/server_e2e_test.go does the same).
 func miNewProcessor(db *database.Database, hashLen int) (*processor.Processor, error) {
+	return miNewProcessorWithBatch(db, hashLen, history.DefaultBatchSize)
+}
+
+func miNewProcessorWithBatch(db *database.Database, hashLen, batchSize int) (*processor.Processor, error) {
 	cfg := history.DefaultConfig()
 	cfg.HistoryDir = filepath.Join(db.GetDataDir(), "history")
+	cfg.BatchSize = batchSize
 	cfg.BatchTimeout = 50 // ms
 	cfg.MaxConnections = 4
 	cfg.UseShortHashLen = hashLen
@@ -230,8 +235,7 @@ func miCheckGroups(t *testing.T, dir string, want map[string][]string, ids []str
 	})
 }
 
-// miCheckHistory checks that the history index under dir knows every id.
-func miCheckHistory(t *testing.T, dir string, ids ...string) {
+func miWithHistory(t *testing.T, dir string, fn func(*history.History)) {
 	t.Helper()
 	oldEnable := history.ENABLE_HISTORY
 	history.ENABLE_HISTORY = true
@@ -249,12 +253,20 @@ func miCheckHistory(t *testing.T, dir string, ids ...string) {
 			t.Errorf("history close: %v", err)
 		}
 	}()
-	for _, id := range ids {
-		ok, err := h.Exists(id)
-		if err != nil || !ok {
-			t.Errorf("history Exists(%s) = %t, %v", id, ok, err)
+	fn(h)
+}
+
+// miCheckHistory checks that the history index under dir knows every id.
+func miCheckHistory(t *testing.T, dir string, ids ...string) {
+	t.Helper()
+	miWithHistory(t, dir, func(h *history.History) {
+		for _, id := range ids {
+			ok, err := h.Exists(id)
+			if err != nil || !ok {
+				t.Errorf("history Exists(%s) = %t, %v", id, ok, err)
+			}
 		}
-	}
+	})
 }
 
 // miCheck compares the totals of a run.

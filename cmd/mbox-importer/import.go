@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/md5"
 	"encoding/hex"
 	"errors"
@@ -40,6 +41,7 @@ type counters struct {
 	Read, Stored, Present, Rejected, Errors, ParserSkipped, NearMisses int
 	Skipped                                                            map[skipReason]int
 	StoppedEarly, Unread, MarkedDone                                   bool
+	admissionStopped                                                   bool
 	CommitFailed                                                       bool // the commit wait of the input failed
 	// news spool inputs (-spool, disc images; plan mbox-import-discs), 0 for an mbox input:
 	Files        int // regular files walked
@@ -301,6 +303,8 @@ func handleLines(c *counters, rawHead, body []string, isBinary bool, opts *runOp
 	build := func() (*models.Article, error) { return buildArticle(msgid, head, body) }
 	stored, present, err := sink.Handle(msgid, build, group)
 	switch {
+	case errors.Is(err, errStopped):
+		c.admissionStopped = true
 	case errors.Is(err, errRejected):
 		c.Rejected++
 		log.Printf("[MBOX-IMPORT] rejected msgid=%s group=%s: %v", msgid, group, err)
@@ -792,7 +796,7 @@ func importInput(path string, opts *runOptions, sink articleSink, stop <-chan st
 	in := sink.beginInput()
 	c, readErr := readMbox(src, opts, in, stop)
 	c.Group = opts.group
-	stopped = errors.Is(readErr, errStopped)
+	stopped = errors.Is(readErr, errStopped) || c.admissionStopped
 	c.Unread = src.Unread() // before Close: Close kills a 7z that was not read to its end
 	closeErr := src.Close()
 	if closeErr != nil {
@@ -944,12 +948,14 @@ func (s *countingSink) endInput(time.Duration) error { return nil }
 type processorSink struct {
 	db      *database.Database
 	proc    *processor.Processor
+	stop    <-chan struct{}
 	mu      sync.Mutex      // ensured
 	ensured map[string]bool // groups created or found this run
 }
 
-func newProcessorSink(db *database.Database, proc *processor.Processor) *processorSink {
-	return &processorSink{db: db, proc: proc, ensured: make(map[string]bool)}
+func newProcessorSink(db *database.Database, proc *processor.Processor, stop <-chan struct{}) *processorSink {
+	proc.History.EnableArticleAdmission()
+	return &processorSink{db: db, proc: proc, stop: stop, ensured: make(map[string]bool)}
 }
 
 func (s *processorSink) beginInput() inputSink {
@@ -1022,8 +1028,16 @@ func (p *processorInput) Handle(msgid string, art func() (*models.Article, error
 		return false, true, nil
 	}
 
-	// the capture goroutine owns the article after the call: never read it again
-	res, err := s.proc.ProcessArticle(article, group, true)
+	// Wait here, outside the batch writer and after returning the group handle.
+	slot, err := s.proc.History.ReserveArticle(s.stop)
+	if errors.Is(err, context.Canceled) {
+		return false, false, errStopped
+	}
+	if err != nil {
+		return false, false, fmt.Errorf("reserve article history: %w", err)
+	}
+	// The capture goroutine owns the article and its slot after the call.
+	res, err := s.proc.ProcessImportedArticle(article, group, slot)
 	switch {
 	case res == history.CasePass && err == nil:
 		return true, false, nil

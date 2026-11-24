@@ -134,6 +134,9 @@ func importUAT(path string, opts *runOptions, sink articleSink, stop <-chan stru
 			body = nil
 		}
 		handleLines(c, head, body, isBinary, opts, in)
+		if c.admissionStopped {
+			return errStopped
+		}
 		if c.Read%progressEvery == 0 {
 			log.Printf("[MBOX-IMPORT] progress file=%q read=%d of %d stored=%d present=%d skipped=%d rejected=%d errors=%d",
 				path, c.Read, p.Count(), c.Stored, c.Present, c.skippedTotal(), c.Rejected, c.Errors)
