@@ -263,7 +263,8 @@ func statPlanned(in plannedInput) plannedInput {
 // subfolder ("sub/dir/NAME"), so only its base name decides.
 //
 // A disc image (.iso, .cdr, .sqsh, .img; isDiscImage, case-insensitive) is supported: it is
-// unpacked with the 7z program and read as a news spool. Every other name has to pass both
+// unpacked with the 7z program and read as a news spool, and so is a .tar.gz / .tgz news
+// spool (isTarSpool, streamed, targz.go). Every other name has to pass both
 // halves of the importer's own rule: isInputName (the rule of the directory scan in
 // inputs.go) and a suffix openSource has a reader for (iaReadableSuffixes or a UAT archive)
 // — isInputName only looks for ".mbox"/".bag" anywhere in the name, so a mirror file like
@@ -272,7 +273,7 @@ func statPlanned(in plannedInput) plannedInput {
 // here either (an upper-case "F.ISO" is, because a disc image is decided case-insensitively).
 func iafetchSupported(name string) (bool, string) {
 	base := filepath.Base(filepath.FromSlash(name))
-	if isDiscImage(base) && !strings.HasSuffix(strings.ToLower(base), ".done") {
+	if (isDiscImage(base) || isTarSpool(base)) && !strings.HasSuffix(strings.ToLower(base), ".done") {
 		// isDiscImage ignores a trailing ".done" (a positional input can be imported
 		// again), but a ".done" name in the mirror is not an input, as for an mbox. The
 		// check is case-insensitive like isDiscImage itself ("CD1.ISO.DONE").

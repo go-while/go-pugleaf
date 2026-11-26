@@ -13,7 +13,8 @@ with IHAVE.
   `zstd` program, plus `xz` or `7z`), see [UAT archives](#uat-archives)
 - Reads CD/DVD images and news spools: `.iso`, `.cdr`, `.sqsh` and `.img` images are unpacked into
   `-tmpdir` with the `7z` program and walked article by article, and with `-spool` a directory (a
-  mounted image, an unpacked tree) or a `SPOOL.zip` is walked as it is, see
+  mounted image, an unpacked tree) or a `SPOOL.zip` is walked as it is; `.tar.gz`/`.tgz` spools
+  (the textusenet and gmane archives) are streamed without unpacking, see
   [Disc images and news spools](#disc-images-and-news-spools)
 - Several inputs per run; a directory argument imports its mbox files and UAT archives in name order,
   one after the other or `-parallel N` at a time (CSV files such as archive.org's `NAME.mbox.csv.gz` index are never inputs)
@@ -103,6 +104,7 @@ Import UAT archives after the mbox collections of the same groups, see [UAT arch
 ./build/mbox-importer -data ./data -tmpdir /big/tmp utzoo.sqsh          # 5.2 GB in 2.08M files
 ./build/mbox-importer -data ./data -spool /mnt/netnews-cd               # an image mounted by hand
 ./build/mbox-importer -data ./data -spool NN_1992_25.zip                # a zipped spool, not unpacked
+./build/mbox-importer -data ./data -tmpdir /big/tmp gmane.comp.tar.gz   # a .tar.gz spool, streamed
 ```
 
 `-tmpdir` must have room for the whole unpacked image, so give it a real directory on a big file
@@ -124,8 +126,14 @@ renamed; the copy of a `.usenet.xz`/`.usenet.7z` unpacked into `-tmpdir` is remo
 Each article is filed into exactly one group, the first rule that gives one:
 
 1. `-group NAME`, or the file name's group with `-group-from-name`.
-2. In a disc image or `-spool` input: the group of the article file's directory, when the article
-   lists it (`SPOOL/alt/test/17` → `alt.test`; upper-case ISO 9660 names match too).
+2. In a disc image, `.tar.gz` or `-spool` input: the group of the article file's directory, when
+   the article lists it (`SPOOL/alt/test/17` → `alt.test`; upper-case ISO 9660 names match too).
+   A `.tar.gz` named after a hierarchy, `<prefix>.<top>.tar.gz`, whose member paths start with
+   `<top>/` leaves `<prefix>` out of them, so the directory is taken as below it:
+   `gmane.psychology.tar.gz` holds `psychology/behavior-analysis/.art1`, which gives
+   `gmane.psychology.behavior-analysis` (the longer group wins when the article lists both). A
+   name without a dot (`rec.tar.gz`, `r50.tar.gz`: the textusenet backups, whose paths are the
+   whole group already) adds nothing.
 3. The input's own group, when the article lists it: the group in the file name
    (`alt.amiga.mbox.zip` → `alt.amiga`, also for an mbox file inside a spool) or the name a UAT
    package carries. A file named after a hierarchy (`free.pt.mbox.7z`) gives the first listed group
@@ -192,6 +200,7 @@ Positional arguments are the inputs; at least one is required (except with `-sta
 | `NAME.usenet.xz` | a UAT archive compressed with xz, as published on [usenet.nereid.pl](https://usenet.nereid.pl/): unpacked with `xz -dc -- ARCHIVE` (`-xz`; if xz is not found, `7z e -so -bd -txz -- ARCHIVE`) to `NAME.usenet` in a private subdirectory of `-tmpdir`, then read like `NAME.usenet` |
 | `NAME.usenet.7z` | a UAT archive in 7z, as published on archive.org ([`usenet-uat-pc-games`](https://archive.org/details/usenet-uat-pc-games)): the entry `NAME.usenet` is unpacked with the 7z program (`-7z`) to a private subdirectory of `-tmpdir`, then read like `NAME.usenet` |
 | `IMAGE.iso`, `IMAGE.cdr`, `IMAGE.sqsh`, `IMAGE.img` | a [disc image](#disc-images-and-news-spools) holding a news spool: unpacked with the 7z program (`-7z`) into a private subdirectory of `-tmpdir` (`7z x -y -bd -bso0 -bsp0 -o<dir> -- IMAGE`), walked article by article, and the directory is removed again |
+| `SPOOL.tar.gz`, `SPOOL.tgz` | a [news spool](#targz-spools) packed with tar and gzip (the textusenet and gmane archives): streamed through gzip and tar in one pass, never unpacked, and walked article by article; never read as an mbox |
 | `DIR` | its files whose names contain `.mbox`, `.bag` or `.usenet` and do not end in `.done`, sorted by name; subdirectories are not entered |
 | `DIR` with `-spool` | the directory itself is one input: a [news spool](#disc-images-and-news-spools), walked article by article (a mounted image, an unpacked tree) |
 | `SPOOL.zip` with `-spool` | the zip itself is one input: a news spool read through `archive/zip`, nothing is unpacked |
@@ -209,6 +218,13 @@ spool that holds no article at all; the unpack directory is removed in every cas
 failures, see [Disc images and news spools](#disc-images-and-news-spools). A disc image is an input only when it is named on the command line or comes
 from `-from-iafetch`: a directory scan still looks for mbox files, not for images.
 
+A `.tar.gz` spool that is not gzip, a gzip or tar error anywhere in it (a truncated or corrupt
+archive, a bad tar header, a gzip checksum error at its end) and a spill file that cannot be
+written are input errors as well: the input is not marked done, the members read whole before the
+error stay imported, and the member the error cut short is never stored. The same rules as for a
+disc image hold otherwise; like an image, a `.tar.gz` is an input only when it is named on the
+command line or comes from `-from-iafetch`.
+
 For UAT inputs these are input errors as well: a zstd program that cannot be found (checked before
 anything is unpacked), an xz or 7z that cannot be found (for `.usenet.xz`: neither of them), fails
 or writes nothing, a `.usenet.7z` without the entry `NAME.usenet`, a file that is not a UAT archive
@@ -221,7 +237,7 @@ processor stay stored.
 | Input | Programs |
 |-------|----------|
 | `.mbox`, `.bag`, `.mbox.gz`, `.mbox.zip` | none |
-| a `-spool` directory or `.zip` | none |
+| a `-spool` directory or `.zip`, a `.tar.gz`/`.tgz` spool | none |
 | `.mbox.7z` | 7-Zip (`-7z`) |
 | `.iso`, `.cdr`, `.sqsh`, `.img` | 7-Zip (`-7z`); a build that reads squashfs is needed for `.sqsh` (the `7zip`/`7zz` packages do, the old `p7zip` may not: `7z l utzoo.sqsh` says) |
 | `.usenet` | zstd (`-zstd`) |
@@ -753,6 +769,7 @@ walks such a tree directly instead of expecting a separator-delimited file.
 | `IMAGE.img` | a raw FAT floppy image (the `DOUG.*` Amiga floppies): unpacked with 7z (no FUSE reader) |
 | `-spool DIR` | the directory is walked as it is: a mounted image, an unpacked tree, a copy from a tape |
 | `-spool SPOOL.zip` | the zip is walked through `archive/zip`, nothing is unpacked (`NN_1992_25.zip`) |
+| `SPOOL.tar.gz`, `SPOOL.tgz` | streamed through gzip and tar, nothing is unpacked, see [`.tar.gz` spools](#targz-spools) |
 
 The suffix decides, case-insensitively, with a trailing `.done` ignored like for every other input.
 
@@ -816,6 +833,46 @@ links are counted:
 
 An archive that cannot be opened, a truncated one (7-Zip prints an `ERRORS:` header) and a killed
 7z stay input errors.
+
+### `.tar.gz` spools
+
+The textusenet backups (`textusenet-backup_r/rec.tar.gz`, `r50.tar.gz`, `vifa.tar.gz`) and the gmane
+archives (`gmane.comp.tar.gz`, `gmane.psychology.tar.gz`) of the archive.org mirror are news spools
+packed with tar and gzip: one article per member, `<group path>/.artN`, a binary `.db` per group
+directory and the directory entries. A `.tar.gz` or `.tgz` input is always read as such a spool,
+named on the command line (renamed `NAME.done` afterwards, like an image) or from `-from-iafetch`
+(which lists them as supported; a plain `.tar` stays `unsupported` with the reason `tar`).
+
+A gzip stream cannot be read out of order and these archives are big (`rec.tar.gz` is 381 GiB), so
+the archive is read once from the start, through gzip and tar, and never unpacked:
+
+- **Order.** The archive does not keep the article numbers in order (`.art10124`, `.art1`,
+  `.art10062`, …), so the members of a directory are collected while they come one after the other
+  (a *run*) and walked when the archive moves on to another directory, sorted like any spool
+  directory: `.artN` counts as article number N, so `.art9` comes before `.art10`. A directory that
+  comes back later in the archive is walked again as a run of its own, sorted within itself.
+- **Memory and disk.** A run's members are kept in memory up to 64 MiB (a member over 1 MiB never
+  is); the rest of the run goes to one spill file in `-tmpdir`, which is emptied after each run, so
+  the space needed there is the size of the **largest group directory**, not of the archive (with
+  `-parallel N`: N of them). The spill file is unlinked as soon as it is created, so nothing is
+  left in `-tmpdir` whatever ends the process (`df` sees its space, `ls` does not). The list of a
+  run's members (name and offset, about 80 bytes each) stays in memory: about 80 MB for a group of a
+  million articles. A run that is read back from the spill file reads in article order, not in the
+  order it was written, so put `-tmpdir` on a disk that is good at that (an SSD) for big groups.
+  With `-max-article-size` a one-article member is kept only up to the bytes the cap needs (it is
+  counted as `too-big` all the same), so a huge member costs no more than that.
+- **What is read.** Regular members only, each classified by its content like every spool file (the
+  `.db` files count in `not-article`); directory entries, symbolic and hard links (a crosspost link
+  would import the article twice) and devices are passed over and count nowhere.
+- **Groups.** The member's directory is the spool directory of rule 2 of
+  [Target group](#target-group); a gmane archive's file name supplies the `gmane.` its paths leave
+  out (`gmane.psychology.tar.gz`: `psychology/behavior-analysis/` → `gmane.psychology.behavior-analysis`).
+- **Errors.** A gzip or tar error — a truncated download, a corrupt block, a bad tar header, a gzip
+  checksum error at the end (the stream is read to its very end for that) — ends the input as an
+  input error: it is not marked done, the members read whole before the error are imported, the
+  member it cut short is never stored. The shutdown signal is checked between members; a stopped
+  input is `stopped`, as for every other spool. The summary line has the spool counters
+  (`files=… not-article=…`).
 
 ### What the walk counts
 
