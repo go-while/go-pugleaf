@@ -12,6 +12,7 @@ import (
 	"compress/gzip"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path"
 	"path/filepath"
@@ -856,6 +857,18 @@ func TestMboxTarGzSparseDrain(t *testing.T) {
 		{"old GNU", tgzSparseSegsTar("alt/test/bin", segs, realSize)},
 		{"PAX 1.0", tgzSparsePAX10Tar("alt/test/bin", segs, realSize)},
 	} {
+		// the fixture as archive/tar sees it: one sparse member, expanded to its real size
+		tr := tar.NewReader(bytes.NewReader(f.tar))
+		hdr, err := tr.Next()
+		if err != nil {
+			t.Fatalf("%s: fixture: %v", f.name, err)
+		}
+		n, err := io.Copy(io.Discard, tr)
+		if err != nil || hdr.Name != "alt/test/bin" || hdr.Size != realSize || n != realSize {
+			t.Fatalf("%s: fixture: name=%q size=%d expanded=%d err=%v, want a sparse alt/test/bin of %d bytes",
+				f.name, hdr.Name, hdr.Size, n, err, realSize)
+		}
+
 		c, err := tgzRead(t, "alt.test.tar.gz", tgzGzip(t, f.tar, gzip.DefaultCompression), &runOptions{}, &tgzSink{}, nil)
 		if err != nil || c.Files != 1 || c.NotArticle != 1 || c.FileErrors != 0 {
 			t.Errorf("%s, end blocks: err=%v files=%d not-article=%d file-errors=%d, want nil/1/1/0",
