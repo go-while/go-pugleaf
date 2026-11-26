@@ -40,8 +40,19 @@ func (proc *Processor) setCaseDupes(msgIdItem *history.MessageIdItem, bulkmode b
 //
 // Bulk mode keeps returning CasePass, nil when every target group already stores the article.
 func (proc *Processor) ProcessArticle(article *models.Article, legacyNewsgroup string, bulkmode bool) (int, error) {
+	return proc.processArticle(article, legacyNewsgroup, bulkmode, nil)
+}
+
+// ProcessImportedArticle transfers an mbox reader's reserved history slot to
+// the one group batch that stores the article, or releases it on refusal.
+func (proc *Processor) ProcessImportedArticle(article *models.Article, group string, slot *history.ArticleReservation) (int, error) {
+	return proc.processArticle(article, group, true, slot)
+}
+
+func (proc *Processor) processArticle(article *models.Article, legacyNewsgroup string, bulkmode bool, slot *history.ArticleReservation) (int, error) {
 	// external caller supplies ONLY art *models.Article!
 	if article == nil || article.MessageID == "" {
+		slot.Cancel()
 		return history.CaseError, fmt.Errorf("%w: invalid message-id", common.ErrIntakeRejected)
 	}
 	rejected := func(reason string) error {
@@ -56,6 +67,7 @@ func (proc *Processor) ProcessArticle(article *models.Article, legacyNewsgroup s
 	// remembers its refusals in ProcessIncomingArticle.
 	rejectArticle := func(reason string) error {
 		if bulkmode {
+			slot.Cancel()
 			proc.rememberBulkReject(article)
 		}
 		return rejected(reason)
@@ -67,8 +79,11 @@ func (proc *Processor) ProcessArticle(article *models.Article, legacyNewsgroup s
 	acquired := captureLimit().acquire(true, proc.DB.IsDBshutdown)
 	handedOff := false
 	defer func() {
-		if acquired && !handedOff {
-			captureLimit().release()
+		if !handedOff {
+			if acquired {
+				captureLimit().release()
+			}
+			slot.Cancel()
 		}
 	}()
 
@@ -128,6 +143,7 @@ func (proc *Processor) ProcessArticle(article *models.Article, legacyNewsgroup s
 		checked, err := proc.bulkArticleChecks(article, legacyNewsgroup, true)
 		if err != nil {
 			proc.setCaseDupes(msgIdItem, bulkmode)
+			slot.Cancel()
 			proc.rememberBulkReject(article)
 			return history.CaseError, err
 		}
@@ -362,6 +378,7 @@ func (proc *Processor) ProcessArticle(article *models.Article, legacyNewsgroup s
 		// locks it). len(capture) <= maxCross < cap(ProcessQueue) (sized above from the same read), so the sends to
 		// ProcessQueue never block, and since every target is already in NewsgroupsPtr no
 		// group's batch can clear the article before the last capture was sent.
+		article.HistoryReservation = slot
 		handedOff = true
 		// Commit barrier (A-tools-5b): counted here, synchronously, before the capture
 		// goroutine can reach the batch writer, so a WaitCommitted that starts after this

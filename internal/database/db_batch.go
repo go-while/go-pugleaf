@@ -233,6 +233,7 @@ func (sq *SQ3batch) BatchCaptureOverviewForLater(newsgroupPtr *string, article *
 		sq.captureDropOnce.Do(func() {
 			log.Printf("[BATCH] capture after Shutdown dropped")
 		})
+		cancelHistoryReservations([]*models.Article{article})
 		sq.settleArticles(newsgroupPtr, 1, true) // commit barrier: never stored
 	}
 }
@@ -821,6 +822,19 @@ func updateNewsgroupStatsWithRetry(exec func() error, every time.Duration, what 
 	}
 }
 
+func cancelHistoryReservations(articles []*models.Article) {
+	for _, article := range articles {
+		if article == nil {
+			continue
+		}
+		article.Mux.Lock()
+		slot := article.HistoryReservation
+		article.HistoryReservation = nil
+		article.Mux.Unlock()
+		slot.Cancel()
+	}
+}
+
 // processNewsgroupBatch processes a single newsgroup's batch in the correct sequential order:
 // 1. Complete article insertion (unified overview + article data)
 // 2. Threading processing (relationships)
@@ -897,6 +911,7 @@ retry1:
 		log.Printf("[BATCH] dropping %d articles for '%s': %v", len(batches), *task.Newsgroup, lastErr)
 	})
 	if err != nil {
+		cancelHistoryReservations(batches)
 		sq.settleArticles(task.Newsgroup, len(batches), true) // commit barrier: dropped
 		return
 	}
@@ -912,6 +927,7 @@ retry1:
 		if insertClock.expired(sq.db.IsDBshutdown) {
 			log.Printf("[BATCH] dropping %d articles for '%s': insert still failing %v into shutdown (%d attempts): %v",
 				len(batches), *task.Newsgroup, insertGrace, insertAttempts, err)
+			cancelHistoryReservations(batches)
 			sq.settleArticles(task.Newsgroup, len(batches), true) // commit barrier: dropped
 			return
 		}
@@ -1009,6 +1025,7 @@ retry1:
 		committed := articleNum > 0
 		msgIdItem := article.MsgIdItem
 		dateSent := article.DateSent
+		slot := article.HistoryReservation
 		article.Mux.RUnlock()
 		if messageID != "" {
 			// Committed or ignored as a duplicate, the article is stored in this group either
@@ -1022,9 +1039,15 @@ retry1:
 			}
 			// An ignored duplicate is already in history (or was added by the batch that
 			// stored it): no re-add (A-db-3).
-			if historyOK && committed {
-				sq.proc.AddArticleToHistory(messageID, historyGroupID, articleNum)
+		}
+		if slot != nil {
+			if _, wroteArticle := inserted[article]; wroteArticle {
+				slot.Publish(messageID, historyGroupID, articleNum)
+			} else {
+				slot.Cancel()
 			}
+		} else if messageID != "" && historyOK && committed {
+			sq.proc.AddArticleToHistory(messageID, historyGroupID, articleNum)
 		}
 		// Every committed article counts for updated_at, also one still referenced by other
 		// groups (A-db-4: a batch of crossposts used to leave latestDate zero).
@@ -1075,6 +1098,7 @@ retry1:
 		article.BodyText = ""
 		article.Path = ""
 		article.ArticleNums = nil
+		article.HistoryReservation = nil
 		article.NewsgroupsPtr = nil
 		article.NNTPhead = nil
 		article.NNTPbody = nil
@@ -2280,6 +2304,7 @@ func (sq *SQ3batch) BatchDivider() {
 		default:
 			article.Mux.Unlock()
 			log.Printf("Error in BatchDivider, received task (%#v) but no newsgroupPtr", article)
+			cancelHistoryReservations([]*models.Article{article})
 			continue
 		}
 
@@ -2292,6 +2317,7 @@ func (sq *SQ3batch) BatchDivider() {
 			for {
 				select {
 				case <-stop:
+					cancelHistoryReservations([]*models.Article{article})
 					sq.settleArticles(newsgroupPtr, 1, true) // commit barrier: never stored
 					return
 				case <-time.After(16 * time.Millisecond):
@@ -2326,6 +2352,7 @@ func (sq *SQ3batch) BatchDivider() {
 				sq.GMux.Lock()
 				sq.queued--
 				sq.GMux.Unlock()
+				cancelHistoryReservations([]*models.Article{article})
 				sq.settleArticles(newsgroupPtr, 1, true) // commit barrier: never stored
 				return
 			}

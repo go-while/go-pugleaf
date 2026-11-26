@@ -71,6 +71,9 @@ type History struct {
 	// Writer queue: small value ops, no shared pointers
 	opChan  chan historyOp
 	pending atomic.Int64 // ops counted but not yet committed (queued, in channel or in current batch)
+	// Optional importer budget, initialized before any operation is submitted.
+	admission    chan struct{}
+	admissionErr atomic.Pointer[error]
 
 	// Shutdown signaling
 	closed      atomic.Bool   // set by Close(): no new ops accepted
