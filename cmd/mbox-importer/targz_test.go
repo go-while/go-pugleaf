@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -629,27 +630,97 @@ func tgzSparseTar(name, body string) []byte { return tgzSparseHoleTar(name, body
 // tgzSparseHoleTar is tgzSparseTar with the real size given: past the body, up to realSize,
 // the member is one hole.
 func tgzSparseHoleTar(name, body string, realSize int64) []byte {
-	var blk [512]byte
-	copy(blk[0:100], name)
-	tgzOctal(blk[100:108], 0o644)
-	tgzOctal(blk[108:116], 0)
-	tgzOctal(blk[116:124], 0)
-	tgzOctal(blk[124:136], int64(len(body))) // the bytes stored in the archive
-	tgzOctal(blk[136:148], 1_000_000_000)
-	blk[156] = tar.TypeGNUSparse
-	copy(blk[257:265], "ustar  \x00")
-	tgzOctal(blk[386:398], 0)                // sparse entry 0: offset
-	tgzOctal(blk[398:410], int64(len(body))) // and length
-	tgzOctal(blk[483:495], realSize)         // the real size
+	return tgzSparseSegsTar(name, []tgzSeg{{0, body}}, realSize)
+}
+
+// tgzSeg is one stored segment of a sparse member: its offset in the expanded file and its
+// bytes; between segments the file is a hole.
+type tgzSeg struct {
+	off  int64
+	data string
+}
+
+// tgzChecksum fills in the checksum field of a tar header block.
+func tgzChecksum(blk []byte) {
 	copy(blk[148:156], "        ")
 	var sum int64
 	for _, c := range blk {
 		sum += int64(c)
 	}
 	copy(blk[148:156], fmt.Sprintf("%06o\x00 ", sum))
-	out := append([]byte(nil), blk[:]...)
-	out = append(out, body...)
-	out = append(out, make([]byte, (512-len(body)%512)%512)...)
+}
+
+// tgzPad pads b with zeros to the 512-byte block size.
+func tgzPad(b []byte) []byte { return append(b, make([]byte, (512-len(b)%512)%512)...) }
+
+// tgzSparseSegsTar is a tar holding one old-GNU sparse member with up to 4 stored segments
+// (all in the header's own sparse map), stored one after the other, then the end blocks.
+func tgzSparseSegsTar(name string, segs []tgzSeg, realSize int64) []byte {
+	var stored []byte
+	blk := make([]byte, 512)
+	copy(blk[0:100], name)
+	tgzOctal(blk[100:108], 0o644)
+	tgzOctal(blk[108:116], 0)
+	tgzOctal(blk[116:124], 0)
+	for i, s := range segs {
+		tgzOctal(blk[386+24*i:398+24*i], s.off)              // sparse entry i: offset
+		tgzOctal(blk[398+24*i:410+24*i], int64(len(s.data))) // and length
+		stored = append(stored, s.data...)
+	}
+	tgzOctal(blk[124:136], int64(len(stored))) // the bytes stored in the archive
+	tgzOctal(blk[136:148], 1_000_000_000)
+	blk[156] = tar.TypeGNUSparse
+	copy(blk[257:265], "ustar  \x00")
+	tgzOctal(blk[483:495], realSize) // the real size
+	tgzChecksum(blk)
+	out := append(blk, tgzPad(stored)...)
+	return append(out, make([]byte, 1024)...) // the end-of-archive blocks
+}
+
+// tgzPAXRecord is one PAX record, "<length> <key>=<value>\n", the length counting itself.
+func tgzPAXRecord(k, v string) string {
+	rest := " " + k + "=" + v + "\n"
+	n := len(rest) + 1
+	for len(strconv.Itoa(n))+len(rest) != n {
+		n = len(strconv.Itoa(n)) + len(rest)
+	}
+	return strconv.Itoa(n) + rest
+}
+
+// tgzUstarBlock is a ustar header block.
+func tgzUstarBlock(name string, typ byte, size int64) []byte {
+	blk := make([]byte, 512)
+	copy(blk[0:100], name)
+	tgzOctal(blk[100:108], 0o644)
+	tgzOctal(blk[108:116], 0)
+	tgzOctal(blk[116:124], 0)
+	tgzOctal(blk[124:136], size)
+	tgzOctal(blk[136:148], 1_000_000_000)
+	blk[156] = typ
+	copy(blk[257:263], "ustar\x00")
+	copy(blk[263:265], "00")
+	tgzChecksum(blk)
+	return blk
+}
+
+// tgzSparsePAX10Tar is a tar holding one PAX 1.0 sparse member (what GNU tar writes with
+// --sparse --format=posix): an 'x' header with GNU.sparse.major=1, minor=0, name and
+// realsize, then a regular header whose data starts with the sparse map as text (padded to
+// a block) followed by the stored segments, then the end blocks.
+func tgzSparsePAX10Tar(name string, segs []tgzSeg, realSize int64) []byte {
+	recs := tgzPAXRecord("GNU.sparse.major", "1") + tgzPAXRecord("GNU.sparse.minor", "0") +
+		tgzPAXRecord("GNU.sparse.name", name) + tgzPAXRecord("GNU.sparse.realsize", strconv.FormatInt(realSize, 10))
+	m := strconv.Itoa(len(segs)) + "\n"
+	var stored []byte
+	for _, s := range segs {
+		m += strconv.FormatInt(s.off, 10) + "\n" + strconv.Itoa(len(s.data)) + "\n"
+		stored = append(stored, s.data...)
+	}
+	data := append(tgzPad([]byte(m)), stored...)
+	out := tgzUstarBlock("PaxHeaders.0/"+path.Base(name), tar.TypeXHeader, int64(len(recs)))
+	out = append(out, tgzPad([]byte(recs))...)
+	out = append(out, tgzUstarBlock("GNUSparseFile.0/"+path.Base(name), tar.TypeReg, int64(len(data)))...)
+	out = append(out, tgzPad(data)...)
 	return append(out, make([]byte, 1024)...) // the end-of-archive blocks
 }
 
@@ -756,6 +827,73 @@ func TestMboxTarGzPAXHeaders(t *testing.T) {
 	_, err = tgzRead(t, "alt.test.tar.gz", tgzGzip(t, nil, gzip.DefaultCompression), &runOptions{}, &tgzSink{}, nil)
 	if err == nil {
 		t.Error("empty gzip stream: no error")
+	}
+}
+
+// tgzBinSegs are three stored segments of a binary (non-article) sparse file with holes
+// between them, about 21 KiB stored in all, so most of it lies past the walker's 4096-byte
+// classification read and is left for the drain; the last segment ends in zero blocks.
+func tgzBinSegs() ([]tgzSeg, int64) {
+	bin := strings.Repeat("\x01\xfe\x7f\x80", 1750) // 7000 bytes
+	return []tgzSeg{
+		{0, bin},
+		{16384, bin},
+		{32768, strings.Repeat("\xff", 3000) + strings.Repeat("\x00", 4096)},
+	}, 40000
+}
+
+// TestMboxTarGzSparseDrain: a sparse non-article member whose stored data is much larger
+// than the walker's classification read, last in the archive, in the old-GNU and in the
+// PAX 1.0 format: with the end blocks it is accepted and counted as not-article; cut
+// without them it is refused (the drain reads the stored data the walker left, and the data
+// end comes from that, not from trailing zeros).
+func TestMboxTarGzSparseDrain(t *testing.T) {
+	segs, realSize := tgzBinSegs()
+	for _, f := range []struct {
+		name string
+		tar  []byte
+	}{
+		{"old GNU", tgzSparseSegsTar("alt/test/bin", segs, realSize)},
+		{"PAX 1.0", tgzSparsePAX10Tar("alt/test/bin", segs, realSize)},
+	} {
+		c, err := tgzRead(t, "alt.test.tar.gz", tgzGzip(t, f.tar, gzip.DefaultCompression), &runOptions{}, &tgzSink{}, nil)
+		if err != nil || c.Files != 1 || c.NotArticle != 1 || c.FileErrors != 0 {
+			t.Errorf("%s, end blocks: err=%v files=%d not-article=%d file-errors=%d, want nil/1/1/0",
+				f.name, err, c.Files, c.NotArticle, c.FileErrors)
+		}
+		cut := f.tar[:len(f.tar)-1024]
+		_, err = tgzRead(t, "alt.test.tar.gz", tgzGzip(t, cut, gzip.DefaultCompression), &runOptions{}, &tgzSink{}, nil)
+		if err == nil || !strings.Contains(err.Error(), "end-of-archive") {
+			t.Errorf("%s, no end blocks: err=%v, want tar ended without its end-of-archive blocks", f.name, err)
+		}
+	}
+}
+
+// TestMboxTarGzGlobalHeaderNoPadding: a global PAX header whose data is exactly one block
+// (no padding), last in the archive: accepted with the end blocks, refused when the stream
+// ends right after its data.
+func TestMboxTarGzGlobalHeaderNoPadding(t *testing.T) {
+	value := strings.Repeat("v", 499) // "512 comment=" + 499 + "\n" = 512 bytes
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	if err := tw.WriteHeader(&tar.Header{Typeflag: tar.TypeXGlobalHeader, Name: "pax_global_header",
+		PAXRecords: map[string]string{"comment": value}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	g := buf.Bytes()
+	if len(g) != 512+512+1024 || g[156] != tar.TypeXGlobalHeader {
+		t.Fatalf("unexpected layout: %d bytes, type %q", len(g), g[156])
+	}
+	c, err := tgzRead(t, "alt.tar.gz", tgzGzip(t, g, gzip.DefaultCompression), &runOptions{}, &tgzSink{}, nil)
+	if err != nil || c.Files != 0 {
+		t.Errorf("end blocks: err=%v files=%d, want nil/0", err, c.Files)
+	}
+	_, err = tgzRead(t, "alt.tar.gz", tgzGzip(t, g[:1024], gzip.DefaultCompression), &runOptions{}, &tgzSink{}, nil)
+	if err == nil || !strings.Contains(err.Error(), "end-of-archive") {
+		t.Errorf("cut after its data: err=%v, want tar ended without its end-of-archive blocks", err)
 	}
 }
 
