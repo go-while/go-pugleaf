@@ -567,6 +567,54 @@ func TestMboxTarGzTrailingData(t *testing.T) {
 	}
 }
 
+// TestMboxTarGzEndBlocks: a tar that ends at a member boundary without its end-of-archive
+// blocks (a partial tar, compressed whole: the gzip stream is intact) is an input error and
+// not marked done, also when the last member's data ends in zero blocks; one zero block and
+// then the end of the stream is accepted, as Go's reader accepts it.
+func TestMboxTarGzEndBlocks(t *testing.T) {
+	full := tgzTar(t, []tgzEntry{
+		{name: "alt/a/.art1", body: tgzArticle("<e1@targz.test.invalid>", "alt.a")},
+		{name: "alt/a/.art2", body: tgzArticle("<e2@targz.test.invalid>", "alt.a")},
+	})
+	zeros := tgzTar(t, []tgzEntry{
+		{name: "alt/a/.art1", body: tgzArticle("<e1@targz.test.invalid>", "alt.a")},
+		{name: "alt/a/.db", body: strings.Repeat("\x00", 2048)},
+	})
+	for _, c := range []struct {
+		name string
+		tar  []byte
+		ok   bool
+	}{
+		{"both end blocks", full, true},
+		{"one end block", full[:len(full)-512], true},
+		{"no end blocks", full[:len(full)-1024], false},
+		{"no end blocks, last member all zeros", zeros[:len(zeros)-1024], false},
+		{"last member all zeros, end blocks", zeros, true},
+	} {
+		c1, err := tgzRead(t, "alt.tar.gz", tgzGzip(t, c.tar, gzip.DefaultCompression), &runOptions{}, &tgzSink{}, nil)
+		switch {
+		case c.ok && err != nil:
+			t.Errorf("%s: err=%v, want nil", c.name, err)
+		case !c.ok && (err == nil || !strings.Contains(err.Error(), "end-of-archive")):
+			t.Errorf("%s: err=%v, want tar ended without its end-of-archive blocks", c.name, err)
+		}
+		if c1.Read < 1 { // the members before the cut are read either way
+			t.Errorf("%s: read=%d, want at least 1", c.name, c1.Read)
+		}
+	}
+
+	dir := t.TempDir()
+	p := filepath.Join(dir, "alt.tar.gz")
+	if err := os.WriteFile(p, tgzGzip(t, full[:len(full)-1024], gzip.DefaultCompression), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res := importInputs([]string{p}, &runOptions{markDone: true}, &tgzSink{}, nil)
+	if res.InputErrors != 1 || res.MarkedDone != 0 || miExists(p+".done") {
+		t.Errorf("no end blocks: input-errors=%d marked-done=%d renamed=%v, want 1/0/false",
+			res.InputErrors, res.MarkedDone, miExists(p+".done"))
+	}
+}
+
 // tgzOctal writes v as a NUL-terminated octal field of a tar header.
 func tgzOctal(dst []byte, v int64) {
 	copy(dst, fmt.Sprintf("%0*o", len(dst)-1, v))

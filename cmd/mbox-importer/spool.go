@@ -481,9 +481,10 @@ func isXrefPointerName(name string) bool {
 }
 
 // spoolNameLess orders the entries of one spool directory: article numbers (all-digit names,
-// year directories, and the ".artN" files of a .tar.gz spool) come first in numeric order,
-// so 10 comes after 9, and every other name after them in lexical order. Both halves are ordered among themselves,
-// which keeps the comparison a total order even for names such as "5.XRF".
+// year directories, and ".artN" files as in the textusenet and gmane spools) come first in
+// numeric order, so 10 comes after 9, and every other name after them in lexical order.
+// Both halves are ordered among themselves, which keeps the comparison a total order even
+// for names such as "5.XRF".
 func spoolNameLess(a, b string) bool {
 	an, aok := spoolArticleNumber(a)
 	bn, bok := spoolArticleNumber(b)

@@ -90,8 +90,9 @@ func openTarSpool(path string) (io.Reader, func(), error) {
 //
 // It returns errStopped (with the counters so far) when stop was closed between two
 // members (or two articles of an mbox member). A gzip or tar error (a truncated or corrupt
-// archive, a bad header, a checksum error at its end) and data after the end of the tar
-// (errTarTrailing) are returned as an error, so the input is an input error and is not
+// archive, a bad header, a checksum error at its end), a tar that ends without its
+// end-of-archive blocks (errTarNoEnd) and data after them (errTarTrailing) are returned as
+// an error, so the input is an input error and is not
 // marked done. A one-article member the error cut short is never handed over (the walker
 // reads it whole first); the members before it stay imported, as the messages of an mbox
 // read before its gzip stream broke. An mbox or A-news member is streamed, as in every
@@ -102,14 +103,21 @@ func readTarSpool(r io.Reader, label string, opts *runOptions, sink inputSink, s
 	if w.stopped() {
 		return w.c, errStopped
 	}
-	tr := tar.NewReader(r)
+	pr := &tarPosReader{r: r}
+	tr := tar.NewReader(pr)
 	var src spoolErrReader // the archive's read errors inside a member
+	var dataEnd int64      // where the data of the last member ends (padded); -1: unknown
 	for {
 		if w.stopped() {
 			return w.c, errStopped
 		}
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
+			// the reader also says io.EOF when the stream simply ends at a header boundary:
+			// a tar cut between two members is no complete archive
+			if !pr.endBlocksAfter(dataEnd) {
+				return w.c, errTarNoEnd
+			}
 			// tar stops at its end-of-archive blocks: the rest of the stream must be zero
 			// padding, and reading it to its end checks the gzip checksum and length too
 			return w.c, w.tarTrailer(r)
@@ -117,6 +125,7 @@ func readTarSpool(r io.Reader, label string, opts *runOptions, sink inputSink, s
 		if err != nil {
 			return w.c, fmt.Errorf("reading the archive: %w", err)
 		}
+		dataEnd = tarDataEnd(hdr, pr.pos)
 		if !tarIsFile(hdr.Typeflag) {
 			continue // a directory, a link (a crosspost would import twice), a device
 		}
@@ -133,6 +142,63 @@ func readTarSpool(r io.Reader, label string, opts *runOptions, sink inputSink, s
 			return w.c, fmt.Errorf("reading the archive: member %q: %w", name, src.err)
 		}
 	}
+}
+
+// errTarNoEnd: the tar stream ended without its end-of-archive blocks (cut between two
+// members, e.g. a partial tar compressed whole).
+var errTarNoEnd = errors.New("tar ended without its end-of-archive blocks")
+
+// tarPosReader counts the bytes the tar reader takes and where the run of zero bytes that
+// ends at the current position started, so that an io.EOF of tar.Reader.Next can be told
+// apart: after end-of-archive blocks, or at a bare header boundary. It does not implement
+// io.Seeker, so the tar reader reads (and skips) every byte through it.
+type tarPosReader struct {
+	r        io.Reader
+	pos      int64 // bytes read
+	zeroFrom int64 // the start of the zero bytes ending at pos (== pos after a non-zero byte)
+}
+
+func (p *tarPosReader) Read(b []byte) (int, error) {
+	n, err := p.r.Read(b)
+	for i := n - 1; i >= 0; i-- {
+		if b[i] != 0 {
+			p.zeroFrom = p.pos + int64(i) + 1
+			break
+		}
+	}
+	p.pos += int64(n)
+	return n, err
+}
+
+// endBlocksAfter reports whether at least one whole 512-byte block of zeros (an end-of-
+// archive block; Go's reader takes one followed by the end of the stream as well) was read
+// after dataEnd, the end of the last member's padded data (0 before the first member), and
+// nothing but zeros since dataEnd. When dataEnd is unknown (-1: the last member was sparse,
+// its stored size is not in the header Next returns), the last 512 bytes read must be zeros.
+func (p *tarPosReader) endBlocksAfter(dataEnd int64) bool {
+	if dataEnd < 0 {
+		return p.pos-p.zeroFrom >= 512
+	}
+	return p.pos-dataEnd >= 512 && p.zeroFrom <= dataEnd
+}
+
+// tarDataEnd returns where the data of the member hdr ends in the stream, padded to the
+// block size, when its header ended at pos: header-only types (links, directories, devices)
+// have none, a sparse member's stored size is not known (-1), every other member stores
+// hdr.Size bytes.
+func tarDataEnd(hdr *tar.Header, pos int64) int64 {
+	switch hdr.Typeflag {
+	case tar.TypeLink, tar.TypeSymlink, tar.TypeChar, tar.TypeBlock, tar.TypeDir, tar.TypeFifo:
+		return pos
+	case tar.TypeGNUSparse:
+		return -1
+	}
+	for k := range hdr.PAXRecords {
+		if strings.HasPrefix(k, "GNU.sparse.") {
+			return -1 // a PAX sparse file
+		}
+	}
+	return pos + (hdr.Size+511)/512*512
 }
 
 // tarTrailer reads what follows the tar's end-of-archive blocks to the end of the stream:

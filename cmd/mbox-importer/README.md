@@ -866,16 +866,22 @@ written to `-tmpdir`:
 - **Groups.** The member's directory is the spool directory of rule 2 of
   [Target group](#target-group); a gmane archive's file name supplies the `gmane.` its paths leave
   out (`gmane.psychology.tar.gz`: `psychology/behavior-analysis/` → `gmane.psychology.behavior-analysis`).
+  This file-name rule (the last segment of the name is the top member directory) is meant for
+  gmane-style names. `-group X` forces every article of a `.tar.gz` into `X`, as for every input.
 - **Errors.** A gzip or tar error — a truncated download, a corrupt block, a bad tar header, a gzip
   checksum error at the end (the stream is read to its very end for that) — ends the input as an
   input error: it is not marked done, the members read before the error are imported, an article
   member it cut short is never stored (an mbox member inside the archive is streamed, as in every
-  spool: the message an error cuts short there is handed on as if the member had ended). After the tar's end-of-archive blocks only zero padding may
-  follow: anything else — a second tar in the same gzip stream, two `.tar.gz` files joined with
-  `cat` — is an input error too ("data after the end of the tar archive"), so the second archive is
-  never dropped as if the input were done. The shutdown signal is checked between members; a stopped
-  input is `stopped`, as for every other spool. The summary line has the spool counters
-  (`files=… not-article=…`).
+  spool: the message an error cuts short there is handed on as if the member had ended). A tar that
+  ends between two members without its end-of-archive blocks (a partial tar compressed whole) is
+  an input error too ("tar ended without its end-of-archive blocks"). After the end-of-archive
+  blocks only zero padding may follow: anything else — a second tar in the same gzip stream, two
+  `.tar.gz` files joined with `cat` — is an input error ("data after the end of the tar archive"),
+  so the second archive is never dropped as if the input were done. The shutdown signal is checked
+  between members; a stopped input is `stopped`, as for every other spool. The summary line has the
+  spool counters (`files=… not-article=…`).
+- **No resume.** A stopped or failed `.tar.gz` is read again from the start on the next run; the
+  articles already stored count as `present`.
 
 ### What the walk counts
 
