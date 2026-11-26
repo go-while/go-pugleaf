@@ -104,7 +104,7 @@ Import UAT archives after the mbox collections of the same groups, see [UAT arch
 ./build/mbox-importer -data ./data -tmpdir /big/tmp utzoo.sqsh          # 5.2 GB in 2.08M files
 ./build/mbox-importer -data ./data -spool /mnt/netnews-cd               # an image mounted by hand
 ./build/mbox-importer -data ./data -spool NN_1992_25.zip                # a zipped spool, not unpacked
-./build/mbox-importer -data ./data -tmpdir /big/tmp gmane.comp.tar.gz   # a .tar.gz spool, streamed
+./build/mbox-importer -data ./data gmane.comp.tar.gz                     # a .tar.gz spool, streamed
 ```
 
 `-tmpdir` must have room for the whole unpacked image, so give it a real directory on a big file
@@ -219,9 +219,10 @@ failures, see [Disc images and news spools](#disc-images-and-news-spools). A dis
 from `-from-iafetch`: a directory scan still looks for mbox files, not for images.
 
 A `.tar.gz` spool that is not gzip, a gzip or tar error anywhere in it (a truncated or corrupt
-archive, a bad tar header, a gzip checksum error at its end) and a spill file that cannot be
-written are input errors as well: the input is not marked done, the members read whole before the
-error stay imported, and the member the error cut short is never stored. The same rules as for a
+archive, a bad tar header, a gzip checksum error at its end) and data other than zero padding
+after the end of the tar (a second archive) are input errors as well: the input is not marked
+done, the members read before the error stay imported, and an article member the error cut short
+is never stored. The same rules as for a
 disc image hold otherwise; like an image, a `.tar.gz` is an input only when it is named on the
 command line or comes from `-from-iafetch`.
 
@@ -773,6 +774,11 @@ walks such a tree directly instead of expecting a separator-delimited file.
 
 The suffix decides, case-insensitively, with a trailing `.done` ignored like for every other input.
 
+The directories of an image, a `-spool` tree or a zip are walked in name order with article
+numbers first, numerically: all-digit names (`9` before `10`) and names of the form `.artN` (the
+textusenet and gmane article files, e.g. of an unpacked `.tar.gz`: `.art9` before `.art10`). A
+`.tar.gz` itself is read in archive order (see [`.tar.gz` spools](#targz-spools)).
+
 **Mount, don't unpack** (`-disc-reader`, default `auto`). Unpacking writes every file of the image
 to `-tmpdir` and deletes it again afterwards — for `utzoo.sqsh` 2.08 million small files, which on
 spinning disks takes longer than the import and starves everything else on the pool. A FUSE mount
@@ -844,33 +850,30 @@ named on the command line (renamed `NAME.done` afterwards, like an image) or fro
 (which lists them as supported; a plain `.tar` stays `unsupported` with the reason `tar`).
 
 A gzip stream cannot be read out of order and these archives are big (`rec.tar.gz` is 381 GiB), so
-the archive is read once from the start, through gzip and tar, and never unpacked:
+the archive is read once from the start, through gzip and tar, and never unpacked; nothing is
+written to `-tmpdir`:
 
-- **Order.** The archive does not keep the article numbers in order (`.art10124`, `.art1`,
-  `.art10062`, …), so the members of a directory are collected while they come one after the other
-  (a *run*) and walked when the archive moves on to another directory, sorted like any spool
-  directory: `.artN` counts as article number N, so `.art9` comes before `.art10`. A directory that
-  comes back later in the archive is walked again as a run of its own, sorted within itself.
-- **Memory and disk.** A run's members are kept in memory up to 64 MiB (a member over 1 MiB never
-  is); the rest of the run goes to one spill file in `-tmpdir`, which is emptied after each run, so
-  the space needed there is the size of the **largest group directory**, not of the archive (with
-  `-parallel N`: N of them). The spill file is unlinked as soon as it is created, so nothing is
-  left in `-tmpdir` whatever ends the process (`df` sees its space, `ls` does not). The list of a
-  run's members (name and offset, about 80 bytes each) stays in memory: about 80 MB for a group of a
-  million articles. A run that is read back from the spill file reads in article order, not in the
-  order it was written, so put `-tmpdir` on a disk that is good at that (an SSD) for big groups.
-  With `-max-article-size` a one-article member is kept only up to the bytes the cap needs (it is
-  counted as `too-big` all the same), so a huge member costs no more than that.
-- **What is read.** Regular members only, each classified by its content like every spool file (the
-  `.db` files count in `not-article`); directory entries, symbolic and hard links (a crosspost link
-  would import the article twice) and devices are passed over and count nowhere.
+- **Order.** Every member is read as it comes out of the archive, one at a time. The archive does
+  not keep the article numbers in order (`.art10124`, `.art1`, `.art10062`, …), so neither are the
+  article numbers a group gets in go-pugleaf; the overview sorts by date.
+- **Memory.** As in every spool, a one-article member is read whole before it is handed on: up to
+  `-max-article-size` (the rest is read past and it counts as `too-big`), or whole with
+  `-max-article-size 0`.
+- **What is read.** Regular members (and GNU sparse files, read expanded) only, each classified by
+  its content like every spool file (the `.db` files and empty members count in `not-article`);
+  directory entries, symbolic and hard links (a crosspost link would import the article twice) and
+  devices are passed over and count nowhere.
 - **Groups.** The member's directory is the spool directory of rule 2 of
   [Target group](#target-group); a gmane archive's file name supplies the `gmane.` its paths leave
   out (`gmane.psychology.tar.gz`: `psychology/behavior-analysis/` → `gmane.psychology.behavior-analysis`).
 - **Errors.** A gzip or tar error — a truncated download, a corrupt block, a bad tar header, a gzip
   checksum error at the end (the stream is read to its very end for that) — ends the input as an
-  input error: it is not marked done, the members read whole before the error are imported, the
-  member it cut short is never stored. The shutdown signal is checked between members; a stopped
+  input error: it is not marked done, the members read before the error are imported, an article
+  member it cut short is never stored (an mbox member inside the archive is streamed, as in every
+  spool: the message an error cuts short there is handed on as if the member had ended). After the tar's end-of-archive blocks only zero padding may
+  follow: anything else — a second tar in the same gzip stream, two `.tar.gz` files joined with
+  `cat` — is an input error too ("data after the end of the tar archive"), so the second archive is
+  never dropped as if the input were done. The shutdown signal is checked between members; a stopped
   input is `stopped`, as for every other spool. The summary line has the spool counters
   (`files=… not-article=…`).
 

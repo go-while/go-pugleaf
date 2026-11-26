@@ -248,8 +248,8 @@ func (w *spoolWalker) readFile(name string) error {
 	return w.readOpened(name, f)
 }
 
-// readMember is readFile for a file whose content the caller holds already (a member of a
-// .tar.gz spool, targz.go): it is counted, classified and read the same way.
+// readMember is readFile for a file the caller reads itself (a member of a .tar.gz spool,
+// streamed out of the archive, targz.go): it is counted, classified and read the same way.
 func (w *spoolWalker) readMember(name string, f io.Reader) error {
 	w.c.Files++
 	if isXrefPointerName(name) {

@@ -1,15 +1,17 @@
 package main
 
-// Tests of the .tar.gz news spools (plan importer-targz-spool): numeric order per directory
-// run, the gmane hierarchy prefix from the file name, textusenet naming, members that are
-// passed over, the spill file, truncated and corrupt archives, the stop channel, the
-// -from-iafetch suffix rule and the dry run. The archives are built in the tests.
+// Tests of the .tar.gz news spools (plan importer-targz-spool): members streamed in archive
+// order, the gmane hierarchy prefix from the file name, textusenet naming, members that are
+// passed over, truncated and corrupt archives, data after the end of the tar, GNU sparse
+// members, the stop channel, -max-article-size, the -from-iafetch suffix rule and the dry
+// run. The archives are built in the tests.
 
 import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -124,9 +126,9 @@ func tgzID(dir string, n int) string {
 }
 
 // tgzGamesEntries is a gmane.games.tar.gz in arc1-ca's layout: directory entries, the
-// members of advanced-squad-leader in archive (not numeric) order with the .db among them,
-// a symbolic and a hard link (passed over), and a crossposted article in games/other that
-// lists another gmane group first.
+// members of advanced-squad-leader in archive (not numeric) order with the .db and an empty
+// member among them, a symbolic and a hard link (passed over), and a crossposted article in
+// games/other that lists another gmane group first.
 func tgzGamesEntries() []tgzEntry {
 	asl := "games/advanced-squad-leader"
 	g := "gmane.games.advanced-squad-leader"
@@ -136,6 +138,7 @@ func tgzGamesEntries() []tgzEntry {
 		{name: asl + "/.art10", body: tgzArticle(tgzID(asl, 10), g)},
 		{name: asl + "/.art1", body: tgzArticle(tgzID(asl, 1), g)},
 		{name: asl + "/.db", body: tgzDB},
+		{name: asl + "/.art0"}, // empty
 		{name: asl + "/.art9", body: tgzArticle(tgzID(asl, 9), g)},
 		{name: asl + "/.art99", typ: tar.TypeSymlink, link: ".art1"},
 		{name: asl + "/.art98", typ: tar.TypeLink, link: asl + "/.art1"},
@@ -145,70 +148,31 @@ func tgzGamesEntries() []tgzEntry {
 	}
 }
 
-// tgzGamesWant is what reading tgzGamesEntries hands over, in order.
+// tgzGamesWant is what reading tgzGamesEntries hands over: the archive order.
 func tgzGamesWant() string {
 	asl := "games/advanced-squad-leader"
 	g := "gmane.games.advanced-squad-leader"
 	return strings.Join([]string{
-		tgzID(asl, 1) + " " + g, tgzID(asl, 2) + " " + g, tgzID(asl, 9) + " " + g, tgzID(asl, 10) + " " + g,
+		tgzID(asl, 10) + " " + g, tgzID(asl, 1) + " " + g, tgzID(asl, 9) + " " + g, tgzID(asl, 2) + " " + g,
 		tgzID("games/other", 3) + " gmane.games.other",
 	}, "\n")
 }
 
-// tgzLimits are the run buffer limits a test reads with: the production ones, and ones so
-// small that every member goes through the spill file.
-var tgzLimits = []struct {
-	name                string
-	memLimit, memMember int64
-	spills              bool
-}{
-	{"in memory", tarRunMemory, tarMemberMemory, false},
-	{"spill file", 600, 300, true},
-}
-
-// tgzRead reads data (a .tar.gz) as the input label with the given run limits. The spill
-// file is closed before it returns; run is returned for its counters.
-func tgzRead(t *testing.T, label string, data []byte, opts *runOptions, sink inputSink, stop <-chan struct{},
-	memLimit, memMember int64) (*counters, *tarRun, error) {
+// tgzRead reads data (a .tar.gz) as the input label.
+func tgzRead(t *testing.T, label string, data []byte, opts *runOptions, sink inputSink, stop <-chan struct{}) (*counters, error) {
 	t.Helper()
 	gz, err := gzip.NewReader(bytes.NewReader(data))
 	if err != nil {
 		t.Fatalf("gzip: %v", err)
 	}
-	run := newTarRun(label, opts.tmpDir, memLimit, memMember, opts.maxArticleSize)
-	c, rerr := readTarRuns(gz, run, label, opts, sink, stop)
-	run.close()
-	if run.spill != nil {
-		t.Error("the spill file is still open after close")
-	}
-	return c, run, rerr
+	return readTarSpool(gz, label, opts, sink, stop)
 }
 
-// tgzDirEmpty fails the test when dir holds anything.
-func tgzDirEmpty(t *testing.T, what, dir string) {
-	t.Helper()
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 0 {
-		var names []string
-		for _, e := range entries {
-			names = append(names, e.Name())
-		}
-		t.Errorf("%s: left in the temp dir: %v", what, names)
-	}
-}
-
-// TestMboxTarGzImport is the end-to-end test through the import loop, written against
-// what the base had already (importInputs, iafetchSupported, spoolNameLess): a gmane-style
-// .tar.gz positional input is read as a spool, numerically ordered per directory, filed
-// into the gmane groups and renamed .done. On the base the input was opened as a gzip mbox
-// and failed ("no mbox separator").
+// TestMboxTarGzImport is the end-to-end test through the import loop: a gmane-style
+// .tar.gz positional input is read as a spool in archive order, filed into the gmane groups
+// and renamed .done. On the base the input was opened as a gzip mbox and failed ("no mbox
+// separator").
 func TestMboxTarGzImport(t *testing.T) {
-	if !spoolNameLess(".art9", ".art10") || spoolNameLess(".art10", ".art9") {
-		t.Error("spoolNameLess: .art9 must come before .art10")
-	}
 	if ok, reason := iafetchSupported("gmane.games.tar.gz.BACKUP.2021-03/gmane.games.tar.gz"); !ok {
 		t.Errorf("iafetchSupported(gmane.games.tar.gz) = false (%s), want true", reason)
 	}
@@ -217,9 +181,8 @@ func TestMboxTarGzImport(t *testing.T) {
 	if err := os.WriteFile(p, tgzBuild(t, tgzGamesEntries()), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	tmp := t.TempDir()
 	sink := &tgzSink{}
-	res := importInputs([]string{p}, &runOptions{markDone: true, tmpDir: tmp}, sink, nil)
+	res := importInputs([]string{p}, &runOptions{markDone: true}, sink, nil)
 	if res.Inputs != 1 || res.InputErrors != 0 || res.Stopped {
 		t.Fatalf("inputs=%d input-errors=%d stopped=%v, want 1/0/false", res.Inputs, res.InputErrors, res.Stopped)
 	}
@@ -229,33 +192,24 @@ func TestMboxTarGzImport(t *testing.T) {
 	if res.MarkedDone != 1 || !miExists(p+".done") {
 		t.Errorf("marked-done=%d renamed=%v, want 1/true", res.MarkedDone, miExists(p+".done"))
 	}
-	tgzDirEmpty(t, "import", tmp)
 }
 
-// TestMboxTarGzOrderAndGroups reads the gmane archive in memory and through the spill file:
-// the same order, groups and counters both ways (.db counted as not-article, directories
-// and links nowhere).
-func TestMboxTarGzOrderAndGroups(t *testing.T) {
-	data := tgzBuild(t, tgzGamesEntries())
-	for _, l := range tgzLimits {
-		tmp := t.TempDir()
-		sink := &tgzSink{}
-		c, run, err := tgzRead(t, "/mirror/gmane.games.tar.gz.BACKUP.2021-03/gmane.games.tar.gz", data,
-			&runOptions{tmpDir: tmp}, sink, nil, l.memLimit, l.memMember)
-		if err != nil {
-			t.Fatalf("%s: %v", l.name, err)
-		}
-		if got, want := sink.list(), tgzGamesWant(); got != want {
-			t.Errorf("%s: articles:\n%s\nwant:\n%s", l.name, got, want)
-		}
-		if c.Files != 6 || c.NotArticle != 1 || c.Read != 5 || c.FileErrors != 0 || c.XrefPointers != 0 {
-			t.Errorf("%s: files=%d not-article=%d read=%d file-errors=%d xref=%d, want 6/1/5/0/0",
-				l.name, c.Files, c.NotArticle, c.Read, c.FileErrors, c.XrefPointers)
-		}
-		if (run.spilled > 0) != l.spills {
-			t.Errorf("%s: spilled=%d members", l.name, run.spilled)
-		}
-		tgzDirEmpty(t, l.name, tmp)
+// TestMboxTarGzArchiveOrderAndGroups: the members are handed over in archive order, filed by
+// their directory with the gmane prefix; the .db and the empty member count as not-article,
+// directories and links nowhere.
+func TestMboxTarGzArchiveOrderAndGroups(t *testing.T) {
+	sink := &tgzSink{}
+	c, err := tgzRead(t, "/mirror/gmane.games.tar.gz.BACKUP.2021-03/gmane.games.tar.gz", tgzBuild(t, tgzGamesEntries()),
+		&runOptions{}, sink, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := sink.list(), tgzGamesWant(); got != want {
+		t.Errorf("articles:\n%s\nwant:\n%s", got, want)
+	}
+	if c.Files != 7 || c.NotArticle != 2 || c.Read != 5 || c.FileErrors != 0 || c.XrefPointers != 0 {
+		t.Errorf("files=%d not-article=%d read=%d file-errors=%d xref=%d, want 7/2/5/0/0",
+			c.Files, c.NotArticle, c.Read, c.FileErrors, c.XrefPointers)
 	}
 }
 
@@ -271,11 +225,11 @@ func TestMboxTarGzTextusenet(t *testing.T) {
 		{name: "vifa/soc/other/.art1", body: tgzArticle(tgzID("other", 1), "alt.elsewhere,de.test")},
 	})
 	want := strings.Join([]string{
-		tgzID("glbf", 1) + " vifa.soc.glbf", tgzID("glbf", 2) + " vifa.soc.glbf", tgzID("other", 1) + " alt.elsewhere",
+		tgzID("glbf", 2) + " vifa.soc.glbf", tgzID("glbf", 1) + " vifa.soc.glbf", tgzID("other", 1) + " alt.elsewhere",
 	}, "\n")
 	for _, label := range []string{"textusenet-backup_v/vifa.tar.gz", "r50.tgz"} {
 		sink := &tgzSink{}
-		if _, _, err := tgzRead(t, label, data, &runOptions{}, sink, nil, tarRunMemory, tarMemberMemory); err != nil {
+		if _, err := tgzRead(t, label, data, &runOptions{}, sink, nil); err != nil {
 			t.Fatalf("%s: %v", label, err)
 		}
 		if got := sink.list(); got != want {
@@ -326,7 +280,7 @@ func TestMboxTarGzGroupPrefix(t *testing.T) {
 		{name: "psychology/.art1", body: tgzArticle("<p1@targz.test.invalid>", "gmane.misc,gmane.psychology")},
 	})
 	sink := &tgzSink{}
-	if _, _, err := tgzRead(t, "gmane.psychology.tar.gz", data, &runOptions{}, sink, nil, tarRunMemory, tarMemberMemory); err != nil {
+	if _, err := tgzRead(t, "gmane.psychology.tar.gz", data, &runOptions{}, sink, nil); err != nil {
 		t.Fatal(err)
 	}
 	want := "<ba1@targz.test.invalid> gmane.psychology.behavior-analysis\n<p1@targz.test.invalid> gmane.psychology"
@@ -335,30 +289,14 @@ func TestMboxTarGzGroupPrefix(t *testing.T) {
 	}
 }
 
-// TestMboxTarGzSplitRuns: a directory that comes back later in the archive is a run of its
-// own, each run sorted within itself.
-func TestMboxTarGzSplitRuns(t *testing.T) {
-	art := func(dir string, n int) tgzEntry {
-		return tgzEntry{name: dir + "/.art" + strconv.Itoa(n), body: tgzArticle(tgzID(dir, n), strings.ReplaceAll(dir, "/", "."))}
+// TestMboxTarGzArtNumberOrder: .artN sorts as article number N in a spool directory (an
+// unpacked .tar.gz walked with -spool); all-digit names keep their order.
+func TestMboxTarGzArtNumberOrder(t *testing.T) {
+	if !spoolNameLess(".art9", ".art10") || spoolNameLess(".art10", ".art9") {
+		t.Error("spoolNameLess: .art9 must come before .art10")
 	}
-	data := tgzBuild(t, []tgzEntry{
-		art("alt/a", 2), art("alt/a", 1), art("alt/b", 1), art("alt/a", 4), art("alt/a", 3),
-	})
-	var want []string
-	for _, x := range []struct {
-		dir string
-		n   int
-	}{{"alt/a", 1}, {"alt/a", 2}, {"alt/b", 1}, {"alt/a", 3}, {"alt/a", 4}} {
-		want = append(want, tgzID(x.dir, x.n)+" "+strings.ReplaceAll(x.dir, "/", "."))
-	}
-	for _, l := range tgzLimits {
-		sink := &tgzSink{}
-		if _, _, err := tgzRead(t, "alt.tar.gz", data, &runOptions{tmpDir: t.TempDir()}, sink, nil, l.memLimit, l.memMember); err != nil {
-			t.Fatalf("%s: %v", l.name, err)
-		}
-		if got := sink.list(); got != strings.Join(want, "\n") {
-			t.Errorf("%s: articles:\n%s\nwant:\n%s", l.name, got, strings.Join(want, "\n"))
-		}
+	if !spoolNameLess("9", "10") || !spoolNameLess(".art10", ".db") {
+		t.Error("spoolNameLess: numbers first, numerically")
 	}
 }
 
@@ -376,8 +314,9 @@ func tgzTruncEntries() ([]tgzEntry, string) {
 }
 
 // TestMboxTarGzTruncated: a gzip stream cut in the middle of a member is an input error;
-// the member it cut short is never handed over, the one read whole before it is; through
-// the import loop the input is not marked done and is stopped-early.
+// the member it cut short is never handed over, the one before it is; through the import
+// loop the input is not marked done and is stopped-early. With -max-article-size the cut
+// can fall in the part read past: still an input error, nothing of that member stored.
 func TestMboxTarGzTruncated(t *testing.T) {
 	entries, marker := tgzTruncEntries()
 	// stored deflate blocks: the member's bytes are visible in the compressed stream
@@ -387,20 +326,18 @@ func TestMboxTarGzTruncated(t *testing.T) {
 		t.Fatal("marker not in the stored gzip stream")
 	}
 	data := full[:cut]
-	for _, l := range tgzLimits {
-		tmp := t.TempDir()
+	for _, maxSize := range []int{0, 1024} {
 		sink := &tgzSink{}
-		c, _, err := tgzRead(t, "alt.test.tar.gz", data, &runOptions{tmpDir: tmp}, sink, nil, l.memLimit, l.memMember)
-		if err == nil || errors.Is(err, errStopped) || errors.Is(err, errTarSpill) {
-			t.Errorf("%s: err=%v, want an archive read error", l.name, err)
+		c, err := tgzRead(t, "alt.test.tar.gz", data, &runOptions{maxArticleSize: maxSize}, sink, nil)
+		if err == nil || errors.Is(err, errStopped) {
+			t.Errorf("max %d: err=%v, want an archive read error", maxSize, err)
 		}
 		if got := sink.list(); got != "<small@targz.test.invalid> alt.test" {
-			t.Errorf("%s: articles:\n%s\nwant only the small one", l.name, got)
+			t.Errorf("max %d: articles:\n%s\nwant only the small one", maxSize, got)
 		}
 		if c.Read != 1 {
-			t.Errorf("%s: read=%d, want 1", l.name, c.Read)
+			t.Errorf("max %d: read=%d, want 1", maxSize, c.Read)
 		}
-		tgzDirEmpty(t, l.name, tmp)
 	}
 
 	dir := t.TempDir()
@@ -408,8 +345,7 @@ func TestMboxTarGzTruncated(t *testing.T) {
 	if err := os.WriteFile(p, data, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	sink := &tgzSink{}
-	res := importInputs([]string{p}, &runOptions{markDone: true, tmpDir: t.TempDir()}, sink, nil)
+	res := importInputs([]string{p}, &runOptions{markDone: true}, &tgzSink{}, nil)
 	if res.InputErrors != 1 || res.MarkedDone != 0 || miExists(p+".done") || res.Stopped {
 		t.Errorf("truncated: input-errors=%d marked-done=%d stopped=%v, want 1/0/false",
 			res.InputErrors, res.MarkedDone, res.Stopped)
@@ -421,8 +357,7 @@ func TestMboxTarGzTruncated(t *testing.T) {
 	// a gzip checksum error at the very end, after the tar: still an input error
 	bad := append([]byte(nil), full...)
 	bad[len(bad)-8] ^= 0xff // the CRC-32 of the trailer
-	sink = &tgzSink{}
-	c, _, err := tgzRead(t, "alt.test.tar.gz", bad, &runOptions{}, sink, nil, tarRunMemory, tarMemberMemory)
+	c, err := tgzRead(t, "alt.test.tar.gz", bad, &runOptions{}, &tgzSink{}, nil)
 	if err == nil || !errors.Is(err, gzip.ErrChecksum) {
 		t.Errorf("checksum: err=%v, want gzip.ErrChecksum", err)
 	}
@@ -440,8 +375,7 @@ func TestMboxTarGzCorruptHeader(t *testing.T) {
 	second := 512 + (first+511)/512*512 // the second header
 	raw[second] ^= 0x20                 // a name byte: the header checksum no longer matches
 	sink := &tgzSink{}
-	c, _, err := tgzRead(t, "alt.test.tar.gz", tgzGzip(t, raw, gzip.DefaultCompression), &runOptions{}, sink, nil,
-		tarRunMemory, tarMemberMemory)
+	c, err := tgzRead(t, "alt.test.tar.gz", tgzGzip(t, raw, gzip.DefaultCompression), &runOptions{}, sink, nil)
 	if !errors.Is(err, tar.ErrHeader) {
 		t.Errorf("err=%v, want tar.ErrHeader", err)
 	}
@@ -462,8 +396,8 @@ func TestMboxTarGzCorruptHeader(t *testing.T) {
 }
 
 // TestMboxTarGzStop: the stop channel closed after the first article ends the read as
-// stopped, with the spill file closed and nothing left in -tmpdir; through the import loop
-// the input is stopped and not renamed.
+// stopped before the next member; through the import loop the input is stopped and not
+// renamed.
 func TestMboxTarGzStop(t *testing.T) {
 	var entries []tgzEntry
 	for _, dir := range []string{"alt/a", "alt/b"} {
@@ -473,22 +407,12 @@ func TestMboxTarGzStop(t *testing.T) {
 		}
 	}
 	data := tgzBuild(t, entries)
-	for _, l := range tgzLimits {
-		tmp := t.TempDir()
-		stop := make(chan struct{})
-		var once sync.Once
-		sink := &tgzSink{onHandle: func() { once.Do(func() { close(stop) }) }}
-		c, run, err := tgzRead(t, "alt.tar.gz", data, &runOptions{tmpDir: tmp}, sink, stop, l.memLimit, l.memMember)
-		if !errors.Is(err, errStopped) {
-			t.Errorf("%s: err=%v, want errStopped", l.name, err)
-		}
-		if c.Read != 1 {
-			t.Errorf("%s: read=%d, want 1", l.name, c.Read)
-		}
-		if (run.spilled > 0) != l.spills {
-			t.Errorf("%s: spilled=%d", l.name, run.spilled)
-		}
-		tgzDirEmpty(t, l.name, tmp)
+	stop := make(chan struct{})
+	var once sync.Once
+	sink := &tgzSink{onHandle: func() { once.Do(func() { close(stop) }) }}
+	c, err := tgzRead(t, "alt.tar.gz", data, &runOptions{}, sink, stop)
+	if !errors.Is(err, errStopped) || c.Read != 1 {
+		t.Errorf("err=%v read=%d, want errStopped and 1", err, c.Read)
 	}
 
 	dir := t.TempDir()
@@ -496,50 +420,40 @@ func TestMboxTarGzStop(t *testing.T) {
 	if err := os.WriteFile(p, data, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	tmp := t.TempDir()
-	stop := make(chan struct{})
-	var once sync.Once
-	sink := &tgzSink{onHandle: func() { once.Do(func() { close(stop) }) }}
-	res := importInputs([]string{p}, &runOptions{markDone: true, tmpDir: tmp}, sink, stop)
+	stop = make(chan struct{})
+	var once2 sync.Once
+	sink = &tgzSink{onHandle: func() { once2.Do(func() { close(stop) }) }}
+	res := importInputs([]string{p}, &runOptions{markDone: true}, sink, stop)
 	if !res.Stopped || res.InputErrors != 0 || res.MarkedDone != 0 || miExists(p+".done") {
 		t.Errorf("stopped=%v input-errors=%d marked-done=%d, want true/0/0", res.Stopped, res.InputErrors, res.MarkedDone)
 	}
-	tgzDirEmpty(t, "import", tmp)
 }
 
 // TestMboxTarGzMaxArticleSize: with -max-article-size a big one-article member counts as
-// too-big whether it is kept in memory or spilled, and an mbox member over the cap is kept
-// whole (each of its messages is under the cap, the second one starts just before it: cut
-// at the cap it would lose its Message-ID); without the cap the big article is stored.
+// too-big, and an mbox member over the cap is read whole (each of its messages is under the
+// cap); without the cap the big article is stored.
 func TestMboxTarGzMaxArticleSize(t *testing.T) {
 	big := tgzArticle("<big@targz.test.invalid>", "alt.test") + strings.Repeat("x line of the big article\n", 800)
 	mboxFile := miArticle("<m1@targz.test.invalid>", "alt.test", "one") +
 		strings.Repeat("y line of filler text\n", 168) + "\n" + miArticle("<m2@targz.test.invalid>", "alt.test", "two")
-	if n := len(mboxFile) - len(miArticle("<m2@targz.test.invalid>", "alt.test", "two")); n > 4096 || n < 3900 {
-		t.Fatalf("the first mbox message is %d bytes: the test needs it just under the cap", n)
-	}
 	data := tgzBuild(t, []tgzEntry{
 		{name: "alt/test/.art1", body: big},
 		{name: "alt/test/DOUG.PRO", body: mboxFile},
 		{name: "alt/test/.art2", body: tgzArticle("<small@targz.test.invalid>", "alt.test")},
 	})
-	for _, l := range tgzLimits {
-		sink := &tgzSink{}
-		c, _, err := tgzRead(t, "alt.test.tar.gz", data, &runOptions{maxArticleSize: 4096, tmpDir: t.TempDir()},
-			sink, nil, l.memLimit, l.memMember)
-		if err != nil {
-			t.Fatalf("%s: %v", l.name, err)
-		}
-		if c.Skipped[skipTooBig] != 1 || c.Read != 4 {
-			t.Errorf("%s: too-big=%d read=%d, want 1/4", l.name, c.Skipped[skipTooBig], c.Read)
-		}
-		want := "<small@targz.test.invalid> alt.test\n<m1@targz.test.invalid> alt.test\n<m2@targz.test.invalid> alt.test"
-		if got := sink.list(); got != want {
-			t.Errorf("%s: articles:\n%s\nwant:\n%s", l.name, got, want)
-		}
-	}
 	sink := &tgzSink{}
-	c, _, err := tgzRead(t, "alt.test.tar.gz", data, &runOptions{}, sink, nil, tarRunMemory, tarMemberMemory)
+	c, err := tgzRead(t, "alt.test.tar.gz", data, &runOptions{maxArticleSize: 4096}, sink, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Skipped[skipTooBig] != 1 || c.Read != 4 {
+		t.Errorf("too-big=%d read=%d, want 1/4", c.Skipped[skipTooBig], c.Read)
+	}
+	want := "<m1@targz.test.invalid> alt.test\n<m2@targz.test.invalid> alt.test\n<small@targz.test.invalid> alt.test"
+	if got := sink.list(); got != want {
+		t.Errorf("articles:\n%s\nwant:\n%s", got, want)
+	}
+	c, err = tgzRead(t, "alt.test.tar.gz", data, &runOptions{}, &tgzSink{}, nil)
 	if err != nil || c.Skipped[skipTooBig] != 0 || c.Stored != 4 {
 		t.Errorf("no cap: err=%v too-big=%d stored=%d, want nil/0/4", err, c.Skipped[skipTooBig], c.Stored)
 	}
@@ -581,27 +495,25 @@ func TestMboxTarGzInputKind(t *testing.T) {
 	}
 }
 
-// TestMboxTarGzDryRun: a dry run reads and counts the archive per target group, renames
-// nothing and leaves nothing in -tmpdir; a spool without one article is an input error.
+// TestMboxTarGzDryRun: a dry run reads and counts the archive per target group and renames
+// nothing; a spool without one article is an input error.
 func TestMboxTarGzDryRun(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "gmane.games.tar.gz")
 	if err := os.WriteFile(p, tgzBuild(t, tgzGamesEntries()), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	tmp := t.TempDir()
 	sink := newCountingSink()
-	res := importInputs([]string{p}, &runOptions{dryRun: true, markDone: true, tmpDir: tmp}, sink, nil)
+	res := importInputs([]string{p}, &runOptions{dryRun: true, markDone: true}, sink, nil)
 	if res.Inputs != 1 || res.InputErrors != 0 || res.MarkedDone != 0 || miExists(p+".done") {
 		t.Errorf("inputs=%d input-errors=%d marked-done=%d, want 1/0/0", res.Inputs, res.InputErrors, res.MarkedDone)
 	}
 	if sink.groups["gmane.games.advanced-squad-leader"] != 4 || sink.groups["gmane.games.other"] != 1 || len(sink.groups) != 2 {
 		t.Errorf("groups %v, want 4 in gmane.games.advanced-squad-leader and 1 in gmane.games.other", sink.groups)
 	}
-	if pc := res.PerInput[0]; pc.Files != 6 || pc.NotArticle != 1 {
-		t.Errorf("files=%d not-article=%d, want 6/1", pc.Files, pc.NotArticle)
+	if pc := res.PerInput[0]; pc.Files != 7 || pc.NotArticle != 2 {
+		t.Errorf("files=%d not-article=%d, want 7/2", pc.Files, pc.NotArticle)
 	}
-	tgzDirEmpty(t, "dry run", tmp)
 
 	empty := filepath.Join(dir, "empty.tar.gz")
 	if err := os.WriteFile(empty, tgzBuild(t, []tgzEntry{{name: "x/.db", body: tgzDB}}), 0o644); err != nil {
@@ -610,5 +522,115 @@ func TestMboxTarGzDryRun(t *testing.T) {
 	res = importInputs([]string{empty}, &runOptions{markDone: true}, newCountingSink(), nil)
 	if res.InputErrors != 1 || miExists(empty+".done") {
 		t.Errorf("no articles: input-errors=%d renamed=%v, want 1/false", res.InputErrors, miExists(empty+".done"))
+	}
+}
+
+// TestMboxTarGzTrailingData: zero padding after the tar's end-of-archive blocks is fine;
+// a second tar in the same gzip stream, or two .tar.gz files joined with cat, is an input
+// error (the second archive is never dropped as if the input were done).
+func TestMboxTarGzTrailingData(t *testing.T) {
+	a := tgzTar(t, []tgzEntry{{name: "alt/a/.art1", body: tgzArticle("<a1@targz.test.invalid>", "alt.a")}})
+	b := tgzTar(t, []tgzEntry{{name: "alt/b/.art1", body: tgzArticle("<b1@targz.test.invalid>", "alt.b")}})
+
+	// padded to a 10240-byte record, as GNU tar writes it
+	padded := append(append([]byte(nil), a...), make([]byte, 10240-len(a)%10240)...)
+	c, err := tgzRead(t, "alt.tar.gz", tgzGzip(t, padded, gzip.DefaultCompression), &runOptions{}, &tgzSink{}, nil)
+	if err != nil || c.Read != 1 {
+		t.Errorf("zero padding: err=%v read=%d, want nil/1", err, c.Read)
+	}
+
+	// two tars in one gzip stream
+	two := tgzGzip(t, append(append([]byte(nil), a...), b...), gzip.DefaultCompression)
+	sink := &tgzSink{}
+	_, err = tgzRead(t, "alt.tar.gz", two, &runOptions{}, sink, nil)
+	if !errors.Is(err, errTarTrailing) {
+		t.Errorf("two tars in one stream: err=%v, want errTarTrailing", err)
+	}
+	if got := sink.list(); got != "<a1@targz.test.invalid> alt.a" {
+		t.Errorf("two tars in one stream: articles %q, want the first tar's", got)
+	}
+
+	// cat a.tar.gz b.tar.gz: the gzip reader reads the second member as more of the stream
+	dir := t.TempDir()
+	p := filepath.Join(dir, "alt.tar.gz")
+	cat := append(tgzGzip(t, a, gzip.DefaultCompression), tgzGzip(t, b, gzip.DefaultCompression)...)
+	if err := os.WriteFile(p, cat, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res := importInputs([]string{p}, &runOptions{markDone: true}, &tgzSink{}, nil)
+	if res.InputErrors != 1 || res.MarkedDone != 0 || miExists(p+".done") {
+		t.Errorf("cat of two .tar.gz: input-errors=%d marked-done=%d renamed=%v, want 1/0/false",
+			res.InputErrors, res.MarkedDone, miExists(p+".done"))
+	}
+	if len(res.PerInput) != 1 || !res.PerInput[0].StoppedEarly {
+		t.Errorf("cat of two .tar.gz: per-input %+v, want stopped-early", res.PerInput)
+	}
+}
+
+// tgzOctal writes v as a NUL-terminated octal field of a tar header.
+func tgzOctal(dst []byte, v int64) {
+	copy(dst, fmt.Sprintf("%0*o", len(dst)-1, v))
+	dst[len(dst)-1] = 0
+}
+
+// tgzSparseTar is a tar holding one old-GNU sparse member ('S', the format GNU tar writes
+// with --sparse) without holes: one sparse entry over the whole body. archive/tar's writer
+// cannot write sparse files, so the header block is built here.
+func tgzSparseTar(name, body string) []byte {
+	var blk [512]byte
+	copy(blk[0:100], name)
+	tgzOctal(blk[100:108], 0o644)
+	tgzOctal(blk[108:116], 0)
+	tgzOctal(blk[116:124], 0)
+	tgzOctal(blk[124:136], int64(len(body))) // the bytes stored in the archive
+	tgzOctal(blk[136:148], 1_000_000_000)
+	blk[156] = tar.TypeGNUSparse
+	copy(blk[257:265], "ustar  \x00")
+	tgzOctal(blk[386:398], 0)                // sparse entry 0: offset
+	tgzOctal(blk[398:410], int64(len(body))) // and length
+	tgzOctal(blk[483:495], int64(len(body))) // the real size
+	copy(blk[148:156], "        ")
+	var sum int64
+	for _, c := range blk {
+		sum += int64(c)
+	}
+	copy(blk[148:156], fmt.Sprintf("%06o\x00 ", sum))
+	out := append([]byte(nil), blk[:]...)
+	out = append(out, body...)
+	out = append(out, make([]byte, (512-len(body)%512)%512)...)
+	return append(out, make([]byte, 1024)...) // the end-of-archive blocks
+}
+
+// TestMboxTarGzSparseMember: a GNU sparse member is read like a regular file (the reader
+// returns its expanded data), not passed over.
+func TestMboxTarGzSparseMember(t *testing.T) {
+	regular := tgzTar(t, []tgzEntry{{name: "alt/test/.art1", body: tgzArticle("<r1@targz.test.invalid>", "alt.test")}})
+	sparse := tgzSparseTar("alt/test/.art2", tgzArticle("<s2@targz.test.invalid>", "alt.test"))
+	// the regular tar without its end-of-archive blocks, then the sparse one
+	data := tgzGzip(t, append(append([]byte(nil), regular[:len(regular)-1024]...), sparse...), gzip.DefaultCompression)
+	sink := &tgzSink{}
+	c, err := tgzRead(t, "alt.test.tar.gz", data, &runOptions{}, sink, nil)
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	want := "<r1@targz.test.invalid> alt.test\n<s2@targz.test.invalid> alt.test"
+	if got := sink.list(); got != want || c.Files != 2 {
+		t.Errorf("files=%d articles:\n%s\nwant 2 files and:\n%s", c.Files, got, want)
+	}
+}
+
+// TestMboxTarGzMemberTypes pins which member types are read as files.
+func TestMboxTarGzMemberTypes(t *testing.T) {
+	for _, c := range []struct {
+		typ  byte
+		file bool
+	}{
+		{tar.TypeReg, true}, {'\x00', true}, {tar.TypeGNUSparse, true},
+		{tar.TypeDir, false}, {tar.TypeSymlink, false}, {tar.TypeLink, false}, {tar.TypeChar, false},
+		{tar.TypeBlock, false}, {tar.TypeFifo, false}, {tar.TypeXHeader, false}, {tar.TypeGNULongName, false},
+	} {
+		if got := tarIsFile(c.typ); got != c.file {
+			t.Errorf("tarIsFile(%q) = %v, want %v", c.typ, got, c.file)
+		}
 	}
 }
