@@ -106,7 +106,7 @@ func readTarSpool(r io.Reader, label string, opts *runOptions, sink inputSink, s
 	pr := &tarPosReader{r: r}
 	tr := tar.NewReader(pr)
 	var src spoolErrReader // the archive's read errors inside a member
-	var dataEnd int64      // where the data of the last member ends (padded); -1: unknown
+	var dataEnd int64      // where the data of the last member ends (padded)
 	for {
 		if w.stopped() {
 			return w.c, errStopped
@@ -125,24 +125,43 @@ func readTarSpool(r io.Reader, label string, opts *runOptions, sink inputSink, s
 		if err != nil {
 			return w.c, fmt.Errorf("reading the archive: %w", err)
 		}
+		// A global PAX header ('g') comes back with its data read already and Size 0, so
+		// dataEnd is the end of its data without the padding: still right, because the
+		// padding (under 512 zero bytes) is not a whole block, so a stream that ends there is
+		// refused, and the end blocks after it are zeros like the padding.
 		dataEnd = tarDataEnd(hdr, pr.pos)
-		if !tarIsFile(hdr.Typeflag) {
-			continue // a directory, a link (a crosspost would import twice), a device
+		sparse := dataEnd < 0
+		if sparse && hdr.Size > tarSparseMax {
+			// its holes would be read (and drained) as zeros: refused, not guessed at
+			return w.c, fmt.Errorf("reading the archive: sparse member %q of %d bytes: over %d bytes, not read",
+				hdr.Name, hdr.Size, int64(tarSparseMax))
 		}
-		name := tarMemberName(hdr.Name)
-		if name == "" {
-			continue
+		if name := tarMemberName(hdr.Name); tarIsFile(hdr.Typeflag) && name != "" {
+			src.reset(tr)
+			if err := w.readMember(name, &src); err != nil {
+				return w.c, err
+			}
+			if src.err != nil {
+				// the walker counted it as a file error; for an archive it ends the input
+				return w.c, fmt.Errorf("reading the archive: member %q: %w", name, src.err)
+			}
 		}
-		src.reset(tr)
-		if err := w.readMember(name, &src); err != nil {
-			return w.c, err
+		if sparse {
+			// the header does not give the stored size of a sparse member: read it to its
+			// end, which takes exactly its stored data from the stream, and pad that
+			if _, err := io.Copy(io.Discard, tr); err != nil {
+				return w.c, fmt.Errorf("reading the archive: sparse member %q: %w", hdr.Name, err)
+			}
+			dataEnd = (pr.pos + 511) / 512 * 512
 		}
-		if src.err != nil {
-			// the walker counted it as a file error; for an archive it ends the input
-			return w.c, fmt.Errorf("reading the archive: member %q: %w", name, src.err)
-		}
+		// anything else (a directory, a link: a crosspost would import twice, a device) is
+		// passed over
 	}
 }
+
+// tarSparseMax is the largest (expanded) sparse member read: its holes come out of the
+// reader as zeros, so a huge one would cost that much reading; a news spool has none.
+const tarSparseMax = 1 << 30
 
 // errTarNoEnd: the tar stream ended without its end-of-archive blocks (cut between two
 // members, e.g. a partial tar compressed whole).
@@ -173,22 +192,20 @@ func (p *tarPosReader) Read(b []byte) (int, error) {
 // endBlocksAfter reports whether at least one whole 512-byte block of zeros (an end-of-
 // archive block; Go's reader takes one followed by the end of the stream as well) was read
 // after dataEnd, the end of the last member's padded data (0 before the first member), and
-// nothing but zeros since dataEnd. When dataEnd is unknown (-1: the last member was sparse,
-// its stored size is not in the header Next returns), the last 512 bytes read must be zeros.
+// nothing but zeros since dataEnd. An unknown dataEnd (below 0) is never taken as complete.
 func (p *tarPosReader) endBlocksAfter(dataEnd int64) bool {
-	if dataEnd < 0 {
-		return p.pos-p.zeroFrom >= 512
-	}
-	return p.pos-dataEnd >= 512 && p.zeroFrom <= dataEnd
+	return dataEnd >= 0 && p.pos-dataEnd >= 512 && p.zeroFrom <= dataEnd
 }
 
 // tarDataEnd returns where the data of the member hdr ends in the stream, padded to the
 // block size, when its header ended at pos: header-only types (links, directories, devices)
-// have none, a sparse member's stored size is not known (-1), every other member stores
-// hdr.Size bytes.
+// and a global PAX header (its data is read with the header) have none in front of them, a
+// sparse member's stored size is not in its header (-1: readTarSpool reads it to its end),
+// every other member stores hdr.Size bytes.
 func tarDataEnd(hdr *tar.Header, pos int64) int64 {
 	switch hdr.Typeflag {
-	case tar.TypeLink, tar.TypeSymlink, tar.TypeChar, tar.TypeBlock, tar.TypeDir, tar.TypeFifo:
+	case tar.TypeLink, tar.TypeSymlink, tar.TypeChar, tar.TypeBlock, tar.TypeDir, tar.TypeFifo,
+		tar.TypeXGlobalHeader:
 		return pos
 	case tar.TypeGNUSparse:
 		return -1

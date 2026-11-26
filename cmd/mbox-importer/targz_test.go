@@ -624,7 +624,11 @@ func tgzOctal(dst []byte, v int64) {
 // tgzSparseTar is a tar holding one old-GNU sparse member ('S', the format GNU tar writes
 // with --sparse) without holes: one sparse entry over the whole body. archive/tar's writer
 // cannot write sparse files, so the header block is built here.
-func tgzSparseTar(name, body string) []byte {
+func tgzSparseTar(name, body string) []byte { return tgzSparseHoleTar(name, body, int64(len(body))) }
+
+// tgzSparseHoleTar is tgzSparseTar with the real size given: past the body, up to realSize,
+// the member is one hole.
+func tgzSparseHoleTar(name, body string, realSize int64) []byte {
 	var blk [512]byte
 	copy(blk[0:100], name)
 	tgzOctal(blk[100:108], 0o644)
@@ -636,7 +640,7 @@ func tgzSparseTar(name, body string) []byte {
 	copy(blk[257:265], "ustar  \x00")
 	tgzOctal(blk[386:398], 0)                // sparse entry 0: offset
 	tgzOctal(blk[398:410], int64(len(body))) // and length
-	tgzOctal(blk[483:495], int64(len(body))) // the real size
+	tgzOctal(blk[483:495], realSize)         // the real size
 	copy(blk[148:156], "        ")
 	var sum int64
 	for _, c := range blk {
@@ -664,6 +668,94 @@ func TestMboxTarGzSparseMember(t *testing.T) {
 	want := "<r1@targz.test.invalid> alt.test\n<s2@targz.test.invalid> alt.test"
 	if got := sink.list(); got != want || c.Files != 2 {
 		t.Errorf("files=%d articles:\n%s\nwant 2 files and:\n%s", c.Files, got, want)
+	}
+}
+
+// TestMboxTarGzSparseEnd: a sparse last member whose stored data ends in zero blocks, cut
+// without the end-of-archive blocks, is refused (its stored size is taken from reading it,
+// not guessed from trailing zeros); with the end blocks it is accepted. A sparse member
+// with a hole over the limit is an input error, not read.
+func TestMboxTarGzSparseEnd(t *testing.T) {
+	sparse := tgzSparseTar("alt/test/.db", strings.Repeat("\x00", 1536))
+	for _, c := range []struct {
+		name string
+		tar  []byte
+		ok   bool
+	}{
+		{"sparse last, end blocks", sparse, true},
+		{"sparse last, no end blocks", sparse[:len(sparse)-1024], false},
+	} {
+		_, err := tgzRead(t, "alt.test.tar.gz", tgzGzip(t, c.tar, gzip.DefaultCompression), &runOptions{}, &tgzSink{}, nil)
+		switch {
+		case c.ok && err != nil:
+			t.Errorf("%s: err=%v, want nil", c.name, err)
+		case !c.ok && (err == nil || !strings.Contains(err.Error(), "end-of-archive")):
+			t.Errorf("%s: err=%v, want tar ended without its end-of-archive blocks", c.name, err)
+		}
+	}
+
+	huge := tgzSparseHoleTar("alt/test/.art1", tgzArticle("<h1@targz.test.invalid>", "alt.test"), 2<<30)
+	sink := &tgzSink{}
+	_, err := tgzRead(t, "alt.test.tar.gz", tgzGzip(t, huge, gzip.DefaultCompression), &runOptions{}, sink, nil)
+	if err == nil || !strings.Contains(err.Error(), "sparse member") || sink.list() != "" {
+		t.Errorf("sparse member with a 2 GiB hole: err=%v articles %q, want an input error and nothing read", err, sink.list())
+	}
+}
+
+// TestMboxTarGzPAXHeaders: a tar cut right after a PAX extended header (no member follows)
+// is refused; an archive of only a global PAX header and the end blocks is a complete tar
+// (it has no articles, which importSpool reports later).
+func TestMboxTarGzPAXHeaders(t *testing.T) {
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	body := tgzArticle("<x1@targz.test.invalid>", "alt.test")
+	if err := tw.WriteHeader(&tar.Header{Name: "alt/test/.art1", Typeflag: tar.TypeReg, Mode: 0o644,
+		Size: int64(len(body)), Format: tar.FormatPAX, PAXRecords: map[string]string{"comment": "pax"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write([]byte(body)); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw := buf.Bytes()
+	// the 'x' header and its records (under 512 bytes) come first, the member's header at 1024
+	if raw[156] != tar.TypeXHeader || raw[1024+156] != tar.TypeReg {
+		t.Fatalf("unexpected layout: types %q and %q", raw[156], raw[1024+156])
+	}
+	_, err := tgzRead(t, "alt.test.tar.gz", tgzGzip(t, raw[:1024], gzip.DefaultCompression), &runOptions{}, &tgzSink{}, nil)
+	if err == nil {
+		t.Error("cut after the PAX header: no error, want an input error")
+	}
+	c, err := tgzRead(t, "alt.test.tar.gz", tgzGzip(t, raw, gzip.DefaultCompression), &runOptions{}, &tgzSink{}, nil)
+	if err != nil || c.Read != 1 {
+		t.Errorf("whole PAX tar: err=%v read=%d, want nil/1", err, c.Read)
+	}
+
+	buf.Reset()
+	tw = tar.NewWriter(&buf)
+	if err := tw.WriteHeader(&tar.Header{Typeflag: tar.TypeXGlobalHeader, Name: "pax_global_header",
+		PAXRecords: map[string]string{"comment": "only a global header"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	c, err = tgzRead(t, "alt.test.tar.gz", tgzGzip(t, buf.Bytes(), gzip.DefaultCompression), &runOptions{}, &tgzSink{}, nil)
+	if err != nil || c.Files != 0 {
+		t.Errorf("global header only: err=%v files=%d, want nil/0", err, c.Files)
+	}
+	g := buf.Bytes()
+	_, err = tgzRead(t, "alt.test.tar.gz", tgzGzip(t, g[:len(g)-1024], gzip.DefaultCompression), &runOptions{}, &tgzSink{}, nil)
+	if err == nil || !strings.Contains(err.Error(), "end-of-archive") {
+		t.Errorf("global header, no end blocks: err=%v, want tar ended without its end-of-archive blocks", err)
+	}
+
+	// gzip of nothing: no tar at all
+	_, err = tgzRead(t, "alt.test.tar.gz", tgzGzip(t, nil, gzip.DefaultCompression), &runOptions{}, &tgzSink{}, nil)
+	if err == nil {
+		t.Error("empty gzip stream: no error")
 	}
 }
 

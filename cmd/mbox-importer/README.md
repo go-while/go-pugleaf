@@ -862,7 +862,9 @@ written to `-tmpdir`:
 - **What is read.** Regular members (and GNU sparse files, read expanded) only, each classified by
   its content like every spool file (the `.db` files and empty members count in `not-article`);
   directory entries, symbolic and hard links (a crosspost link would import the article twice) and
-  devices are passed over and count nowhere.
+  devices are passed over and count nowhere. A sparse member over 1 GiB expanded is an input error
+  (its holes would be read as zeros); a news spool has none. An empty `.tar.gz` (a 0-byte file, or
+  gzip of nothing) is an input error too: it holds no tar.
 - **Groups.** The member's directory is the spool directory of rule 2 of
   [Target group](#target-group); a gmane archive's file name supplies the `gmane.` its paths leave
   out (`gmane.psychology.tar.gz`: `psychology/behavior-analysis/` → `gmane.psychology.behavior-analysis`).
