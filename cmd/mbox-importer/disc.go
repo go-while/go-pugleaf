@@ -5,7 +5,8 @@ package main
 // read as a news spool (readSpool, spool.go), and the directory is removed again on every
 // path. With -spool a positional directory or .zip argument is read as a news spool as it
 // is, without unpacking: that is also how a hand-mounted image is imported
-// (fuseiso IMG /mnt/x; mbox-importer -spool /mnt/x).
+// (fuseiso IMG /mnt/x; mbox-importer -spool /mnt/x). A .tar.gz / .tgz is always a news
+// spool too, streamed without unpacking (targz.go).
 
 import (
 	"archive/zip"
@@ -44,15 +45,19 @@ const (
 	spoolDisc           // a disc image: unpacked with 7z into -tmpdir, then walked
 	spoolDir            // -spool: a directory, walked through os.DirFS
 	spoolZip            // -spool: a zip file, walked through archive/zip (not unpacked)
+	spoolTgz            // a .tar.gz / .tgz: streamed through gzip and tar (targz.go), not unpacked
 )
 
-// spoolInput decides how an input is read. A disc image is always a news spool; a directory
-// or a zip file is one only with -spool (opts.spool), because without it a directory
-// argument contributes its *.mbox* files (expandInputs) and a zip is an mbox archive.
+// spoolInput decides how an input is read. A disc image and a .tar.gz are always a news
+// spool; a directory or a zip file is one only with -spool (opts.spool), because without it
+// a directory argument contributes its *.mbox* files (expandInputs) and a zip is an mbox
+// archive.
 func spoolInput(path string, opts *runOptions) spoolKind {
 	switch {
 	case isDiscImage(path):
 		return spoolDisc
+	case isTarSpool(path):
+		return spoolTgz
 	case !opts.spool:
 		return spoolNone
 	case inputKind(path) == "zip":
@@ -78,13 +83,15 @@ func spoolDirSizes(inputs []plannedInput) {
 	}
 }
 
-// importSpool imports one news spool input: a disc image, a directory or a zip file. It is
-// the spool twin of importInput (import.go): the same sink, counters, mark-done rule and
-// summary line, only the articles come from readSpool instead of the mbox parser. c is nil
-// when the input could not be unpacked or opened.
+// importSpool imports one news spool input: a disc image, a directory, a zip file or a
+// .tar.gz. It is the spool twin of importInput (import.go): the same sink, counters,
+// mark-done rule and summary line, only the articles come from readSpool (readTarSpool for a
+// .tar.gz) instead of the mbox parser. c is nil when the input could not be unpacked or
+// opened.
 //
-// A disc image is renamed to IMAGE.done like any other input; a spool directory is never
-// renamed (it is not the thing that was imported, and -spool is also used on a mount point).
+// A disc image or .tar.gz is renamed to NAME.done like any other input; a spool directory is
+// never renamed (it is not the thing that was imported, and -spool is also used on a mount
+// point).
 func importSpool(path string, kind spoolKind, opts *runOptions, sink articleSink, stop <-chan struct{}) (c *counters, inputErr, stopped bool) {
 	if opts.groupFromName {
 		// a spool holds many groups: its articles go by their spool directory or Newsgroups header
@@ -98,16 +105,28 @@ func importSpool(path string, kind spoolKind, opts *runOptions, sink articleSink
 		log.Printf("[MBOX-IMPORT] input error: %v", err)
 		return nil, true, false
 	}
-	fsys, release, err := openSpool(path, kind, opts, stop)
-	switch {
-	case errors.Is(err, errStopped):
-		log.Printf("[MBOX-IMPORT] file=%q: unpacking ended by the shutdown signal", path)
-		return nil, false, true
-	case err != nil:
-		log.Printf("[MBOX-IMPORT] input error: file=%q: %v", path, err)
-		return nil, true, false
+	var walk func(in inputSink) (*counters, error)
+	if kind == spoolTgz {
+		r, release, err := openTarSpool(path)
+		if err != nil {
+			log.Printf("[MBOX-IMPORT] input error: file=%q: %v", path, err)
+			return nil, true, false
+		}
+		defer release()
+		walk = func(in inputSink) (*counters, error) { return readTarSpool(r, path, opts, in, stop) }
+	} else {
+		fsys, release, err := openSpool(path, kind, opts, stop)
+		switch {
+		case errors.Is(err, errStopped):
+			log.Printf("[MBOX-IMPORT] file=%q: unpacking ended by the shutdown signal", path)
+			return nil, false, true
+		case err != nil:
+			log.Printf("[MBOX-IMPORT] input error: file=%q: %v", path, err)
+			return nil, true, false
+		}
+		defer release()
+		walk = func(in inputSink) (*counters, error) { return readSpool(fsys, path, opts, in, stop) }
 	}
-	defer release()
 
 	log.Printf("[MBOX-IMPORT] importing spool file=%q", path)
 	if kind == spoolDir {
@@ -119,7 +138,7 @@ func importSpool(path string, kind spoolKind, opts *runOptions, sink articleSink
 			"so import it again with -reimport", path)
 	}
 	in := sink.beginInput()
-	c, readErr := readSpool(fsys, path, opts, in, stop)
+	c, readErr := walk(in)
 	if c == nil {
 		c = newCounters(path)
 	}

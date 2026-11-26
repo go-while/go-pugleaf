@@ -154,12 +154,14 @@ func expandInputs(args []string, spool bool) (files []string, errs []error) {
 }
 
 // inputKind returns the lower-case kind of path by its suffix (a trailing ".done" is
-// ignored, so a renamed input can be imported again): "gz", "zip", "7z", "disc" (a disc
-// image, discSuffixes) or "mbox" for everything else (.mbox, .bag, any other name: the
-// parser rejects a non-mbox).
+// ignored, so a renamed input can be imported again): "targz" (a .tar.gz or .tgz news spool,
+// targz.go; never an mbox), "gz", "zip", "7z", "disc" (a disc image, discSuffixes) or "mbox"
+// for everything else (.mbox, .bag, any other name: the parser rejects a non-mbox).
 func inputKind(p string) string {
 	name := strings.TrimSuffix(strings.ToLower(filepath.Base(p)), ".done")
 	switch {
+	case strings.HasSuffix(name, ".tar.gz"), strings.HasSuffix(name, ".tgz"):
+		return kindTarGz
 	case strings.HasSuffix(name, ".gz"):
 		return "gz"
 	case strings.HasSuffix(name, ".zip"):
@@ -208,11 +210,11 @@ func openSource(path, sevenZip string) (*source, error) {
 	var r io.Reader
 	kind := inputKind(path)
 	switch kind {
-	case kindDisc:
-		// never reached through the dispatch (importPlanned sends a disc image to
-		// importSpool), only when openSource is called with one by hand
+	case kindDisc, kindTarGz:
+		// never reached through the dispatch (importPlanned sends a disc image or a .tar.gz
+		// to importSpool), only when openSource is called with one by hand
 		_ = fh.Close()
-		return nil, fmt.Errorf("%s: is a disc image: it is read as a news spool, not as an mbox", path)
+		return nil, fmt.Errorf("%s: is a disc image or .tar.gz: it is read as a news spool, not as an mbox", path)
 	case "mbox":
 		s.closers = append(s.closers, fh)
 		r = fh
