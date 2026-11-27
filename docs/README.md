@@ -4,6 +4,7 @@
   steps, changed defaults and flags, security fixes, new tools and features.
 - [COMPRESS.md](COMPRESS.md) — `COMPRESS DEFLATE` (RFC 8054) on provider connections: the
   provider flag, the log lines, the limits and which servers offer it.
+- [ROUTING.md](ROUTING.md) — nntp-fetcher group routing: provider routing patterns, global pins, precedence, `-group`/`-provider`/`-routing-dry-run`, admin pages and presets.
 - [TRANSFER.md](TRANSFER.md) — `cmd/nntp-transfer`: the streaming (CHECK/TAKETHIS) and IHAVE
   sending modes, `-ihave auto|never|always`, the reply codes and the exit codes.
 - [PostQueue.md](PostQueue.md) — the web post queue.

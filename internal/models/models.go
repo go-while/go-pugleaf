@@ -37,6 +37,9 @@ type Provider struct {
 	MaxArtSize int    `json:"max_art_size" db:"max_art_size"` // Maximum article size in bytes
 	Posting    bool   `json:"posting" db:"posting"`           // Whether posting is enabled for this provider
 	Compress   bool   `json:"compress" db:"compress"`         // Send COMPRESS DEFLATE (RFC 8054) after login; off: plain
+	// Routing: newsgroup patterns nntp-fetcher uses this provider for (peers.in_patterns syntax,
+	// last match wins, "!" excludes); empty = no restriction (migration 0039).
+	Routing string `json:"routing" db:"routing"`
 	// Proxy configuration fields
 	ProxyEnabled  bool      `json:"proxy_enabled" db:"proxy_enabled"`   // Whether to use proxy for this provider
 	ProxyType     string    `json:"proxy_type" db:"proxy_type"`         // Proxy type: socks4, socks5
@@ -45,6 +48,18 @@ type Provider struct {
 	ProxyUsername string    `json:"proxy_username" db:"proxy_username"` // Proxy authentication username
 	ProxyPassword string    `json:"proxy_password" db:"proxy_password"` // Proxy authentication password
 	CreatedAt     time.Time `json:"created_at" db:"created_at"`
+}
+
+// GroupRoute is a global routing pin (table group_routes, migration 0039): the groups its
+// patterns want are fetched only from ProviderID, never from any other provider.
+type GroupRoute struct {
+	ID         int64     `json:"id" db:"id"`
+	Patterns   string    `json:"patterns" db:"patterns"`       // same syntax as Provider.Routing
+	ProviderID int64     `json:"provider_id" db:"provider_id"` // providers.id (no cascade)
+	Priority   int       `json:"priority" db:"priority"`       // lower first among the pins of one group
+	Enabled    bool      `json:"enabled" db:"enabled"`
+	Notes      string    `json:"notes" db:"notes"`
+	CreatedAt  time.Time `json:"created_at" db:"created_at"`
 }
 
 // Newsgroup represents a subscribed newsgroup
