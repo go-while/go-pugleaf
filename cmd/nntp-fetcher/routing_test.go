@@ -7,9 +7,11 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-while/go-pugleaf/internal/models"
 	"github.com/go-while/go-pugleaf/internal/nntp"
@@ -349,21 +351,31 @@ func TestRouteListSyncFilter(t *testing.T) {
 	}
 }
 
-// TestRouteDryRunOutput: -routing-dry-run prints one ROUTE/SKIP line per group and a summary.
+// TestRouteDryRunOutput: -routing-dry-run prints one ROUTE/SKIP line per group and a summary;
+// a pinned SKIP line says why each pinned provider did not take the group (its LIST failed, the
+// group is not in its LIST) or that the pinned provider is disabled.
 func TestRouteDryRunOutput(t *testing.T) {
 	providers := []*models.Provider{
 		routeProvider(1, "A", 0, true, ""),
 		routeProvider(2, "B", 1, true, "gmane.*"),
 		routeProvider(3, "C", 2, true, ""),
+		routeProvider(4, "D", 3, true, ""),
+		routeProvider(5, "E", 4, false, ""),
 	}
-	routes := []*models.GroupRoute{{ID: 1, Patterns: "pin.*", ProviderID: 3, Enabled: true}}
+	routes := []*models.GroupRoute{
+		{ID: 1, Patterns: "pin.*", ProviderID: 3, Enabled: true},
+		{ID: 2, Patterns: "multi.*", ProviderID: 4, Priority: 0, Enabled: true},
+		{ID: 3, Patterns: "multi.*", ProviderID: 3, Priority: 1, Enabled: true},
+		{ID: 4, Patterns: "dead.*", ProviderID: 5, Enabled: true},
+	}
 	router := routeRouter(t, providers, routes)
 	lists := map[int64]map[string]bool{
-		1: routeList("alt.test", "gmane.test", "pin.test"),
+		1: routeList("alt.test", "gmane.test", "pin.test", "multi.test", "dead.test"),
 		2: routeList("gmane.test"),
-	} // C's LIST failed
-	a := assignGroups(routeGroups("alt.test", "gmane.test", "pin.test", "gone.test"), router, lists)
-	names := map[int64]string{1: "A", 2: "B", 3: "C"}
+		4: routeList("other.test"),
+	} // C's LIST failed, D's lacks multi.test, E is disabled
+	a := assignGroups(routeGroups("alt.test", "gmane.test", "pin.test", "multi.test", "dead.test", "gone.test"), router, lists)
+	names := map[int64]string{1: "A", 2: "B", 3: "C", 4: "D", 5: "E"}
 
 	var buf bytes.Buffer
 	if err := writeRouteDryRun(&buf, a, names, 0); err != nil {
@@ -371,9 +383,11 @@ func TestRouteDryRunOutput(t *testing.T) {
 	}
 	want := "ROUTE alt.test -> A\n" +
 		"ROUTE gmane.test -> B\n" +
-		"SKIP pin.test pinned: no pinned provider lists it\n" +
+		"SKIP pin.test pinned: provider C: its LIST failed\n" +
+		"SKIP multi.test pinned: provider D: not in its LIST; provider C: its LIST failed\n" +
+		"SKIP dead.test pinned: pinned provider disabled (or host, port or max conns not set)\n" +
 		"SKIP gone.test not in the LIST of A\n" +
-		"[FETCHER-ROUTE] dry run: 2 groups routed, 2 skipped, no articles fetched\n"
+		"[FETCHER-ROUTE] dry run: 2 groups routed, 4 skipped, no articles fetched\n"
 	if buf.String() != want {
 		t.Fatalf("dry run output:\n%s\nwant:\n%s", buf.String(), want)
 	}
@@ -383,8 +397,72 @@ func TestRouteDryRunOutput(t *testing.T) {
 		t.Fatalf("writeRouteDryRun only B: %v", err)
 	}
 	if out := buf.String(); strings.Contains(out, "-> A") || !strings.Contains(out, "ROUTE gmane.test -> B\n") ||
-		!strings.Contains(out, "1 groups routed, 2 skipped") {
+		!strings.Contains(out, "1 groups routed, 4 skipped") {
 		t.Fatalf("dry run -provider B:\n%s", out)
+	}
+}
+
+// TestRouteDateStartLog: a group that starts at its newest local article date gets one
+// [FETCHER-ROUTE] line naming the provider, the date and the -download-start-date command; only
+// the first routeLogFirst groups of a pass are logged, the summary gives the count.
+func TestRouteDateStartLog(t *testing.T) {
+	var lines []string
+	logf := func(format string, args ...any) { lines = append(lines, fmt.Sprintf(format, args...)) }
+	start := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+
+	l := newDateStartLog("gmane", logf)
+	l.summary()
+	if len(lines) != 0 {
+		t.Fatalf("summary without date starts logged %q", lines)
+	}
+	l.note("gmane.comp.lang.c", start)
+	l.summary()
+	want := []string{
+		"[FETCHER-ROUTE]: provider 'gmane' has no progress for group 'gmane.comp.lang.c', which has local articles: " +
+			"starting at the newest local article date 2026-11-20, older articles of the group on this provider are not fetched; " +
+			"to fetch them run: pugleaf-fetcher -download-start-date YYYY-MM-DD -group gmane.comp.lang.c -provider gmane " +
+			"(YYYY-MM-DD: the oldest date wanted, before 2026-11-20)",
+		"[FETCHER-ROUTE]: provider 'gmane': 1 groups started at their newest local article date; " +
+			"their older articles on this provider are not fetched (use -download-start-date with -group and -provider gmane)",
+	}
+	if !reflect.DeepEqual(lines, want) {
+		t.Fatalf("lines:\n%s\nwant:\n%s", strings.Join(lines, "\n"), strings.Join(want, "\n"))
+	}
+
+	// many groups in one pass: the first routeLogFirst lines, then the count
+	lines = nil
+	l = newDateStartLog("news server", logf)
+	for i := 0; i < routeLogFirst+5; i++ {
+		l.note(fmt.Sprintf("gmane.g%d", i), start)
+	}
+	l.summary()
+	if len(lines) != routeLogFirst+1 || l.count() != routeLogFirst+5 {
+		t.Fatalf("%d lines for %d date starts (count %d), want %d:\n%s", len(lines), routeLogFirst+5, l.count(), routeLogFirst+1, strings.Join(lines, "\n"))
+	}
+	if !strings.Contains(lines[0], "-group gmane.g0 -provider 'news server' ") {
+		t.Errorf("first line does not quote the provider name: %q", lines[0])
+	}
+	if strings.Contains(strings.Join(lines, "\n"), fmt.Sprintf("gmane.g%d", routeLogFirst)) {
+		t.Errorf("group %d of the pass was logged:\n%s", routeLogFirst+1, strings.Join(lines, "\n"))
+	}
+	if sum := lines[routeLogFirst]; !strings.Contains(sum, fmt.Sprintf(": %d groups started at their newest local article date, the first %d logged above;", routeLogFirst+5, routeLogFirst)) {
+		t.Errorf("summary = %q", sum)
+	}
+}
+
+// TestRouteShellArg: names in the logged command are single shell words.
+func TestRouteShellArg(t *testing.T) {
+	for in, want := range map[string]string{
+		"e2e-d":             "e2e-d",
+		"gmane.comp.lang.c": "gmane.comp.lang.c",
+		"news server":       "'news server'",
+		"it's":              `'it'\''s'`,
+		"":                  "''",
+		"a;rm":              "'a;rm'",
+	} {
+		if got := shellArg(in); got != want {
+			t.Errorf("shellArg(%q) = %s, want %s", in, got, want)
+		}
 	}
 }
 

@@ -200,7 +200,9 @@ func (s *WebServer) adminCreateProvider(c *Context) {
 		return
 	}
 
-	session.SetSuccess("Provider created successfully")
+	// routing set: warn about groups with articles whose older articles this provider will not
+	// fetch on its own
+	session.SetSuccess("Provider created successfully" + s.routingBacklogNotice(routing, name))
 	c.Redirect(http.StatusSeeOther, "/admin?tab=providers")
 }
 
@@ -475,7 +477,13 @@ func (s *WebServer) adminUpdateProvider(c *Context) {
 		return
 	}
 
-	session.SetSuccess("Provider updated successfully")
+	// routing changed: warn about groups with articles whose older articles this provider will
+	// not fetch on its own
+	notice := ""
+	if routing != existingProvider.Routing {
+		notice = s.routingBacklogNotice(routing, name)
+	}
+	session.SetSuccess("Provider updated successfully" + notice)
 	c.Redirect(http.StatusSeeOther, "/admin?tab=providers")
 }
 

@@ -60,6 +60,46 @@ func routingShort(s string) string {
 	return s
 }
 
+// routingBacklogCount returns how many of groups hold articles (message_count > 0) and are
+// wanted by patterns, matched as the fetcher's router does (nntp.RoutingMatcher). Empty
+// patterns match nothing.
+func routingBacklogCount(groups []*models.Newsgroup, patterns string) int {
+	if strings.TrimSpace(patterns) == "" {
+		return 0
+	}
+	wants := nntp.RoutingMatcher(patterns)
+	n := 0
+	for _, g := range groups {
+		if g != nil && g.MessageCount > 0 && wants(g.Name) {
+			n++
+		}
+	}
+	return n
+}
+
+// routingBacklogNotice returns the sentence added to the success message after a provider's
+// routing or a global route is saved, when its patterns want groups that already hold
+// articles: the fetcher starts such a group on that provider at its newest local article (when
+// the provider has no progress for it), so the provider's older articles are not fetched
+// unless the admin runs -download-start-date with -provider. "" when no such group exists or
+// the groups cannot be read (logged). One read of every newsgroup per save.
+func (s *WebServer) routingBacklogNotice(patterns, providerName string) string {
+	if strings.TrimSpace(patterns) == "" {
+		return ""
+	}
+	groups, err := s.DB.MainDBGetAllNewsgroups()
+	if err != nil {
+		log.Printf("[WEB]: Failed to read the newsgroups for the routing notice: %v", err)
+		return ""
+	}
+	n := routingBacklogCount(groups, patterns)
+	if n == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" Note: the patterns match %d existing groups that already have articles. Older articles of these groups on provider '%s' are not fetched automatically (use pugleaf-fetcher -download-start-date YYYY-MM-DD -group <groups> -provider '%s').",
+		n, providerName, providerName)
+}
+
 // groupRouteViews joins the routes with their provider names.
 func groupRouteViews(routes []*models.GroupRoute, providers []*models.Provider) []*GroupRouteView {
 	byID := make(map[int64]*models.Provider, len(providers))
@@ -79,21 +119,22 @@ func groupRouteViews(routes []*models.GroupRoute, providers []*models.Provider) 
 }
 
 // groupRouteFromForm fills r from the route form fields (patterns, provider_id, priority,
-// enabled, notes) and validates it. On a bad field it returns the message for the error flash.
-func (s *WebServer) groupRouteFromForm(c *Context, r *models.GroupRoute) (string, bool) {
+// enabled, notes) and validates it, returning the route's provider. On a bad field it returns
+// the message for the error flash.
+func (s *WebServer) groupRouteFromForm(c *Context, r *models.GroupRoute) (*models.Provider, string, bool) {
 	patterns, err := cleanRoutingPatterns(c.PostForm("patterns"))
 	if err != nil {
-		return "Invalid route patterns: " + err.Error(), false
+		return nil, "Invalid route patterns: " + err.Error(), false
 	}
 	providerID, err := strconv.ParseInt(strings.TrimSpace(c.PostForm("provider_id")), 10, 64)
 	if err != nil || providerID <= 0 {
-		return "Select a provider for the route", false
+		return nil, "Select a provider for the route", false
 	}
 	priority := 0
 	if v := strings.TrimSpace(c.PostForm("priority")); v != "" {
 		priority, err = strconv.Atoi(v)
 		if err != nil || priority < 0 || priority > 1000000 {
-			return "Invalid route priority", false
+			return nil, "Invalid route priority", false
 		}
 	}
 	enabled := c.PostForm("enabled")
@@ -104,19 +145,19 @@ func (s *WebServer) groupRouteFromForm(c *Context, r *models.GroupRoute) (string
 	r.Enabled = enabled == "on" || enabled == "true"
 	r.Notes = c.PostForm("notes")
 	if err := database.ValidateGroupRoute(r); err != nil {
-		return "Invalid route: " + err.Error(), false
+		return nil, "Invalid route: " + err.Error(), false
 	}
 
 	// Insert/Update check this too, but their error does not tell a missing provider apart.
 	p, err := s.DB.GetProviderByID(providerID)
 	if err != nil {
 		log.Printf("[WEB]: Failed to load provider %d for a group route: %v", providerID, err)
-		return "Failed to check the route's provider", false
+		return nil, "Failed to check the route's provider", false
 	}
 	if p == nil {
-		return fmt.Sprintf("Provider not found (ID %d)", providerID), false
+		return nil, fmt.Sprintf("Provider not found (ID %d)", providerID), false
 	}
-	return "", true
+	return p, "", true
 }
 
 // groupRouteIDFromForm parses the "id" form field. On a missing or invalid id it sets the error
@@ -140,7 +181,8 @@ func (s *WebServer) adminCreateGroupRoute(c *Context) {
 	session := s.getWebSession(c)
 
 	route := &models.GroupRoute{}
-	if msg, ok := s.groupRouteFromForm(c, route); !ok {
+	p, msg, ok := s.groupRouteFromForm(c, route)
+	if !ok {
 		session.SetError(msg)
 		c.Redirect(http.StatusSeeOther, adminProvidersRedirect)
 		return
@@ -153,7 +195,7 @@ func (s *WebServer) adminCreateGroupRoute(c *Context) {
 		return
 	}
 	log.Printf("[WEB]: Admin added group route %d %q -> provider %d", id, route.Patterns, route.ProviderID)
-	session.SetSuccess("Route added: " + route.Patterns)
+	session.SetSuccess("Route added: " + route.Patterns + s.routingBacklogNotice(route.Patterns, p.Name))
 	c.Redirect(http.StatusSeeOther, adminProvidersRedirect)
 }
 
@@ -177,7 +219,8 @@ func (s *WebServer) adminUpdateGroupRoute(c *Context) {
 		c.Redirect(http.StatusSeeOther, adminProvidersRedirect)
 		return
 	}
-	if msg, ok := s.groupRouteFromForm(c, route); !ok {
+	p, msg, ok := s.groupRouteFromForm(c, route)
+	if !ok {
 		session.SetError(msg)
 		c.Redirect(http.StatusSeeOther, adminProvidersRedirect)
 		return
@@ -193,7 +236,7 @@ func (s *WebServer) adminUpdateGroupRoute(c *Context) {
 		return
 	}
 	log.Printf("[WEB]: Admin updated group route %d %q -> provider %d", id, route.Patterns, route.ProviderID)
-	session.SetSuccess("Route updated: " + route.Patterns)
+	session.SetSuccess("Route updated: " + route.Patterns + s.routingBacklogNotice(route.Patterns, p.Name))
 	c.Redirect(http.StatusSeeOther, adminProvidersRedirect)
 }
 

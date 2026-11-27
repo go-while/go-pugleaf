@@ -12,6 +12,8 @@ import (
 	"log"
 	"slices"
 	"strings"
+	"sync"
+	"time"
 	"unicode"
 
 	"github.com/go-while/go-pugleaf/internal/models"
@@ -255,11 +257,20 @@ const (
 	routeNoCandidate                    // no provider may serve it (no primary, no routing wants it)
 )
 
+// pinMiss says why one pinned provider did not take a pinned group.
+type pinMiss struct {
+	provider   int64
+	listFailed bool // its LIST failed (else the group is not in its LIST)
+}
+
 // routeDecision is the routing of one group in one run.
 type routeDecision struct {
 	group    string
 	provider int64 // the assigned provider; for routeNotListed the last candidate tried
 	reason   routeReason
+	// routePinned: why each usable pinned provider did not take the group, in candidate
+	// order; empty when every pinned provider is disabled or unusable
+	pinMisses []pinMiss
 }
 
 // routeAssignment is the routing of every selected group in one run.
@@ -298,6 +309,9 @@ func assignGroups(groups []*models.Newsgroup, router *nntp.GroupRouter, lists ma
 			a.byProvider[d.provider] = append(a.byProvider[d.provider], g)
 		case pinned:
 			d.reason = routePinned
+			for _, id := range ids {
+				d.pinMisses = append(d.pinMisses, pinMiss{provider: id, listFailed: lists[id] == nil})
+			}
 			a.pinSkipped = append(a.pinSkipped, g.Name)
 		case len(ids) == 0:
 			d.reason = routeNoCandidate
@@ -353,7 +367,7 @@ func logRouteSummary(a *routeAssignment, order []int64, names map[int64]string) 
 // writeRouteDryRun prints the assignment for -routing-dry-run, one line per group:
 //
 //	ROUTE <group> -> <provider>
-//	SKIP <group> pinned: no pinned provider lists it
+//	SKIP <group> pinned: <why> (pinSkipReason)
 //	SKIP <group> not in the LIST of <provider>
 //	SKIP <group> no provider
 //
@@ -371,7 +385,7 @@ func writeRouteDryRun(w io.Writer, a *routeAssignment, names map[int64]string, o
 			_, err = fmt.Fprintf(w, "ROUTE %s -> %s\n", d.group, providerLabel(names, d.provider))
 		case routePinned:
 			skipped++
-			_, err = fmt.Fprintf(w, "SKIP %s pinned: no pinned provider lists it\n", d.group)
+			_, err = fmt.Fprintf(w, "SKIP %s pinned: %s\n", d.group, pinSkipReason(d.pinMisses, names))
 		case routeNotListed:
 			skipped++
 			_, err = fmt.Fprintf(w, "SKIP %s not in the LIST of %s\n", d.group, providerLabel(names, d.provider))
@@ -387,6 +401,24 @@ func writeRouteDryRun(w io.Writer, a *routeAssignment, names map[int64]string, o
 	return err
 }
 
+// pinSkipReason says why a pinned group was skipped: "pinned provider disabled ..." when no
+// pinned provider is usable, else per pinned provider "provider <name>: its LIST failed" or
+// "provider <name>: not in its LIST", joined by "; ".
+func pinSkipReason(misses []pinMiss, names map[int64]string) string {
+	if len(misses) == 0 {
+		return "pinned provider disabled (or host, port or max conns not set)"
+	}
+	parts := make([]string, 0, len(misses))
+	for _, m := range misses {
+		why := "not in its LIST"
+		if m.listFailed {
+			why = "its LIST failed"
+		}
+		parts = append(parts, fmt.Sprintf("provider %s: %s", providerLabel(names, m.provider), why))
+	}
+	return strings.Join(parts, "; ")
+}
+
 // filterAllowedGroups keeps the remote groups that providerID may serve (router.Allowed), for
 // the newsgroup list sync: a provider only adds groups the fetcher would fetch from it.
 func filterAllowedGroups(remote []nntp.GroupInfo, router *nntp.GroupRouter, providerID int64) (kept []nntp.GroupInfo, dropped int) {
@@ -399,4 +431,70 @@ func filterAllowedGroups(remote []nntp.GroupInfo, router *nntp.GroupRouter, prov
 		}
 	}
 	return kept, dropped
+}
+
+// dateStartLog warns about the groups of one provider pass that start at their newest local
+// article date: the provider has no progress row for a group that already holds articles (the
+// routing moved it there, or a new provider). The fetcher keeps that start (the user,
+// 2026-11-27), so the provider's older articles of the group are not fetched unless the admin
+// asks for them with -download-start-date and -provider. The first routeLogFirst groups get a
+// line each with that command; summary logs the count. Safe for concurrent use.
+type dateStartLog struct {
+	provider string
+	logf     func(format string, args ...any)
+	mu       sync.Mutex
+	n        int
+}
+
+// newDateStartLog returns the date-start log of provider's pass, writing with logf.
+func newDateStartLog(provider string, logf func(format string, args ...any)) *dateStartLog {
+	return &dateStartLog{provider: provider, logf: logf}
+}
+
+// note records that group starts at start (its newest local article date) and logs it while
+// fewer than routeLogFirst groups were logged.
+func (l *dateStartLog) note(group string, start time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.n++
+	if l.n > routeLogFirst {
+		return
+	}
+	day := start.Format("2006-01-02")
+	l.logf("[FETCHER-ROUTE]: provider '%s' has no progress for group '%s', which has local articles: starting at the newest local article date %s, older articles of the group on this provider are not fetched; to fetch them run: pugleaf-fetcher -download-start-date YYYY-MM-DD -group %s -provider %s (YYYY-MM-DD: the oldest date wanted, before %s)",
+		l.provider, group, day, shellArg(group), shellArg(l.provider), day)
+}
+
+// summary logs how many groups of the pass started at their newest local article date (nothing
+// when none did).
+func (l *dateStartLog) summary() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.n == 0 {
+		return
+	}
+	more := ""
+	if l.n > routeLogFirst {
+		more = fmt.Sprintf(", the first %d logged above", routeLogFirst)
+	}
+	l.logf("[FETCHER-ROUTE]: provider '%s': %d groups started at their newest local article date%s; their older articles on this provider are not fetched (use -download-start-date with -group and -provider %s)",
+		l.provider, l.n, more, shellArg(l.provider))
+}
+
+// count returns how many groups were noted.
+func (l *dateStartLog) count() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.n
+}
+
+// shellArg returns s as one shell word for a command in a log line: unchanged when it holds only
+// characters a shell leaves alone, else in single quotes.
+func shellArg(s string) string {
+	if s != "" && strings.IndexFunc(s, func(r rune) bool {
+		return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("._-+:/@%=,", r))
+	}) < 0 {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

@@ -81,7 +81,8 @@ too, and is logged as not in the LIST of its last candidate.
   shutdown signal stops the run between passes.
 - The fetch progress is stored per provider name and group. When the routing moves a group that
   already has articles to a provider without progress, that provider starts with a download by
-  date from the last stored article, not with the whole group.
+  date from the last stored article, not with the whole group (see "Older articles after a
+  routing change" below).
 - If a provider answers `411` (no such group) for a group assigned to it, the group is counted
   and logged at the end of the pass. It is not tried on another provider in the same run.
 
@@ -89,23 +90,57 @@ The log lines start with `[FETCHER-ROUTE]`. They show the number of groups per p
 groups not in a provider's LIST, the pinned groups skipped, the groups without a provider, each
 pass, and the 411 count of a pass. A line that names groups lists at most the first 10.
 
+## Older articles after a routing change
+
+A group that already has articles and has no progress on the provider it now goes to (you routed
+or pinned it there, or added a new provider) starts on that provider at the date of its newest
+local article. The provider's older articles of that group, for example gmane's archive of a
+group the primary carried before, are **not fetched automatically**. The fetcher logs one
+`[FETCHER-ROUTE]` line per such group (the first 10 of a pass, then a count) with the provider,
+the start date and the command to fetch the rest:
+
+```
+[FETCHER-ROUTE]: provider 'news.gmane.io' has no progress for group 'gmane.comp.lang.c', which has local articles: starting at the newest local article date 2026-11-20, older articles of the group on this provider are not fetched; to fetch them run: pugleaf-fetcher -download-start-date YYYY-MM-DD -group gmane.comp.lang.c -provider news.gmane.io (YYYY-MM-DD: the oldest date wanted, before 2026-11-20)
+```
+
+To fetch the backlog, run the fetcher once with the oldest date you want, the groups and that
+provider:
+
+```
+./pugleaf-fetcher -download-start-date 2010-01-01 -group 'gmane.comp.*' -provider news.gmane.io
+```
+
+This rescans those groups on that provider only, from that date, and moves only that provider's
+progress; the other providers' progress stays as it is. `-provider` must be the provider the
+routing assigns the groups to (the `ROUTE` lines of `-routing-dry-run` show it). Each run fetches
+at most `-max-batch` articles per group; the next normal runs go on from the stored progress.
+Articles the database already has are found by message-id in the history index (on by default)
+and not stored twice. The admin page shows a
+notice with the number of groups this affects when you save a routing field or a global route.
+
 ## Flags
 
 | flag | effect |
 |---|---|
 | `-group 'a.*,b.*;c.test'` | several patterns, separated by blanks, `,` or `;`. Each pattern is an exact name, a name prefix with a final `*` (`alt.*` = every database group starting with `alt.`) or `$all`. `''`, `$all` and `*` select every group. This is not wildmat: `!` and `?` have no meaning here |
-| `-provider NAME` | run only this provider's pass. The provider must take part in the routing (see above), otherwise the fetcher exits with an error. It is also the provider for `-fetch-newsgroups-from-remote` and `-reset-progress`. For `-reset-progress` any provider name works, because the progress is only a stored number |
+| `-provider NAME` | run only this provider's pass: only the groups the routing assigns to it are fetched. The run still loads the LIST of every provider that takes part, because the assignment is global (a group goes to the first candidate whose LIST has it). The provider must take part in the routing (see above), otherwise the fetcher exits with an error. It is also the provider for `-fetch-newsgroups-from-remote` and `-reset-progress`. For `-reset-progress` any provider name works, because the progress is only a stored number |
 | `-routing-dry-run` | load the LISTs, print the assignment and exit 0 without fetching articles. It needs no `-nntphostname`. With `-provider`, only that provider's `ROUTE` lines are printed |
 
 Dry-run output, one line per selected group, then a summary:
 
 ```
 ROUTE gmane.discuss -> news.gmane.io
-SKIP pin.test pinned: no pinned provider lists it
+SKIP pin.test pinned: provider pinsrv: its LIST failed
+SKIP pin.other pinned: provider pinsrv: not in its LIST
+SKIP dead.test pinned: pinned provider disabled (or host, port or max conns not set)
 SKIP alt.gone not in the LIST of news.example.net
 SKIP x.test no provider
-[FETCHER-ROUTE] dry run: 1 groups routed, 3 skipped, no articles fetched
+[FETCHER-ROUTE] dry run: 1 groups routed, 5 skipped, no articles fetched
 ```
+
+A pinned `SKIP` line gives the reason per pinned provider (joined by `; ` when several are
+pinned): its LIST failed, or the group is not in its LIST. When every pinned provider is
+disabled (or lacks host, port or max connections) it says so.
 
 `-fetch-newsgroups-from-remote` uses the primary or `-provider`. It adds only the groups that the
 routing lets that provider serve (the provider is one of the group's candidates). Example:
@@ -131,6 +166,10 @@ All routing settings are on the providers tab (`/admin?tab=providers`):
   `POST /admin/routes`, `/admin/routes/update`, `/admin/routes/delete` and `/admin/routes/toggle`.
 - **Deleting providers.** A provider that a route points to cannot be deleted. Delete or move
   the route first.
+- **Backlog notice.** After you save a provider whose routing changed (or a new provider with
+  routing), or add or edit a global route, the success message says how many existing groups
+  that already have articles the patterns match, and that their older articles on that provider
+  are not fetched automatically (see "Older articles after a routing change").
 
 The preset list (`internal/web/provider_presets.go`):
 

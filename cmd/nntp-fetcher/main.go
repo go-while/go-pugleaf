@@ -51,7 +51,12 @@ func showUsageExamples() {
 	fmt.Println("  Each group is fetched from ONE provider per run: the first candidate whose LIST has it.")
 	fmt.Println("  One pass per provider, in priority order; '[FETCHER-ROUTE]' lines log assignments and skips.")
 	fmt.Println("  ./pugleaf-fetcher -routing-dry-run   (print 'ROUTE group -> provider' / 'SKIP ...' and exit)")
-	fmt.Println("  ./pugleaf-fetcher -provider gmane     (run only the pass of provider 'gmane')")
+	fmt.Println("  ./pugleaf-fetcher -provider gmane     (run only the pass of provider 'gmane'; the LIST of every")
+	fmt.Println("                                        provider taking part is still read: the assignment is global)")
+	fmt.Println("  A group that already has articles and has no progress on its provider (the routing moved it,")
+	fmt.Println("  or a new provider) starts at its newest local article date: older articles of that provider")
+	fmt.Println("  are not fetched (a '[FETCHER-ROUTE]' line names the group). Fetch them with:")
+	fmt.Println("  ./pugleaf-fetcher -download-start-date 2020-01-01 -group 'gmane.*' -provider gmane")
 	fmt.Println()
 	fmt.Println("Article downloading (active groups that exist in the database and on the provider):")
 	fmt.Println("  ./pugleaf-fetcher -data ./data -nntphostname news.example.org   (first run: store the hostname)")
@@ -114,7 +119,7 @@ func main() {
 		// Download options with date filtering
 		downloadStartDate = flag.String("download-start-date", "", "Rescan from this date (YYYY-MM-DD), ignoring the stored progress")
 		resetProgress     = flag.Int64("reset-progress", 0, "Set the stored last article number of the primary provider (or -provider) to N for the -group selection (names, 'prefix.*' = the groups in the database with that prefix, empty/$all = every group in the database) and exit; 0 = off")
-		providerName      = flag.String("provider", "", "Use only this provider (by name): only its pass of the fetch run, and the provider of -reset-progress and -fetch-newsgroups-from-remote (default: every pass; the primary for those two)")
+		providerName      = flag.String("provider", "", "Use only this provider (by name): only its pass of the fetch run (the LIST of every provider taking part is still read, the assignment is global), and the provider of -reset-progress and -fetch-newsgroups-from-remote (default: every pass; the primary for those two)")
 		routingDryRun     = flag.Bool("routing-dry-run", false, "Print the group -> provider assignment and the skipped groups of this run, then exit without fetching articles")
 		showHelp          = flag.Bool("help", false, "Show usage examples and exit")
 	)
@@ -533,6 +538,7 @@ func runPass(proc *processor.Processor, pool *nntp.Pool, bq *processor.BatchQueu
 	}()
 	var wgCheck sync.WaitGroup
 	startDates := make(map[string]time.Time) // per-group date-based download start (UTC midnight)
+	dateStarts := newDateStartLog(providerName, log.Printf)
 	limitCheckWorker := runtime.NumCPU() / 2
 	if limitCheckWorker < 1 {
 		limitCheckWorker = 1
@@ -617,13 +623,15 @@ func runPass(proc *processor.Processor, pool *nntp.Pool, bq *processor.BatchQueu
 					}
 
 					// If group has existing articles, use date-based download instead
-					// (also when the routing moved the group to this provider)
+					// (also when the routing moved the group to this provider): the
+					// provider's older articles are skipped, dateStarts warns with the
+					// -download-start-date command (the user, 2026-11-27)
 					if lastArticleDate != nil {
-						log.Printf("[FETCHER]: No progress for provider '%s' but group '%s' has existing articles, switching to date-based download from: %s",
-							providerName, *ng, lastArticleDate.Format("2006-01-02"))
-						mux.Lock()
 						y, m, d := lastArticleDate.Date()
-						startDates[*ng] = time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+						start := time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+						dateStarts.note(*ng, start)
+						mux.Lock()
+						startDates[*ng] = start
 						mux.Unlock()
 					}
 
@@ -922,6 +930,7 @@ func runPass(proc *processor.Processor, pool *nntp.Pool, bq *processor.BatchQueu
 		log.Printf("[FETCHER-ROUTE]: provider '%s': %d assigned groups answered 411 (no such group), not tried on another provider this run: %s",
 			providerName, st.groupNotFound, firstNames(st.groupNotFoundNames))
 	}
+	dateStarts.summary()
 	return st
 }
 
