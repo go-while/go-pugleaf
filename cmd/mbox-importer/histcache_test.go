@@ -31,21 +31,21 @@ func TestMboxCmdHistoryCacheFlagsRefused(t *testing.T) {
 func TestMboxCmdHistoryCacheFlags(t *testing.T) {
 	miNeedDB(t)
 	miSetup(t)
-	oldCache, oldMmap := processor.HistoryPageCacheMB, processor.HistoryMmapMB
-	t.Cleanup(func() { processor.HistoryPageCacheMB, processor.HistoryMmapMB = oldCache, oldMmap })
+	oldCache, oldMmap, oldEnable := processor.HistoryPageCacheMB, processor.HistoryMmapMB, history.ENABLE_HISTORY
+	t.Cleanup(func() {
+		processor.HistoryPageCacheMB, processor.HistoryMmapMB = oldCache, oldMmap
+		history.ENABLE_HISTORY = oldEnable // runWith sets it from -history
+	})
 
-	// the test processor (no DNS check) takes the two values from the processor package the
-	// way NewProcessorE does, and records what it saw
+	// the test processor skips NewProcessorE's DNS check but opens the history with the
+	// configuration NewProcessorE builds (processor.HistoryConfigFor), so the log line below
+	// only shows the values when processor passes them on; it records the globals it saw
 	var gotCache, gotMmap int
 	newProcessor = func(db *database.Database, hashLen int) (*processor.Processor, error) {
 		gotCache, gotMmap = processor.HistoryPageCacheMB, processor.HistoryMmapMB
-		cfg := history.DefaultConfig()
-		cfg.HistoryDir = filepath.Join(db.GetDataDir(), "history")
+		cfg := processor.HistoryConfigFor(db.GetDataDir(), hashLen)
 		cfg.BatchTimeout = 50 // ms
 		cfg.MaxConnections = 4
-		cfg.UseShortHashLen = hashLen
-		cfg.PageCacheMB = processor.HistoryPageCacheMB
-		cfg.MmapMB = processor.HistoryMmapMB
 		hist, err := history.NewHistory(cfg, db.WG)
 		if err != nil {
 			return nil, err
@@ -79,6 +79,10 @@ func TestMboxCmdHistoryCacheFlags(t *testing.T) {
 			"[HISTORY] WARN: PageCacheMB 99999 is above the cap, using 4096",
 			"[HISTORY] WARN: MmapMB 99999 is above the cap, using 2047",
 			"[HISTORY] page cache 4096 MiB per connection (_cache_size=-4194304, max 4 connections per file), mmap 2047 MiB per file (mmap_size=2146435072)",
+		}},
+		{"history off", []string{"-history=false", "-history-cache-mb", "64"}, 64, 0, []string{
+			"[MBOX-IMPORT] -history-cache-mb / -history-mmap-mb have no effect with -history=false",
+			"[HISTORY] history index disabled",
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

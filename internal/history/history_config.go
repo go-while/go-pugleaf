@@ -158,6 +158,13 @@ type HistoryConfig struct {
 
 	// SQLite memory settings, applied on every connection of every database file (plan
 	// history-cache-knobs). 0 = the default; ValidateConfig clamps to MaxPageCacheMB / MaxMmapMB.
+	// The page cache is private to each connection (up to MaxConnections per file x 16 files,
+	// so the total can reach that many times the value; cache_size is a soft limit). The mmap
+	// is the setting that shares memory: mapped pages are the kernel's page cache pages of the
+	// file, shared by all connections and processes. On ZFS those pages sit in the Linux page
+	// cache on top of the ARC (the data is held twice), so there the ARC size matters more and
+	// a large mmap may bring little. A mapping also turns a disk I/O error on a mapped page into
+	// SIGBUS instead of an error return (SQLite behaviour).
 	PageCacheMB int `yaml:"page_cache_mb" json:"page_cache_mb"` // page cache per connection in MiB (0 = 8000 KiB, _cache_size=-8000)
 	MmapMB      int `yaml:"mmap_mb" json:"mmap_mb"`             // PRAGMA mmap_size per connection in MiB (0 = 16 MiB)
 }
@@ -172,6 +179,7 @@ const (
 
 	// MaxPageCacheMB caps PageCacheMB. SQLite fills a page cache only as pages are read, so
 	// the cap bounds the worst case: up to MaxConnections connections per file, 16 files.
+	// Sensible values are a few tens of MiB; the cap is far above that on purpose.
 	MaxPageCacheMB = 4096
 	// MaxMmapMB caps MmapMB just below SQLite's own compile-time limit SQLITE_MAX_MMAP_SIZE
 	// (0x7fff0000 = 2 GiB - 64 KiB in the bundled go-sqlite3 build), which SQLite applies
@@ -308,7 +316,7 @@ func registerHistoryDriver() {
 func performanceHook(mmapBytes int64) func(*sqlite3.SQLiteConn) error {
 	pragmas := []string{
 		"PRAGMA temp_store = MEMORY",                             // Temp tables/indices in RAM
-		"PRAGMA mmap_size = " + strconv.FormatInt(mmapBytes, 10), // reads served from the shared OS page cache
+		"PRAGMA mmap_size = " + strconv.FormatInt(mmapBytes, 10), // mapped reads use the kernel page cache (see HistoryConfig.MmapMB)
 		"PRAGMA wal_autocheckpoint = 2000",                       // Checkpoint every N pages
 	}
 	return func(conn *sqlite3.SQLiteConn) error {

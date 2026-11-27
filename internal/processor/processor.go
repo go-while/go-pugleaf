@@ -117,6 +117,22 @@ func NewBatchQueue() *BatchQueue {
 	}
 }
 
+// HistoryConfigFor returns the history configuration NewProcessorE opens the history index
+// with: <dataDir>/history, the hardcoded values, and HistoryPageCacheMB / HistoryMmapMB as
+// they are at the call. Tests that build their own processor (no DNS check) use it too.
+func HistoryConfigFor(dataDir string, useShortHashLen int) *history.HistoryConfig {
+	return &history.HistoryConfig{
+		HistoryDir:      filepath.Join(dataDir, "history"),
+		CacheExpires:    60,                   // HARDCODED
+		CachePurge:      15,                   // HARDCODED
+		ShardMode:       history.SHARD_16_256, // CAN NOT BE CHANGED ! ! 16 databases with 256 tables each
+		MaxConnections:  8,                    // HARDCODED
+		UseShortHashLen: useShortHashLen,      // Use the configurable short hash length
+		PageCacheMB:     HistoryPageCacheMB,   // 0 = default
+		MmapMB:          HistoryMmapMB,        // 0 = default
+	}
+}
+
 // NewProcessorE creates a Processor and returns an error instead of exiting the process
 // when the hostname is missing or invalid or the history system cannot be initialized.
 // The hostname checks run before db is used.
@@ -138,18 +154,7 @@ func NewProcessorE(db *database.Database, nntpPool *nntp.Pool, useShortHashLen i
 	}
 
 	// Initialize history system with 16-DB sharding
-	historyConfig := &history.HistoryConfig{
-		HistoryDir:      filepath.Join(db.GetDataDir(), "history"),
-		CacheExpires:    60,                   // HARDCODED
-		CachePurge:      15,                   // HARDCODED
-		ShardMode:       history.SHARD_16_256, // CAN NOT BE CHANGED ! ! 16 databases with 256 tables each
-		MaxConnections:  8,                    // HARDCODED
-		UseShortHashLen: useShortHashLen,      // Use the configurable short hash length
-		PageCacheMB:     HistoryPageCacheMB,   // 0 = default
-		MmapMB:          HistoryMmapMB,        // 0 = default
-	}
-
-	hist, err := history.NewHistory(historyConfig, db.WG)
+	hist, err := history.NewHistory(HistoryConfigFor(db.GetDataDir(), useShortHashLen), db.WG)
 	if err != nil {
 		return nil, fmt.Errorf("history init: %w", err)
 	}

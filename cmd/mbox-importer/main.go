@@ -53,8 +53,8 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		nntpHostname    = fs.String("nntphostname", "", "your NNTP hostname: required on the first run, later runs use the value stored in the database (must resolve in DNS)")
 		useShortHashLen = fs.Int("useshorthashlen", 7, "legacy short hash length (2-7); fixed after the first run, later runs use the stored value")
 		useHistory      = fs.Bool("history", true, "maintain and use the message-id history index (<data>/history)")
-		histCacheMB     = fs.Int("history-cache-mb", 0, fmt.Sprintf("SQLite page cache of the history index per connection in MiB (0 = default 8000 KiB; up to %d per connection, 8 connections per file, 16 files; larger values are clamped)", history.MaxPageCacheMB))
-		histMmapMB      = fs.Int("history-mmap-mb", 0, fmt.Sprintf("SQLite mmap size of the history index per connection in MiB, served from the shared OS page cache (0 = default 16; at most %d, SQLite's own limit; larger values are clamped)", history.MaxMmapMB))
+		histCacheMB     = fs.Int("history-cache-mb", 0, fmt.Sprintf("SQLite page cache of the history index, private to each connection, in MiB (0 = default 8000 KiB; sensible: a few tens; the total can reach 128 x the value: 8 connections per file, 16 files; at most %d, larger values are clamped)", history.MaxPageCacheMB))
+		histMmapMB      = fs.Int("history-mmap-mb", 0, fmt.Sprintf("SQLite mmap size of the history index per connection in MiB, the setting that shares memory: mapped pages are the kernel page cache (0 = default 16; at most %d, SQLite's own limit, larger values are clamped). On ZFS the mapped pages are held on top of the ARC, so the ARC size matters more there; a disk I/O error on a mapped page ends the process with SIGBUS", history.MaxMmapMB))
 		forceGroup      = fs.String("group", "", "file every article into this group (default: the input's own group when the article lists it, else the first group of its Newsgroups header)")
 		groupFromName   = fs.Bool("group-from-name", false, "file every article of an input into the group named by its file name (de.comm.foo.mbox.gz -> de.comm.foo); not with -group")
 		sevenZip        = fs.String("7z", "7z", "program used to unpack .7z inputs (name in PATH or a full path)")
@@ -282,6 +282,9 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		defer func() { track.close(lastRun, code) }()
 	}
 	log.Printf("[MBOX-IMPORT] Starting go-pugleaf mbox-importer (version %s) parallel=%d max-batch=%d max-queue=%d", config.AppVersion, *parallel, *maxBatch, queueSize)
+	if !opts.history && (*histCacheMB != 0 || *histMmapMB != 0) {
+		log.Printf("[MBOX-IMPORT] -history-cache-mb / -history-mmap-mb have no effect with -history=false")
+	}
 	for _, err := range expandErrs {
 		log.Printf("[MBOX-IMPORT] input error: %v", err)
 	}

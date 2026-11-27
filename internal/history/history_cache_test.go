@@ -39,37 +39,46 @@ func hcCheckPools(t *testing.T, s *SQLite3ShardedDB, wantCache, wantMmap int64) 
 	t.Helper()
 	ctx := context.Background()
 	for _, idx := range hcShards {
-		db, err := s.GetShardedDB(idx, false)
+		hcCheckShard(t, ctx, s, idx, wantCache, wantMmap)
+	}
+}
+
+// hcCheckShard is hcCheckPools for one file. Every connection is released by a defer
+// registered right after it was acquired, so a failing check (t.Fatalf) never leaves one
+// checked out, and all are back in the pool when it returns (a later check of the same
+// pool needs them again).
+func hcCheckShard(t *testing.T, ctx context.Context, s *SQLite3ShardedDB, idx int, wantCache, wantMmap int64) {
+	t.Helper()
+	db, err := s.GetShardedDB(idx, false)
+	if err != nil {
+		t.Fatalf("GetShardedDB(%d): %v", idx, err)
+	}
+	conns := make([]*sql.Conn, 0, hcConnsPerShard)
+	for i := 0; i < hcConnsPerShard; i++ {
+		c, err := db.Conn(ctx)
 		if err != nil {
-			t.Fatalf("GetShardedDB(%d): %v", idx, err)
+			t.Fatalf("shard %x conn %d: %v", idx, i, err)
 		}
-		conns := make([]*sql.Conn, 0, hcConnsPerShard)
-		for i := 0; i < hcConnsPerShard; i++ {
-			c, err := db.Conn(ctx)
-			if err != nil {
-				t.Fatalf("shard %x conn %d: %v", idx, i, err)
-			}
-			conns = append(conns, c)
-		}
-		for i, c := range conns {
-			var cache, mmap int64
-			if err := c.QueryRowContext(ctx, "PRAGMA cache_size").Scan(&cache); err != nil {
-				t.Fatalf("shard %x conn %d: PRAGMA cache_size: %v", idx, i, err)
-			}
-			if err := c.QueryRowContext(ctx, "PRAGMA mmap_size").Scan(&mmap); err != nil {
-				t.Fatalf("shard %x conn %d: PRAGMA mmap_size: %v", idx, i, err)
-			}
-			if cache != wantCache {
-				t.Errorf("shard %x conn %d: cache_size = %d, want %d", idx, i, cache, wantCache)
-			}
-			if mmap != wantMmap {
-				t.Errorf("shard %x conn %d: mmap_size = %d, want %d", idx, i, mmap, wantMmap)
-			}
-		}
-		for _, c := range conns {
+		defer func() {
 			if err := c.Close(); err != nil {
-				t.Errorf("shard %x: close conn: %v", idx, err)
+				t.Errorf("shard %x conn %d: close: %v", idx, i, err)
 			}
+		}()
+		conns = append(conns, c)
+	}
+	for i, c := range conns {
+		var cache, mmap int64
+		if err := c.QueryRowContext(ctx, "PRAGMA cache_size").Scan(&cache); err != nil {
+			t.Fatalf("shard %x conn %d: PRAGMA cache_size: %v", idx, i, err)
+		}
+		if err := c.QueryRowContext(ctx, "PRAGMA mmap_size").Scan(&mmap); err != nil {
+			t.Fatalf("shard %x conn %d: PRAGMA mmap_size: %v", idx, i, err)
+		}
+		if cache != wantCache {
+			t.Errorf("shard %x conn %d: cache_size = %d, want %d", idx, i, cache, wantCache)
+		}
+		if mmap != wantMmap {
+			t.Errorf("shard %x conn %d: mmap_size = %d, want %d", idx, i, mmap, wantMmap)
 		}
 	}
 }
