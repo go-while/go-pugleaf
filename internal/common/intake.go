@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -53,13 +54,52 @@ const (
 	intakeMaxHeaderLine   = 998 // RFC 5322 §2.1.1, without CRLF
 )
 
-// ValidMessageID reports whether s is a syntactically valid message-id
-// (RFC 5536 §3.1.3, RFC 3977 §3.6): at most 250 octets, enclosed in "<" and ">",
-// every inner octet in %x21-7E, no ">" and no "<" except inside a no-fold-literal
-// id-right (decision D3: "<" is RFC 5536 mdtext, so "<x@[a<b]>" is valid), exactly
-// one "@" outside a "[...]" literal, a non-empty left part and a right part that is
-// either dot-atom-text or a no-fold-literal "[...]".
+// laxMessageID switches ValidMessageID from RFC 5536 to RFC 3977 message-id syntax (INN's
+// laxmid). It is set once at program start (-laxmid of nntp-fetcher and nntp-server) before
+// any connection or worker starts; the atomic only keeps a late reader race-free.
+var laxMessageID atomic.Bool
+
+// SetLaxMessageID turns the lax message-id syntax on or off for the whole process (see
+// ValidMessageID). Call it once at program start; the default is strict.
+func SetLaxMessageID(on bool) { laxMessageID.Store(on) }
+
+// LaxMessageID reports whether the lax message-id syntax is on.
+func LaxMessageID() bool { return laxMessageID.Load() }
+
+// ValidMessageID reports whether s is a syntactically valid message-id. By default
+// (strict) that is the RFC 5536 msg-id of ValidStrictMessageID. With SetLaxMessageID(true)
+// it is the RFC 3977 §3.6 message-id of validLaxMessageID instead: no "@" is needed, so
+// the ids of old mailing-list gateways such as <12799969_70875456> pass. Every id the
+// strict syntax accepts is also accepted in lax mode.
 func ValidMessageID(s string) bool {
+	if laxMessageID.Load() {
+		return validLaxMessageID(s)
+	}
+	return ValidStrictMessageID(s)
+}
+
+// validLaxMessageID reports whether s is an RFC 3977 §3.6 message-id:
+// "<" 1*248(%x21-3D / %x3F-7E) ">", that is 3..250 octets, enclosed in "<" and ">",
+// every inner octet printable US-ASCII except ">".
+func validLaxMessageID(s string) bool {
+	if len(s) > intakeMaxMessageIDLen || len(s) < 3 || s[0] != '<' || s[len(s)-1] != '>' {
+		return false
+	}
+	for i := 1; i < len(s)-1; i++ {
+		if c := s[i]; c < 0x21 || c > 0x7E || c == '>' {
+			return false
+		}
+	}
+	return true
+}
+
+// ValidStrictMessageID reports whether s is a syntactically valid RFC 5536 message-id
+// (RFC 5536 §3.1.3, RFC 3977 §3.6), whatever SetLaxMessageID says: at most 250 octets,
+// enclosed in "<" and ">", every inner octet in %x21-7E, no ">" and no "<" except inside
+// a no-fold-literal id-right (decision D3: "<" is RFC 5536 mdtext, so "<x@[a<b]>" is
+// valid), exactly one "@" outside a "[...]" literal, a non-empty left part and a right
+// part that is either dot-atom-text or a no-fold-literal "[...]".
+func ValidStrictMessageID(s string) bool {
 	if len(s) > intakeMaxMessageIDLen || len(s) < 5 || s[0] != '<' || s[len(s)-1] != '>' {
 		return false
 	}
@@ -584,7 +624,8 @@ func GenerateMessageID(identity string) (string, error) {
 		return "", fmt.Errorf("generate message-id: %w", err)
 	}
 	id := "<" + intakeMsgIDEncoding.EncodeToString(buf[:]) + "@" + identity + ">"
-	if !ValidMessageID(id) {
+	// always RFC 5536: an id this server makes must be valid for every peer, lax or not
+	if !ValidStrictMessageID(id) {
 		return "", fmt.Errorf("generate message-id: invalid identity %q", identity)
 	}
 	return id, nil
