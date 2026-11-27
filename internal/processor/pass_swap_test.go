@@ -8,6 +8,13 @@ package processor
 // old GetQ, new queue, next run) must neither panic with a send on a closed channel nor lose
 // the next run's articles.
 //
+// What it does not do: prove the wait for the feeder by itself. The feeder checks runDone
+// before every send and a feeder parked on the full queue wakes on runDone, so without that wait
+// only a scheduler-sized window is left (between the check and the send), which a test without
+// hooks cannot hit reliably (a mutation run without the wait passed 10 of 10). It catches any
+// sender that keeps sending on the pass's GetQ after the run returned (a panic on the closed
+// queue), and a pass swap that loses the next run's articles.
+//
 // No wall-clock assertion: testWait (PUGLEAF_TEST_DEADLINE) is only a hang guard.
 
 import (
