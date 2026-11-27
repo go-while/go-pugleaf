@@ -117,7 +117,7 @@ func TestGrtMigration0039Existing(t *testing.T) {
 		`DROP TABLE group_routes`,
 		`ALTER TABLE providers DROP COLUMN routing`,
 		`DELETE FROM schema_migrations WHERE filename = '0039_main_fetcher_routing.sql'`,
-		`INSERT INTO providers (name, grp, host, port, ssl, max_conns, enabled, priority) VALUES ('old.provider', 'x', 'news.example.invalid', 119, 0, 2, 1, 1)`,
+		`INSERT INTO providers (name, grp, host, port, ssl, username, password, max_conns, enabled, priority) VALUES ('old.provider', 'x', 'news.example.invalid', 119, 0, '', '', 2, 1, 1)`,
 	} {
 		if _, err := mainDB.Exec(stmt); err != nil {
 			t.Fatalf("%s: %v", stmt, err)
