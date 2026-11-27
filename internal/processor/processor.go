@@ -96,6 +96,12 @@ var (
 	// RunRSLIGHTImport is used to indicate if the importer should run the legacy RockSolid Light importer
 	RunRSLIGHTImport = false
 
+	// HistoryPageCacheMB and HistoryMmapMB are passed to the history index as
+	// HistoryConfig.PageCacheMB / MmapMB by NewProcessorE (0 = the history defaults:
+	// 8000 KiB page cache and 16 MiB mmap per connection). Set them before NewProcessorE.
+	HistoryPageCacheMB int = 0
+	HistoryMmapMB      int = 0
+
 	// Global Batch Queue (proc_DLArt.go)
 	Batch = NewBatchQueue()
 )
@@ -108,6 +114,22 @@ func NewBatchQueue() *BatchQueue {
 		Check: make(chan *string, 1),                      // check newsgroups
 		TodoQ: make(chan *nntp.GroupInfo, DownloadMaxPar), // todo newsgroups
 		GetQ:  make(chan *BatchItem, 128),                 // get articles
+	}
+}
+
+// HistoryConfigFor returns the history configuration NewProcessorE opens the history index
+// with: <dataDir>/history, the hardcoded values, and HistoryPageCacheMB / HistoryMmapMB as
+// they are at the call. Tests that build their own processor (no DNS check) use it too.
+func HistoryConfigFor(dataDir string, useShortHashLen int) *history.HistoryConfig {
+	return &history.HistoryConfig{
+		HistoryDir:      filepath.Join(dataDir, "history"),
+		CacheExpires:    60,                   // HARDCODED
+		CachePurge:      15,                   // HARDCODED
+		ShardMode:       history.SHARD_16_256, // CAN NOT BE CHANGED ! ! 16 databases with 256 tables each
+		MaxConnections:  8,                    // HARDCODED
+		UseShortHashLen: useShortHashLen,      // Use the configurable short hash length
+		PageCacheMB:     HistoryPageCacheMB,   // 0 = default
+		MmapMB:          HistoryMmapMB,        // 0 = default
 	}
 }
 
@@ -132,16 +154,7 @@ func NewProcessorE(db *database.Database, nntpPool *nntp.Pool, useShortHashLen i
 	}
 
 	// Initialize history system with 16-DB sharding
-	historyConfig := &history.HistoryConfig{
-		HistoryDir:      filepath.Join(db.GetDataDir(), "history"),
-		CacheExpires:    60,                   // HARDCODED
-		CachePurge:      15,                   // HARDCODED
-		ShardMode:       history.SHARD_16_256, // CAN NOT BE CHANGED ! ! 16 databases with 256 tables each
-		MaxConnections:  8,                    // HARDCODED
-		UseShortHashLen: useShortHashLen,      // Use the configurable short hash length
-	}
-
-	hist, err := history.NewHistory(historyConfig, db.WG)
+	hist, err := history.NewHistory(HistoryConfigFor(db.GetDataDir(), useShortHashLen), db.WG)
 	if err != nil {
 		return nil, fmt.Errorf("history init: %w", err)
 	}
