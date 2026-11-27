@@ -1,6 +1,7 @@
 package web
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
@@ -48,7 +50,15 @@ func (s *WebServer) adminCreateProvider(c *Context) {
 		c.Redirect(http.StatusSeeOther, "/admin?tab=providers")
 		return
 	}
-	var err error
+
+	// Fetcher routing (plan fetcher-group-routing): empty = no restriction
+	routing, err := cleanRoutingPatterns(c.PostForm("routing"))
+	if err != nil {
+		session.SetError("Invalid routing: " + err.Error())
+		c.Redirect(http.StatusSeeOther, "/admin?tab=providers")
+		return
+	}
+
 	// Parse port
 	port := 119 // Default NNTP port
 	if portStr != "" {
@@ -172,6 +182,7 @@ func (s *WebServer) adminCreateProvider(c *Context) {
 		Enabled:       enabled,
 		Posting:       postingEnabled,
 		Compress:      compress,
+		Routing:       routing,
 		ProxyEnabled:  proxyEnabled,
 		ProxyType:     proxyType,
 		ProxyHost:     proxyHost,
@@ -241,6 +252,16 @@ func (s *WebServer) adminUpdateProvider(c *Context) {
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
 		session.SetError("Invalid provider ID")
+		c.Redirect(http.StatusSeeOther, "/admin?tab=providers")
+		return
+	}
+
+	// Fetcher routing: SetProvider writes every field, so a request without the routing field
+	// keeps the stored value (below); a posted empty field clears it.
+	routingRaw, routingPosted := c.GetPostForm("routing")
+	routing, err := cleanRoutingPatterns(routingRaw)
+	if err != nil {
+		session.SetError("Invalid routing: " + err.Error())
 		c.Redirect(http.StatusSeeOther, "/admin?tab=providers")
 		return
 	}
@@ -359,6 +380,9 @@ func (s *WebServer) adminUpdateProvider(c *Context) {
 		return
 	}
 	name = existingProvider.Name
+	if !routingPosted {
+		routing = existingProvider.Routing
+	}
 
 	// Handle username: clear if checkbox is checked, otherwise use form value or preserve existing
 	finalUsername := username
@@ -412,6 +436,7 @@ func (s *WebServer) adminUpdateProvider(c *Context) {
 		Enabled:       enabled,
 		Posting:       postingEnabled,
 		Compress:      compress,
+		Routing:       routing,
 		ProxyEnabled:  proxyEnabled,
 		ProxyType:     proxyType,
 		ProxyHost:     proxyHost,
@@ -479,6 +504,11 @@ func (s *WebServer) adminDeleteProvider(c *Context) {
 
 	// Delete provider (we need to add DeleteProvider function to queries.go)
 	err = s.DB.DeleteProvider(id)
+	if errors.Is(err, database.ErrProviderHasRoutes) {
+		session.SetError("Provider id=" + idStr + " is not deleted: global routing pins groups to it. Delete or move those routes first.")
+		c.Redirect(http.StatusSeeOther, "/admin?tab=providers")
+		return
+	}
 	if err != nil {
 		log.Printf("Error deleting provider ID %d: %v", id, err)
 		session.SetError("Failed to delete provider id=" + idStr)
