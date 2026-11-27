@@ -4,9 +4,10 @@ package main
 // real nntp-fetcher binary (kit proc.GoBuild) against fake providers (kit fakeserver in Store
 // mode), with a scratch -data root in t.TempDir().
 //
-//	A  primary, empty routing     127.0.0.1  alt.test, gmane.test, pin.test
+//	A  primary, empty routing     127.0.0.1  alt.test, gmane.test, pin.test (+ back.test)
 //	B  routing "gmane.*,gwene.*"  127.0.0.2  gmane.test (+ gmane.new, gwene.new, alt.fromb, pin.fromb)
 //	C  pin target of "pin.*"      127.0.0.3  a closed port
+//	D  routing "back.*"           127.0.0.4  back.test with an older backlog (last step only)
 //
 // The providers listen on different loopback addresses, not on different ports of 127.0.0.1: the
 // fetcher caches each provider's LIST in <data>/cache/<host>.list, keyed by the host only.
@@ -112,8 +113,12 @@ func routeE2EHostname() (string, error) {
 // routeE2EArticle is article n of group on provider prefix ("a" or "b"): a complete article as
 // the fetcher's intake needs it, with a message-id that names provider and group.
 func routeE2EArticle(prefix, group string, n int) fakeserver.Article {
+	return routeE2EArticleAt(prefix, group, n, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).Add(time.Duration(n)*time.Minute))
+}
+
+// routeE2EArticleAt is routeE2EArticle with the given Date.
+func routeE2EArticleAt(prefix, group string, n int, date time.Time) fakeserver.Article {
 	id := fmt.Sprintf("<%s-%s-%d@e2e-routing.invalid>", prefix, group, n)
-	date := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).Add(time.Duration(n) * time.Minute)
 	return fakeserver.Article{
 		MessageID: id,
 		Date:      date,
@@ -136,8 +141,9 @@ type routeE2EGroup struct {
 }
 
 // routeE2EStart starts a fake provider on addr (Store mode) and returns it with the message-ids
-// of each group. A loopback address that cannot be bound skips the test.
-func routeE2EStart(t *testing.T, addr, prefix string, groups []routeE2EGroup) (*fakeserver.Server, map[string][]string) {
+// of each group. extra articles are filed after groups, in the group of their Newsgroups header
+// (created when missing). A loopback address that cannot be bound skips the test.
+func routeE2EStart(t *testing.T, addr, prefix string, groups []routeE2EGroup, extra ...fakeserver.Article) (*fakeserver.Server, map[string][]string) {
 	t.Helper()
 	st := fakeserver.NewStore()
 	ids := make(map[string][]string)
@@ -148,6 +154,14 @@ func routeE2EStart(t *testing.T, addr, prefix string, groups []routeE2EGroup) (*
 			st.AddArticle(g.name, a)
 			ids[g.name] = append(ids[g.name], a.MessageID)
 		}
+	}
+	for _, a := range extra {
+		g := a.Header("Newsgroups")
+		if _, ok := st.Group(g); !ok {
+			st.AddGroup(g, "routing e2e "+g)
+		}
+		st.AddArticle(g, a)
+		ids[g] = append(ids[g], a.MessageID)
 	}
 	s, err := fakeserver.Start(fakeserver.Options{Addr: addr, Store: st, Deadline: routeE2EWait})
 	if err != nil {
@@ -355,7 +369,10 @@ func TestE2ERoutingFetcher(t *testing.T) {
 			t.Fatalf("mkdir %s: %v", d, err)
 		}
 	}
-	e.a, e.idsA = routeE2EStart(t, "127.0.0.1:0", "a", []routeE2EGroup{{"alt.test", 3}, {"gmane.test", 2}, {"pin.test", 2}})
+	// back.test (A's article at midday, so its day is the same in every time zone) is only in
+	// the database from the last step on
+	e.a, e.idsA = routeE2EStart(t, "127.0.0.1:0", "a", []routeE2EGroup{{"alt.test", 3}, {"gmane.test", 2}, {"pin.test", 2}},
+		routeE2EArticleAt("a", "back.test", 1, time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)))
 	e.b, e.idsB = routeE2EStart(t, "127.0.0.2:0", "b", []routeE2EGroup{
 		{"gmane.test", 2}, {"gmane.new", 1}, {"gwene.new", 1}, {"alt.fromb", 1}, {"pin.fromb", 1},
 	})
@@ -409,7 +426,7 @@ func TestE2ERoutingFetcher(t *testing.T) {
 	if !t.Run("dry-run", func(t *testing.T) {
 		out := e.fetcher(t, 0, "-routing-dry-run")
 		routeE2EWantLines(t, out, "ROUTE ", "ROUTE alt.test -> "+routeE2EProvA, "ROUTE gmane.test -> "+routeE2EProvB)
-		routeE2EWantLines(t, out, "SKIP ", "SKIP pin.test pinned: no pinned provider lists it")
+		routeE2EWantLines(t, out, "SKIP ", "SKIP pin.test pinned: provider "+routeE2EProvC+": its LIST failed")
 		routeE2EContains(t, out,
 			"[FETCHER-ROUTE] dry run: 2 groups routed, 1 skipped, no articles fetched",
 			"[FETCHER-ROUTE]: provider '"+routeE2EProvA+"': 1 groups",
@@ -446,7 +463,7 @@ func TestE2ERoutingFetcher(t *testing.T) {
 		// -provider: only that provider's ROUTE lines (the skips are always listed)
 		out = e.fetcher(t, 0, "-routing-dry-run", "-provider", routeE2EProvB)
 		routeE2EWantLines(t, out, "ROUTE ", "ROUTE gmane.test -> "+routeE2EProvB)
-		routeE2EWantLines(t, out, "SKIP ", "SKIP pin.test pinned: no pinned provider lists it")
+		routeE2EWantLines(t, out, "SKIP ", "SKIP pin.test pinned: provider "+routeE2EProvC+": its LIST failed")
 		routeE2EContains(t, out, "[FETCHER-ROUTE] dry run: 1 groups routed, 1 skipped, no articles fetched")
 		if n := e.a.Count("ARTICLE") + e.b.Count("ARTICLE"); n != 0 {
 			t.Errorf("dry runs sent %d ARTICLE commands, want 0", n)
@@ -558,7 +575,7 @@ func TestE2ERoutingFetcher(t *testing.T) {
 		return
 	}
 
-	t.Run("routing-cleared", func(t *testing.T) {
+	if !t.Run("routing-cleared", func(t *testing.T) {
 		if hostErr != nil {
 			t.Skipf("no usable -nntphostname (set PUGLEAF_E2E_HOST): %v", hostErr)
 		}
@@ -617,5 +634,100 @@ func TestE2ERoutingFetcher(t *testing.T) {
 		if got := prog[routeE2EProvA+"|gmane.test"]; got != 2 {
 			t.Errorf("progress (%s, gmane.test) = %d, want 2 from -reset-progress (progress rows %v)", routeE2EProvA, got, prog)
 		}
+	}) {
+		return
+	}
+
+	t.Run("date-start-backfill", func(t *testing.T) {
+		if hostErr != nil {
+			t.Skipf("no usable -nntphostname (set PUGLEAF_E2E_HOST): %v", hostErr)
+		}
+		routeE2EDateStartBackfill(t, e, host)
 	})
+}
+
+// routeE2EDateStartBackfill: a group with local articles routed to a provider without progress
+// starts there at its newest local article date (the provider's older articles are skipped and
+// a [FETCHER-ROUTE] line names the -download-start-date command); that command with -provider
+// then fetches the older articles from that provider only (the user's decision on F1,
+// 2026-11-27). Runs after routing-cleared: A is the only provider taking part.
+func routeE2EDateStartBackfill(t *testing.T, e *routeE2EEnv, host string) {
+	const group = "back.test"
+	const provD = "e2e-d"
+	// back.test gets its local article from A (the primary; no routing wants back.*)
+	routeE2EWithDB(t, e.data, func(db *database.Database) {
+		if err := db.InsertNewsgroup(&models.Newsgroup{Name: group, Active: true, Status: "y", LowWater: 1}); err != nil {
+			t.Fatalf("InsertNewsgroup %s: %v", group, err)
+		}
+	})
+	out := e.fetcher(t, 0, "-nntphostname", host, "-group", group)
+	routeE2ELacks(t, out, "starting at the newest local article date")
+	if got := routeE2EProgress(t, e.data)[routeE2EProvA+"|"+group]; got != 1 {
+		t.Fatalf("progress (%s, %s) = %d after the fetch from A, want 1", routeE2EProvA, group, got)
+	}
+
+	// D holds back.test with an older backlog A never had (1-6, 2025-06-01) and newer articles
+	// (7-8, 2026-01-05); then back.* is routed to D
+	var arts []fakeserver.Article
+	for i := 1; i <= 8; i++ {
+		date := time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC).Add(time.Duration(i) * time.Hour)
+		if i > 6 {
+			date = time.Date(2026, 1, 5, 12, 0, 0, 0, time.UTC).Add(time.Duration(i) * time.Hour)
+		}
+		arts = append(arts, routeE2EArticleAt("d", group, i, date))
+	}
+	d, idsD := routeE2EStart(t, "127.0.0.4:0", "d", nil, arts...)
+	routeE2EWithDB(t, e.data, func(db *database.Database) {
+		if err := db.AddProvider(&models.Provider{
+			Name: provD, Grp: "e2e", Host: "127.0.0.4", Port: d.Port(), MaxConns: 2,
+			Enabled: true, Priority: 4, Routing: "back.*",
+		}); err != nil {
+			t.Fatalf("AddProvider %s: %v", provD, err)
+		}
+	})
+	oldest, newer := idsD[group][0], idsD[group][6:]
+
+	// date start: D has no progress for back.test, which holds A's article of 2026-01-01
+	beforeA, beforeD := len(e.a.Lines()), len(d.Lines())
+	out = e.fetcher(t, 0, "-nntphostname", host, "-group", group)
+	routeE2EContains(t, out,
+		"[FETCHER-ROUTE]: provider '"+provD+"' has no progress for group '"+group+"', which has local articles: starting at the newest local article date 2026-01-01",
+		"to fetch them run: pugleaf-fetcher -download-start-date YYYY-MM-DD -group "+group+" -provider "+provD+" (YYYY-MM-DD: the oldest date wanted, before 2026-01-01)",
+		"[FETCHER-ROUTE]: provider '"+provD+"': 1 groups started at their newest local article date;",
+	)
+	gotD := routeE2EArticleIDs(d.Lines()[beforeD:])
+	for _, id := range newer {
+		if !slices.Contains(gotD, id) {
+			t.Errorf("date start: D was not asked for the newer article %s (asked %v)", id, gotD)
+		}
+	}
+	if slices.Contains(gotD, oldest) {
+		t.Errorf("date start: D was asked for its oldest article %s: the date start was not used (asked %v)", oldest, gotD)
+	}
+	if sel := routeE2ESelected(e.a.Lines()[beforeA:]); sel[group] != 0 {
+		t.Errorf("date start: A got GROUP %s: the routing gives it to D", group)
+	}
+
+	// backfill: -download-start-date with -provider D fetches D's older articles, from D only
+	beforeA, beforeD = len(e.a.Lines()), len(d.Lines())
+	out = e.fetcher(t, 0, "-nntphostname", host, "-download-start-date", "2025-05-01", "-group", group, "-provider", provD)
+	routeE2EContains(t, out, "[FETCHER-ROUTE]: -provider '"+provD+"': only its pass runs")
+	routeE2ELacks(t, out, "starting at the newest local article date")
+	gotD = routeE2EArticleIDs(d.Lines()[beforeD:])
+	if !slices.Contains(gotD, oldest) {
+		t.Errorf("backfill: D was not asked for its oldest article %s (asked %v)", oldest, gotD)
+	}
+	if sel := routeE2ESelected(e.a.Lines()[beforeA:]); len(sel) != 0 {
+		t.Errorf("backfill with -provider %s: A got GROUP commands %v", provD, sel)
+	}
+	if ids := routeE2EArticleIDs(e.a.Lines()[beforeA:]); len(ids) != 0 {
+		t.Errorf("backfill with -provider %s: A was asked for articles %v", provD, ids)
+	}
+	prog := routeE2EProgress(t, e.data)
+	if got := prog[provD+"|"+group]; got != 8 {
+		t.Errorf("progress (%s, %s) = %d, want 8 (progress rows %v)", provD, group, got, prog)
+	}
+	if got := prog[routeE2EProvA+"|"+group]; got != 1 {
+		t.Errorf("progress (%s, %s) = %d, want 1: the backfill on %s changed A's progress (progress rows %v)", routeE2EProvA, group, got, provD, prog)
+	}
 }

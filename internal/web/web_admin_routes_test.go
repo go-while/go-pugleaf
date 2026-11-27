@@ -430,3 +430,103 @@ func TestWarProvidersTabRenders(t *testing.T) {
 		t.Errorf("route edit form does not select provider %d", p.ID)
 	}
 }
+
+// TestWarRoutingBacklogNotice: saving a provider's routing or a global route tells how many
+// existing groups with articles (message_count > 0) the patterns want, matched as the fetcher's
+// router does, and that their older articles on that provider are not fetched automatically.
+func TestWarRoutingBacklogNotice(t *testing.T) {
+	db := w0DB(t)
+	_, cookie := w0NewUser(t, true)
+	base := w0Name("warbl") // unique prefix: other tests' groups never match
+	for name, count := range map[string]int64{
+		base + ".a": 5, base + ".b": 1, base + ".skip": 3, base + ".empty": 0, w0Name("warblother") + ".a": 9,
+	} {
+		if err := db.InsertNewsgroup(&models.Newsgroup{Name: name, MessageCount: count, Status: "y", LowWater: 1}); err != nil {
+			t.Fatalf("InsertNewsgroup(%s): %v", name, err)
+		}
+		t.Cleanup(func() {
+			if _, err := db.DeleteNewsgroup(name); err != nil {
+				t.Errorf("DeleteNewsgroup(%s): %v", name, err)
+			}
+		})
+	}
+	notice := func(n int, provider string) string {
+		return fmt.Sprintf(" Note: the patterns match %d existing groups that already have articles. Older articles of these groups on provider '%s' are not fetched automatically (use pugleaf-fetcher -download-start-date YYYY-MM-DD -group <groups> -provider '%s').", n, provider, provider)
+	}
+
+	// the count alone: last match wins, empty groups and empty patterns do not count
+	groups, err := db.MainDBGetAllNewsgroups()
+	if err != nil {
+		t.Fatalf("MainDBGetAllNewsgroups: %v", err)
+	}
+	for patterns, want := range map[string]int{
+		base + ".*":                       3,
+		base + ".*, !" + base + ".skip":   2,
+		base + ".a " + base + ".empty":    1,
+		"!" + base + ".a, " + base + ".*": 3,
+		"":                                0,
+	} {
+		if got := routingBacklogCount(groups, patterns); got != want {
+			t.Errorf("routingBacklogCount(%q) = %d, want %d", patterns, got, want)
+		}
+	}
+
+	// provider create: with matching routing the notice, without a match none
+	name := w0Name("warblprov")
+	_, success, failure := adfOptPost(t, cookie, "/admin/providers", url.Values{"name": {name}, "host": {"bl.test.invalid"}, "port": {"119"},
+		"routing": {base + ".*, !" + base + ".skip"}})
+	if failure != "" || success != "Provider created successfully"+notice(2, name) {
+		t.Fatalf("create with routing: success=%q error=%q", success, failure)
+	}
+	p, err := db.GetProviderByName(name)
+	if err != nil || p == nil {
+		t.Fatalf("GetProviderByName(%s) = %v, %v", name, p, err)
+	}
+	t.Cleanup(func() {
+		warDeleteRoutesOf(t, p.ID)
+		if err := db.DeleteProvider(int(p.ID)); err != nil {
+			t.Errorf("DeleteProvider(%d): %v", p.ID, err)
+		}
+	})
+	quiet := w0Name("warblquiet")
+	_, success, failure = adfOptPost(t, cookie, "/admin/providers", url.Values{"name": {quiet}, "host": {"blq.test.invalid"}, "port": {"119"},
+		"routing": {base + ".empty"}})
+	if failure != "" || success != "Provider created successfully" {
+		t.Errorf("create with routing matching only an empty group: success=%q error=%q", success, failure)
+	}
+	if q, err := db.GetProviderByName(quiet); err == nil && q != nil {
+		if err := db.DeleteProvider(int(q.ID)); err != nil {
+			t.Errorf("DeleteProvider(%d): %v", q.ID, err)
+		}
+	}
+
+	// provider update: unchanged routing no notice, changed routing the new count
+	id := fmt.Sprint(p.ID)
+	_, success, failure = adfOptPost(t, cookie, "/admin/providers/update", url.Values{"id": {id}, "host": {p.Host}, "routing": {p.Routing}})
+	if failure != "" || success != "Provider updated successfully" {
+		t.Errorf("update with the same routing: success=%q error=%q", success, failure)
+	}
+	_, success, failure = adfOptPost(t, cookie, "/admin/providers/update", url.Values{"id": {id}, "host": {p.Host}, "routing": {base + ".a"}})
+	if failure != "" || success != "Provider updated successfully"+notice(1, name) {
+		t.Errorf("update with new routing: success=%q error=%q", success, failure)
+	}
+
+	// global route add and edit
+	_, success, failure = adfOptPost(t, cookie, "/admin/routes", url.Values{"patterns": {base + ".*"}, "provider_id": {id}, "enabled": {"on"}})
+	if failure != "" || success != "Route added: "+base+".*"+notice(3, name) {
+		t.Fatalf("add route: success=%q error=%q", success, failure)
+	}
+	routes := warRoutesOf(t, p.ID)
+	if len(routes) != 1 {
+		t.Fatalf("%d routes for provider %d, want 1", len(routes), p.ID)
+	}
+	rid := fmt.Sprint(routes[0].ID)
+	_, success, failure = adfOptPost(t, cookie, "/admin/routes/update", url.Values{"id": {rid}, "patterns": {base + ".b"}, "provider_id": {id}, "enabled": {"on"}})
+	if failure != "" || success != "Route updated: "+base+".b"+notice(1, name) {
+		t.Errorf("edit route: success=%q error=%q", success, failure)
+	}
+	_, success, failure = adfOptPost(t, cookie, "/admin/routes/update", url.Values{"id": {rid}, "patterns": {base + ".empty"}, "provider_id": {id}, "enabled": {"on"}})
+	if failure != "" || success != "Route updated: "+base+".empty" {
+		t.Errorf("edit route to an empty group: success=%q error=%q", success, failure)
+	}
+}

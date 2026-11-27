@@ -69,6 +69,15 @@ func routingWants(pats []string, group string) bool {
 	return decision > 0
 }
 
+// RoutingMatcher compiles one routing pattern list (a providers.routing or group_routes.patterns
+// value) and returns whether it wants a group, by the matching GroupRouter uses. An empty list
+// wants no group (GroupRouter reads an empty provider routing as "no restriction"; callers
+// handle that case themselves).
+func RoutingMatcher(patterns string) func(group string) bool {
+	pats := ParsePeerPatterns(patterns)
+	return func(group string) bool { return routingWants(pats, group) }
+}
+
 type routedProvider struct {
 	id   int64
 	pats []string // nil: empty routing
