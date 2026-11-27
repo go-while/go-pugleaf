@@ -96,6 +96,12 @@ var (
 	// RunRSLIGHTImport is used to indicate if the importer should run the legacy RockSolid Light importer
 	RunRSLIGHTImport = false
 
+	// HistoryPageCacheMB and HistoryMmapMB are passed to the history index as
+	// HistoryConfig.PageCacheMB / MmapMB by NewProcessorE (0 = the history defaults:
+	// 8000 KiB page cache and 16 MiB mmap per connection). Set them before NewProcessorE.
+	HistoryPageCacheMB int = 0
+	HistoryMmapMB      int = 0
+
 	// Global Batch Queue (proc_DLArt.go)
 	Batch = NewBatchQueue()
 )
@@ -139,6 +145,8 @@ func NewProcessorE(db *database.Database, nntpPool *nntp.Pool, useShortHashLen i
 		ShardMode:       history.SHARD_16_256, // CAN NOT BE CHANGED ! ! 16 databases with 256 tables each
 		MaxConnections:  8,                    // HARDCODED
 		UseShortHashLen: useShortHashLen,      // Use the configurable short hash length
+		PageCacheMB:     HistoryPageCacheMB,   // 0 = default
+		MmapMB:          HistoryMmapMB,        // 0 = default
 	}
 
 	hist, err := history.NewHistory(historyConfig, db.WG)

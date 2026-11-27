@@ -1,8 +1,10 @@
 package history
 
 import (
+	"context"
 	"crypto/md5"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/hex"
 	"fmt"
 	"log"
@@ -39,6 +41,8 @@ type SQLite3Opts struct {
 	maxOpen  int
 	initOpen int
 	timeout  int64
+	// mmapBytes is the PRAGMA mmap_size of every connection (0 = historyDefaultMmapBytes)
+	mmapBytes int64
 }
 
 type MessageIdItem struct {
@@ -151,6 +155,57 @@ type HistoryConfig struct {
 	// Batching configuration for high-throughput writes
 	BatchSize    int   `yaml:"batch_size" json:"batch_size"`       // Number of ops per flush (default DefaultBatchSize)
 	BatchTimeout int64 `yaml:"batch_timeout" json:"batch_timeout"` // Milliseconds between forced flushes (default DefaultBatchTimeout)
+
+	// SQLite memory settings, applied on every connection of every database file (plan
+	// history-cache-knobs). 0 = the default; ValidateConfig clamps to MaxPageCacheMB / MaxMmapMB.
+	PageCacheMB int `yaml:"page_cache_mb" json:"page_cache_mb"` // page cache per connection in MiB (0 = 8000 KiB, _cache_size=-8000)
+	MmapMB      int `yaml:"mmap_mb" json:"mmap_mb"`             // PRAGMA mmap_size per connection in MiB (0 = 16 MiB)
+}
+
+const (
+	// historyDefaultCacheKiB is the page cache per connection when PageCacheMB is 0: the
+	// fixed _cache_size=-8000 (KiB) of the history DSN before PageCacheMB existed.
+	historyDefaultCacheKiB = 8000
+	// historyDefaultMmapBytes is the mmap size per connection when MmapMB is 0: the fixed
+	// PRAGMA mmap_size = 16777216 before MmapMB existed.
+	historyDefaultMmapBytes int64 = 16 << 20
+
+	// MaxPageCacheMB caps PageCacheMB. SQLite fills a page cache only as pages are read, so
+	// the cap bounds the worst case: up to MaxConnections connections per file, 16 files.
+	MaxPageCacheMB = 4096
+	// MaxMmapMB caps MmapMB just below SQLite's own compile-time limit SQLITE_MAX_MMAP_SIZE
+	// (0x7fff0000 = 2 GiB - 64 KiB in the bundled go-sqlite3 build), which SQLite applies
+	// silently: a larger value would be logged but not used.
+	MaxMmapMB = 2047
+)
+
+// pageCacheKiB is the effective page cache per connection in KiB (the N of _cache_size=-N)
+func (c *HistoryConfig) pageCacheKiB() int {
+	if c.PageCacheMB <= 0 {
+		return historyDefaultCacheKiB
+	}
+	return min(c.PageCacheMB, MaxPageCacheMB) * 1024
+}
+
+// mmapBytes is the effective PRAGMA mmap_size per connection in bytes
+func (c *HistoryConfig) mmapBytes() int64 {
+	if c.MmapMB <= 0 {
+		return historyDefaultMmapBytes
+	}
+	return int64(min(c.MmapMB, MaxMmapMB)) << 20
+}
+
+// clampMB returns v within 0..limit (0 = the default) and logs a correction
+func clampMB(name string, v, limit int) int {
+	switch {
+	case v < 0:
+		log.Printf("[HISTORY] WARN: %s %d is negative, using the default", name, v)
+		return 0
+	case v > limit:
+		log.Printf("[HISTORY] WARN: %s %d is above the cap, using %d", name, v, limit)
+		return limit
+	}
+	return v
 }
 
 // DefaultConfig returns a default history configuration
@@ -215,16 +270,25 @@ func (c *HistoryConfig) ValidateConfig() error {
 	if c.BatchTimeout <= 0 {
 		c.BatchTimeout = DefaultBatchTimeout
 	}
+
+	c.PageCacheMB = clampMB("PageCacheMB", c.PageCacheMB, MaxPageCacheMB)
+	c.MmapMB = clampMB("MmapMB", c.MmapMB, MaxMmapMB)
 	return nil
 }
 
-// historyDriverName is the database/sql driver used for the history DBs.
-// It is the regular go-sqlite3 driver plus a ConnectHook, so every pooled
-// connection gets the same settings (a plain db.Exec("PRAGMA ...") only reaches one connection).
+// historyDriverName is a registered database/sql driver for raw opens of a history file
+// (tests, tools): the go-sqlite3 driver with the default settings hook. The pools of
+// NewSQLite3DB do not open through it; they use a historyConnector with their own settings.
 const historyDriverName = "sqlite3_history"
 
-// historyDSNParams are applied by go-sqlite3 on every new connection
-const historyDSNParams = "?_journal_mode=WAL&_synchronous=OFF&_busy_timeout=30000&_txlock=immediate&_cache_size=-8000"
+// historyDSNBase are the DSN params of every history connection except the page cache
+const historyDSNBase = "?_journal_mode=WAL&_synchronous=OFF&_busy_timeout=30000&_txlock=immediate"
+
+// historyDSNParams are the DSN params go-sqlite3 applies on every new connection, with a page
+// cache of cacheKiB KiB (historyDefaultCacheKiB gives the DSN used before PageCacheMB)
+func historyDSNParams(cacheKiB int) string {
+	return historyDSNBase + "&_cache_size=-" + strconv.Itoa(cacheKiB)
+}
 
 var historyDriverOnce sync.Once
 
@@ -232,26 +296,57 @@ var historyDriverOnce sync.Once
 func registerHistoryDriver() {
 	historyDriverOnce.Do(func() {
 		sql.Register(historyDriverName, &sqlite3.SQLiteDriver{
-			ConnectHook: applyPerformanceSettings,
+			ConnectHook: performanceHook(historyDefaultMmapBytes),
 		})
 	})
 }
 
-// applyPerformanceSettings applies the PRAGMAs that have no DSN parameter.
-// Runs as ConnectHook on every new connection (after the DSN params were applied).
-func applyPerformanceSettings(conn *sqlite3.SQLiteConn) error {
+// performanceHook returns the ConnectHook that applies the PRAGMAs that have no DSN parameter,
+// with an mmap size of mmapBytes. It runs on every new connection (after the DSN params were
+// applied) and reads only its own immutable values, so pools with different settings and the
+// connection opener goroutines of database/sql share no mutable state.
+func performanceHook(mmapBytes int64) func(*sqlite3.SQLiteConn) error {
 	pragmas := []string{
-		"PRAGMA temp_store = MEMORY",       // Temp tables/indices in RAM
-		"PRAGMA mmap_size = 16777216",      // 16MB mmap
-		"PRAGMA wal_autocheckpoint = 2000", // Checkpoint every N pages
+		"PRAGMA temp_store = MEMORY",                             // Temp tables/indices in RAM
+		"PRAGMA mmap_size = " + strconv.FormatInt(mmapBytes, 10), // reads served from the shared OS page cache
+		"PRAGMA wal_autocheckpoint = 2000",                       // Checkpoint every N pages
 	}
-	for _, pragma := range pragmas {
-		if _, err := conn.Exec(pragma, nil); err != nil {
-			// best-effort: performance only, never fail the connection
-			log.Printf("[HISTORY] WARN: Failed to execute %s: %v", pragma, err)
+	return func(conn *sqlite3.SQLiteConn) error {
+		for _, pragma := range pragmas {
+			if _, err := conn.Exec(pragma, nil); err != nil {
+				// best-effort: performance only, never fail the connection
+				log.Printf("[HISTORY] WARN: Failed to execute %s: %v", pragma, err)
+			}
 		}
+		return nil
 	}
-	return nil
+}
+
+// historyConnector opens the connections of one history pool (sql.OpenDB): a go-sqlite3
+// driver of its own, never registered, whose ConnectHook carries this pool's mmap size, and
+// the DSN with this pool's page cache. Every connection database/sql opens for the pool, at
+// any time, gets the same settings; nothing global is set or registered per value.
+type historyConnector struct {
+	dsn string
+	drv *sqlite3.SQLiteDriver
+}
+
+func newHistoryConnector(dsn string, mmapBytes int64) *historyConnector {
+	return &historyConnector{
+		dsn: dsn,
+		drv: &sqlite3.SQLiteDriver{ConnectHook: performanceHook(mmapBytes)},
+	}
+}
+
+// Connect opens a new connection. go-sqlite3 has no context-aware open; database/sql's own
+// connector for a driver opened by name ignores the context the same way.
+func (c *historyConnector) Connect(context.Context) (driver.Conn, error) {
+	return c.drv.Open(c.dsn)
+}
+
+// Driver returns the pool's driver
+func (c *historyConnector) Driver() driver.Driver {
+	return c.drv
 }
 
 // Helper functions for directory operations
@@ -287,6 +382,8 @@ func (h *History) initDatabase() error {
 		Mode:         h.config.ShardMode,
 		BaseDir:      h.config.HistoryDir,
 		MaxOpenPerDB: h.config.MaxConnections,
+		CacheKiB:     h.config.pageCacheKiB(),
+		MmapBytes:    h.config.mmapBytes(),
 	}
 
 	shardedDB, err := NewSQLite3ShardedDB(config, true)

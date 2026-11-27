@@ -53,6 +53,8 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		nntpHostname    = fs.String("nntphostname", "", "your NNTP hostname: required on the first run, later runs use the value stored in the database (must resolve in DNS)")
 		useShortHashLen = fs.Int("useshorthashlen", 7, "legacy short hash length (2-7); fixed after the first run, later runs use the stored value")
 		useHistory      = fs.Bool("history", true, "maintain and use the message-id history index (<data>/history)")
+		histCacheMB     = fs.Int("history-cache-mb", 0, fmt.Sprintf("SQLite page cache of the history index per connection in MiB (0 = default 8000 KiB; up to %d per connection, 8 connections per file, 16 files; larger values are clamped)", history.MaxPageCacheMB))
+		histMmapMB      = fs.Int("history-mmap-mb", 0, fmt.Sprintf("SQLite mmap size of the history index per connection in MiB, served from the shared OS page cache (0 = default 16; at most %d, SQLite's own limit; larger values are clamped)", history.MaxMmapMB))
 		forceGroup      = fs.String("group", "", "file every article into this group (default: the input's own group when the article lists it, else the first group of its Newsgroups header)")
 		groupFromName   = fs.Bool("group-from-name", false, "file every article of an input into the group named by its file name (de.comm.foo.mbox.gz -> de.comm.foo); not with -group")
 		sevenZip        = fs.String("7z", "7z", "program used to unpack .7z inputs (name in PATH or a full path)")
@@ -168,6 +170,10 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		fmt.Fprintf(fs.Output(), "mbox-importer: -useshorthashlen %d is not in 2-7\n", *useShortHashLen)
 		return 2
 	}
+	if *histCacheMB < 0 || *histMmapMB < 0 {
+		fmt.Fprintf(fs.Output(), "mbox-importer: -history-cache-mb %d / -history-mmap-mb %d: negative (0 = default)\n", *histCacheMB, *histMmapMB)
+		return 2
+	}
 	if *commitTimeout < 0 {
 		fmt.Fprintf(fs.Output(), "mbox-importer: -commit-timeout %v is negative\n", *commitTimeout)
 		return 2
@@ -220,6 +226,9 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		uat.MaxMessageSize = opts.maxArticleSize
 	}
 	history.ENABLE_HISTORY = opts.history // read once by NewHistory
+	// SQLite memory of the history index, read by processor.NewProcessorE (0 = default)
+	processor.HistoryPageCacheMB = *histCacheMB
+	processor.HistoryMmapMB = *histMmapMB
 	database.GlobalDateParser = processor.ParseNNTPDate
 
 	stop := stopChan
