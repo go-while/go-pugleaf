@@ -220,10 +220,16 @@ func routeE2EWithDB(t *testing.T, data string, fn func(db *database.Database)) {
 	fn(db)
 }
 
-// routeE2EProgress returns the fetch progress rows as "provider|group" -> last article.
+// routeE2EProgress returns the fetch progress rows as "provider|group" -> last article. The
+// fetcher passes <data>/progress.db to database.NewProgressDB, which takes it as a directory:
+// the file is <data>/progress.db/progress.db.
 func routeE2EProgress(t *testing.T, data string) map[string]int64 {
 	t.Helper()
-	db, err := sql.Open("sqlite3", filepath.Join(data, "progress.db"))
+	path := filepath.Join(data, "progress.db", "progress.db")
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("progress database: %v", err)
+	}
+	db, err := sql.Open("sqlite3", path)
 	if err != nil {
 		t.Fatalf("open the progress database: %v", err)
 	}
