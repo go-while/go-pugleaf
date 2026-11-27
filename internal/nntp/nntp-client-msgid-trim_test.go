@@ -55,7 +55,7 @@ func TestCliOverviewTrimsMessageID(t *testing.T) {
 	}
 	streamed := cliCmdDrain(t, ch)
 	if !reflect.DeepEqual(streamed, want) {
-		t.Errorf("XHdrStreamed message-id = %q, want %q", streamed, want)
+		t.Errorf("XHdrStreamed message-id = %+v, want %+v", streamed, want)
 	}
 
 	var hdrs []HeaderLine
@@ -63,14 +63,14 @@ func TestCliOverviewTrimsMessageID(t *testing.T) {
 		t.Fatalf("XHdr: %v", err)
 	}
 	if !reflect.DeepEqual(hdrs, want) {
-		t.Errorf("XHdr Message-ID = %q, want %q", hdrs, want)
+		t.Errorf("XHdr Message-ID = %+v, want %+v", hdrs, want)
 	}
 
 	if _, err := cliCmdRun(t, func() error { var err error; hdrs, err = c.XHdr("g", "Subject", 1, 3); return err }); err != nil {
 		t.Fatalf("XHdr Subject: %v", err)
 	}
 	if wantSubj := []HeaderLine{{ArticleNum: 1, Value: " padded "}, {ArticleNum: 2, Value: "plain"}, {ArticleNum: 3, Value: "x"}}; !reflect.DeepEqual(hdrs, wantSubj) {
-		t.Errorf("XHdr Subject = %q, want %q (other fields are not trimmed)", hdrs, wantSubj)
+		t.Errorf("XHdr Subject = %+v, want %+v (other fields are not trimmed)", hdrs, wantSubj)
 	}
 
 	var ov []OverviewLine
