@@ -74,6 +74,14 @@ func newDownloadRun() *GroupBatch {
 //
 // It returns the number of queued items (duplicates not counted) and whether every entry of
 // xhdrChan was handed on (false after runDone or a shutdown).
+//
+// Single-sender invariant (plan fetcher-group-routing): this is the only sender on Batch.GetQ,
+// and it never sends after stopped is closed. DownloadArticles waits for stopped before it
+// returns, so once every DownloadArticles call of a provider pass has returned nobody can send
+// on that pass's GetQ any more: cmd/nntp-fetcher runPass then closes it and the next pass gets
+// a fresh BatchQueue. A new sender on Batch.GetQ, or a DownloadArticles path that returns
+// without waiting for stopped, breaks that close (send on closed channel); see
+// TestDLArtPassSwapFeederJoined.
 func feedDownloadRun(xhdrChan <-chan nntp.HeaderLine, runDone <-chan struct{}, stopped chan<- struct{}, returnQ, getQ chan<- *BatchItem, prepare func(messageID string) *BatchItem, handed *atomic.Int64) (queued int64, complete bool) {
 	defer func() {
 		for range xhdrChan {
@@ -236,7 +244,9 @@ func (proc *Processor) DownloadArticles(newsgroup string, DLParChan chan struct{
 		if feederStopped == nil {
 			return
 		}
-		<-feederStopped // bounded by one in-flight lookup; afterwards handed is final
+		// bounded by one in-flight lookup; afterwards handed is final and the feeder sends
+		// nothing more on Batch.GetQ (the fetcher's pass swap closes it: feedDownloadRun)
+		<-feederStopped
 		if outstanding := handed.Load() - received; outstanding > 0 {
 			go drainLateResults(groupBatch.ReturnQ, outstanding, shutdownChan)
 		}

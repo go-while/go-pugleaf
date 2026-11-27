@@ -41,10 +41,29 @@ func fetchUsable(p *models.Provider) bool {
 	return p.Host != "" && p.Port > 0 && p.MaxConns > 0
 }
 
-// listUsable reports whether an enabled provider can serve a newsgroup list sync (one
-// connection; MaxConns is not used).
-func listUsable(p *models.Provider) bool {
-	return p.Host != "" && p.Port > 0
+// newFetchRouter builds the router of a fetch run and of a newsgroup list sync. Both use
+// fetchUsable: the list sync adds the groups the fetcher would fetch from the provider (via
+// router.Allowed), so its primary, its -provider check and the pins must be the fetch run's. An
+// enabled provider without host, port or max conns is passed as disabled.
+func newFetchRouter(providers []*models.Provider, routes []*models.GroupRoute) (*nntp.GroupRouter, error) {
+	return nntp.NewGroupRouter(routerProviders(providers, fetchUsable), routes)
+}
+
+// checkFlagCombos refuses flag combinations that cannot mean what they say: -routing-dry-run
+// fetches and stores nothing, so it does not go with -reset-progress (which writes the
+// progress) or -fetch-newsgroups-from-remote (a list sync, which writes with
+// -fetch-newsgroups-force). main exits with code 2 on an error, like the flag package.
+func checkFlagCombos(routingDryRun bool, resetProgress int64, updateList string) error {
+	if !routingDryRun {
+		return nil
+	}
+	if resetProgress > 0 {
+		return fmt.Errorf("-routing-dry-run and -reset-progress do not go together: the dry run changes nothing, run -reset-progress on its own")
+	}
+	if updateList != "" {
+		return fmt.Errorf("-routing-dry-run and -fetch-newsgroups-from-remote do not go together: the list sync is a dry run without -fetch-newsgroups-force")
+	}
+	return nil
 }
 
 // routerProviders returns providers for nntp.NewGroupRouter: an enabled provider that usable

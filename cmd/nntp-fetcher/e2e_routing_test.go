@@ -445,6 +445,16 @@ func TestE2ERoutingFetcher(t *testing.T) {
 				t.Errorf("dry run: provider %s got GROUP commands: %v", name, sel)
 			}
 		}
+
+		// a dry run changes nothing: with -reset-progress it is refused (exit 2) before any
+		// provider is contacted, instead of silently skipping the reset
+		acceptedA, acceptedB := e.a.Accepted(), e.b.Accepted()
+		out = e.fetcher(t, 2, "-routing-dry-run", "-reset-progress", "5", "-group", "alt.test")
+		routeE2EContains(t, out, "-routing-dry-run and -reset-progress do not go together")
+		routeE2ELacks(t, out, "ROUTE ", "Resetting download progress")
+		if a, b := e.a.Accepted(), e.b.Accepted(); a != acceptedA || b != acceptedB {
+			t.Errorf("the refused dry run connected to the providers (A %d->%d, B %d->%d)", acceptedA, a, acceptedB, b)
+		}
 	}) {
 		return
 	}
