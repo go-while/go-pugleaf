@@ -178,10 +178,16 @@ databases below `-data` (default `./data`). `./pugleaf-fetcher -help` prints usa
 
 By default message-ids must be RFC 5536 msg-ids (`<left@right>`); an article whose id has no `@`
 (e.g. `<12799969_70875456>`) is skipped with an `invalid command argument` error. `-laxmid` (default
-off, like INN's `laxmid`) accepts any RFC 3977 message-id instead: `<`, 1 to 248 printable US-ASCII
-octets other than `>`, then `>`. It applies to the whole process (client commands and intake); ids
-this server generates stay RFC 5536. Give the NNTP server `-laxmid` too, so it accepts these
-articles from peers.
+off, like INN's `laxmid`) accepts any RFC 3977 message-id instead: `<`, 1 to 248 visible US-ASCII
+octets (no space, no control) other than `>`, then `>`. It applies to the whole process (client
+commands, intake and the outgoing feed); POST and the ids this server generates stay RFC 5536.
+- Run both `pugleaf-fetcher` and `pugleaf-nntp-server` with `-laxmid`: the server accepts and
+  feeds these articles only with it.
+- Do not drop `-laxmid` from the server while such articles are in its feed queue: without it they
+  are kept in the queue (one log line per batch) until `-laxmid` is back or the queue gives up on
+  them by age.
+- Peers without laxmid (INN's default) refuse these ids (a 501 counts as a refusal of that article).
+- `nntp-transfer` and `mbox-importer` have no `-laxmid`: they stay strict and skip these ids.
 
 ⚠️ **Important**: Stop the fetcher before adding new groups, or it will download all from scratch.
 
@@ -200,7 +206,7 @@ articles from peers.
 # -maxartsize int       maximum article size in bytes (0 = config default 32768)
 # -xref string          Xref: header: off, partial (default) or full
 # -post-commit-wait d   wait for the commit of a POSTed article before 240 (default 5s, 0 = no wait)
-# -laxmid               accept RFC 3977 message-ids without '@' in IHAVE/CHECK/TAKETHIS/POST (default: off)
+# -laxmid               accept and feed RFC 3977 message-ids without '@' (IHAVE/CHECK/TAKETHIS; POST stays strict; default: off)
 # -disable-webserver-post-threads   standalone server: build no threads (only the web view uses them;
 #                       recover-db -rebuild-threads builds them later, reply counts stay 0)
 # -idletimeout, -articledelay, -groupdelay, -errordelay, -local430ttl: see -h

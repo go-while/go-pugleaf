@@ -67,21 +67,22 @@ func SetLaxMessageID(on bool) { laxMessageID.Store(on) }
 func LaxMessageID() bool { return laxMessageID.Load() }
 
 // ValidMessageID reports whether s is a syntactically valid message-id. By default
-// (strict) that is the RFC 5536 msg-id of ValidStrictMessageID. With SetLaxMessageID(true)
-// it is the RFC 3977 §3.6 message-id of validLaxMessageID instead: no "@" is needed, so
+// (strict) that is the RFC 5536 msg-id of ValidStrictMessageID. POST always uses the strict
+// check (a poster must not claim a gateway's guessable id). With SetLaxMessageID(true)
+// it is the RFC 3977 §3.6 message-id of ValidLaxMessageID instead: no "@" is needed, so
 // the ids of old mailing-list gateways such as <12799969_70875456> pass. Every id the
 // strict syntax accepts is also accepted in lax mode.
 func ValidMessageID(s string) bool {
 	if laxMessageID.Load() {
-		return validLaxMessageID(s)
+		return ValidLaxMessageID(s)
 	}
 	return ValidStrictMessageID(s)
 }
 
-// validLaxMessageID reports whether s is an RFC 3977 §3.6 message-id:
-// "<" 1*248(%x21-3D / %x3F-7E) ">", that is 3..250 octets, enclosed in "<" and ">",
-// every inner octet printable US-ASCII except ">".
-func validLaxMessageID(s string) bool {
+// ValidLaxMessageID reports whether s is an RFC 3977 §3.6 message-id, whatever
+// SetLaxMessageID says: "<" 1*248(%x21-3D / %x3F-7E) ">", that is 3..250 octets, enclosed in
+// "<" and ">", every inner octet visible US-ASCII (no SP, no control) except ">".
+func ValidLaxMessageID(s string) bool {
 	if len(s) > intakeMaxMessageIDLen || len(s) < 3 || s[0] != '<' || s[len(s)-1] != '>' {
 		return false
 	}

@@ -131,3 +131,32 @@ func TestServerLaxmid(t *testing.T) {
 		}
 	})
 }
+
+// TestServerLaxmidPostStaysStrict (round 0 H1): POST checks a poster-supplied Message-ID with
+// the RFC 5536 syntax also with -laxmid, so a poster cannot claim a gateway's guessable id
+// before the real article arrives; a strict id is still accepted.
+func TestServerLaxmidPostStaysStrict(t *testing.T) {
+	g := hGroup(t, "lx2.laxpost", 0, nil)
+	proc := iwPass()
+	hs := iwPeerServer(t, proc, 0, 0)
+	user, pass := hUser(t, true, true)
+	common.SetLaxMessageID(true)
+	t.Cleanup(func() { common.SetLaxMessageID(false) })
+	poster := hs.dial(t)
+	authMustLogin(t, poster, user, pass)
+
+	lax := srvLaxmidID()
+	code, line, _ := poster.Post(iwWire(iwHead(lax, g, "lax post"), []string{"body"}))
+	if code != 441 || !strings.Contains(line, "invalid message-id") {
+		t.Fatalf("lax: POST with Message-ID %s: %q, want 441 ... invalid message-id", lax, line)
+	}
+	for _, a := range proc.processedArticles() {
+		if a.MessageID == lax {
+			t.Fatalf("lax: POST with Message-ID %s reached the processor", lax)
+		}
+	}
+	ok := iwID(g)
+	if code, line, _ := poster.Post(iwWire(iwHead(ok, g, "strict post"), []string{"body"})); code != 240 {
+		t.Fatalf("lax: POST with Message-ID %s: %q, want 240", ok, line)
+	}
+}

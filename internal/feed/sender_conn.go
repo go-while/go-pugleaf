@@ -174,6 +174,45 @@ func isPeerDenied(err error) bool {
 // the rest before writing anything; an id that reaches here invalid can never be sent).
 func sendableMessageID(id string) bool { return common.ValidMessageID(id) }
 
+// laxOnlyMessageID reports whether id is a message-id that only the lax syntax (-laxmid)
+// accepts: an RFC 3977 id without a valid RFC 5536 form, such as <12799969_70875456>.
+func laxOnlyMessageID(id string) bool {
+	return common.ValidLaxMessageID(id) && !common.ValidStrictMessageID(id)
+}
+
+// unsendableResult is the result for an id that may not be put on the wire. An id that only
+// the lax syntax accepts was queued while -laxmid was on: it is kept (deferred) until the
+// process runs with -laxmid again or the queue gives up on it by age; it is counted in
+// *waiting for one log line per batch. Every other such id can never be sent and is dropped.
+func unsendableResult(id string, waiting *int) Result {
+	if laxOnlyMessageID(id) {
+		*waiting++
+		return Result{MessageID: id, Outcome: OutcomeDefer, Err: "message-id needs -laxmid"}
+	}
+	return Result{MessageID: id, Outcome: OutcomeDrop, Err: "invalid message-id"}
+}
+
+// logLaxWaiting writes the one line per batch for the ids unsendableResult kept.
+func logLaxWaiting(peer string, waiting int) {
+	if waiting > 0 {
+		log.Printf("[FEED] peer %s: %d queued article(s) with a message-id only -laxmid accepts: kept in the queue until -laxmid is on", peer, waiting)
+	}
+}
+
+// laxRefusedByPeer reports whether a 501 for id is a strict peer refusing the syntax of an id
+// only the lax syntax accepts (INN without laxmid answers IHAVE/CHECK so): a refusal of that
+// one article for this peer, not of our feed. For any other id 501 keeps its meaning.
+func laxRefusedByPeer(code int, id string) bool {
+	return code == 501 && laxOnlyMessageID(id)
+}
+
+// logLaxRefused writes the one line per batch for the ids a strict peer refused with 501.
+func logLaxRefused(peer string, refused int) {
+	if refused > 0 {
+		log.Printf("[FEED] peer %s: refused %d article(s) with 501: message-ids without '@' (the peer has no laxmid)", peer, refused)
+	}
+}
+
 // streamTransport is a MODE STREAM connection: CHECK for the whole batch, then TAKETHIS for
 // the articles the peer wants. The responses are read by the client's demuxer, which keeps one
 // reader on the socket, and paired with the commands in order.
@@ -226,18 +265,22 @@ func (t *streamTransport) Send(arts []Outgoing) ([]Result, int, error) {
 		return res, 0, nil
 	}
 
-	// Only ids that may be written are offered; the rest can never be sent.
+	// Only ids that may be written are offered; the rest can never be sent (or wait for
+	// -laxmid, see unsendableResult).
 	ids := make([]*string, 0, len(arts))
 	checked := make([]int, 0, len(arts))
+	waiting, laxRefused := 0, 0
 	for i := range arts {
 		id := arts[i].Article.MessageID
 		if !sendableMessageID(id) {
-			res[i] = Result{MessageID: id, Outcome: OutcomeDrop, Err: "invalid message-id"}
+			res[i] = unsendableResult(id, &waiting)
 			continue
 		}
 		ids = append(ids, &arts[i].Article.MessageID)
 		checked = append(checked, i)
 	}
+	logLaxWaiting(t.peerName, waiting)
+	defer func() { logLaxRefused(t.peerName, laxRefused) }()
 	if len(ids) == 0 {
 		return res, 0, nil
 	}
@@ -282,6 +325,12 @@ func (t *streamTransport) Send(arts []Outgoing) ([]Result, int, error) {
 		case 439, 437: // refused by id
 			res[i] = Result{MessageID: id, Code: code, Outcome: OutcomeDone}
 		default:
+			if laxRefusedByPeer(code, arts[i].Article.MessageID) {
+				// a strict peer refuses the syntax of this one id: finished for this peer
+				laxRefused++
+				res[i] = Result{MessageID: arts[i].Article.MessageID, Code: code, Outcome: OutcomeDone}
+				continue
+			}
 			// 480, 500, 501, 502, 403: the peer does not take CHECK from us (any more).
 			err := denied(code, fmt.Errorf("feed: peer %s: CHECK %s answered %d", t.peerName, id, code))
 			failResults(res, checked[n:], err)
@@ -429,10 +478,15 @@ func (t *ihaveTransport) Send(arts []Outgoing) ([]Result, int, error) {
 		res[i] = Result{MessageID: arts[i].Article.MessageID, Outcome: OutcomeDefer, Err: "not offered"}
 	}
 	offered := 0
+	waiting, laxRefused := 0, 0
+	defer func() {
+		logLaxWaiting(t.peerName, waiting)
+		logLaxRefused(t.peerName, laxRefused)
+	}()
 	for i := range arts {
 		id := arts[i].Article.MessageID
 		if !sendableMessageID(id) {
-			res[i] = Result{MessageID: id, Outcome: OutcomeDrop, Err: "invalid message-id"}
+			res[i] = unsendableResult(id, &waiting)
 			continue
 		}
 		// txBytes > 0 means the article itself was written (the peer answered 335 first),
@@ -467,6 +521,12 @@ func (t *ihaveTransport) Send(arts []Outgoing) ([]Result, int, error) {
 			default:
 				res[i] = Result{MessageID: id, Code: code, Outcome: OutcomeDefer, Transferred: sent, Err: fmt.Sprintf("IHAVE %d", code)}
 			}
+		case laxRefusedByPeer(code, id) && errors.Is(err, nntp.ErrIHaveUnsupported):
+			// a strict peer refuses the syntax of this one id (nothing was written but the
+			// command): finished for this peer, the connection stays usable
+			offered++
+			laxRefused++
+			res[i] = Result{MessageID: id, Code: code, Outcome: OutcomeDone}
 		case errors.Is(err, common.ErrRelayHeadersInvalid), errors.Is(err, nntp.ErrInvalidCommandArg):
 			// Refused before anything was written: the connection stays usable.
 			res[i] = Result{MessageID: id, Outcome: OutcomeDrop, Err: err.Error()}
