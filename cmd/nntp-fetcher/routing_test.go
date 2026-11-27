@@ -321,9 +321,9 @@ func TestRouteListSyncFilter(t *testing.T) {
 		routeProvider(3, "pinned", 2, true, ""),
 	}
 	routes := []*models.GroupRoute{{ID: 1, Patterns: "pin.*", ProviderID: 3, Enabled: true}}
-	router, err := nntp.NewGroupRouter(routerProviders(providers, listUsable), routes)
+	router, err := newFetchRouter(providers, routes)
 	if err != nil {
-		t.Fatalf("NewGroupRouter: %v", err)
+		t.Fatalf("newFetchRouter: %v", err)
 	}
 	remote := []nntp.GroupInfo{{Name: "gmane.a", Count: 1}, {Name: "gmane.spam.x", Count: 2}, {Name: "alt.b", Count: 4}, {Name: "pin.c", Count: 8}}
 
@@ -348,6 +348,55 @@ func TestRouteListSyncFilter(t *testing.T) {
 	kept, _ = filterAllowedGroups(remote, router, 3)
 	if len(kept) != 1 || kept[0].Name != "pin.c" {
 		t.Fatalf("pinned: kept %v", kept)
+	}
+}
+
+// TestRouteListSyncFetchRouter: the list sync uses the fetch run's router, so a provider the
+// fetcher can never fetch from (max conns 0) is neither the list-sync primary nor a -provider
+// target, and groups pinned to it are added for nobody (the fetcher would skip them).
+func TestRouteListSyncFetchRouter(t *testing.T) {
+	noConns := routeProvider(1, "noconns", 0, true, "")
+	noConns.MaxConns = 0
+	providers := []*models.Provider{noConns, routeProvider(2, "primary", 1, true, "")}
+	routes := []*models.GroupRoute{{ID: 1, Patterns: "pin.*", ProviderID: 1, Enabled: true}}
+	router, err := newFetchRouter(providers, routes)
+	if err != nil {
+		t.Fatalf("newFetchRouter: %v", err)
+	}
+	p, err := primaryProvider(providers, router)
+	if err != nil || p.Name != "primary" {
+		t.Fatalf("list-sync primary = %v, %v; want 'primary' (noconns has max conns 0)", p, err)
+	}
+	if _, err := resolveProviderFlag(providers, router, "noconns"); err == nil {
+		t.Errorf("-provider noconns accepted for a list sync: the fetcher can never fetch from it")
+	}
+	remote := []nntp.GroupInfo{{Name: "alt.a", Count: 1}, {Name: "pin.b", Count: 1}}
+	kept, dropped := filterAllowedGroups(remote, router, p.ID)
+	if dropped != 1 || len(kept) != 1 || kept[0].Name != "alt.a" {
+		t.Fatalf("primary: kept %v dropped %d, want only alt.a (pin.b is pinned to noconns)", kept, dropped)
+	}
+}
+
+// TestRouteFlagCombos: -routing-dry-run refuses -reset-progress and
+// -fetch-newsgroups-from-remote (main exits 2); every other combination passes.
+func TestRouteFlagCombos(t *testing.T) {
+	for _, tc := range []struct {
+		dry     bool
+		reset   int64
+		list    string
+		refused bool
+	}{
+		{true, 5, "", true},
+		{true, 0, "$all", true},
+		{true, 0, "", false},
+		{true, -1, "", false}, // -reset-progress <= 0 is off
+		{false, 5, "", false},
+		{false, 0, "$all", false},
+	} {
+		err := checkFlagCombos(tc.dry, tc.reset, tc.list)
+		if (err != nil) != tc.refused {
+			t.Errorf("checkFlagCombos(dry=%v, reset=%d, list=%q) = %v, refused want %v", tc.dry, tc.reset, tc.list, err, tc.refused)
+		}
 	}
 }
 

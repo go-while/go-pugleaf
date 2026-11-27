@@ -71,6 +71,17 @@ Each group goes to **one** provider per run: the first candidate whose LIST has 
 that no pinned candidate lists is skipped. An unpinned group that no candidate lists is skipped
 too, and is logged as not in the LIST of its last candidate.
 
+**A provider that is down but has a fresh LIST cache.** The assignment only looks at the LIST.
+When a routed provider is down but its cached LIST is less than 24 hours old, it still gets its
+groups. Its pass then fails them at `GROUP`, and they wait for the next run. There is no failover
+by design: the primary does not take them in that run, and no progress moves. In the log you
+see the provider's line `[FETCHER-ROUTE]: provider '<name>': N groups`, then its pass
+(`[FETCHER-ROUTE]: pass i/n: provider '<name>' ...`) with `[FETCHER]: Error in select ng=...` or
+`pool.SelectGroup failed. connection EOF` per group and `downloaded 0 articles` in its
+`pass done` line. A provider whose LIST fails (no cache, connection refused) instead gets no
+groups: its unpinned groups fall back to the next candidate in the same run. `-routing-dry-run`
+shows the assignment the next run will use (it reads the same cached LISTs).
+
 ## How one run works
 
 - The fetcher reads providers and routes once, at the start of the run. Edits in the web apply
@@ -124,7 +135,7 @@ notice with the number of groups this affects when you save a routing field or a
 |---|---|
 | `-group 'a.*,b.*;c.test'` | several patterns, separated by blanks, `,` or `;`. Each pattern is an exact name, a name prefix with a final `*` (`alt.*` = every database group starting with `alt.`) or `$all`. `''`, `$all` and `*` select every group. This is not wildmat: `!` and `?` have no meaning here |
 | `-provider NAME` | run only this provider's pass: only the groups the routing assigns to it are fetched. The run still loads the LIST of every provider that takes part, because the assignment is global (a group goes to the first candidate whose LIST has it). The provider must take part in the routing (see above), otherwise the fetcher exits with an error. It is also the provider for `-fetch-newsgroups-from-remote` and `-reset-progress`. For `-reset-progress` any provider name works, because the progress is only a stored number |
-| `-routing-dry-run` | load the LISTs, print the assignment and exit 0 without fetching articles. It needs no `-nntphostname`. With `-provider`, only that provider's `ROUTE` lines are printed |
+| `-routing-dry-run` | load the LISTs, print the assignment and exit 0 without fetching articles. It needs no `-nntphostname`. With `-provider`, only that provider's `ROUTE` lines are printed. Together with `-reset-progress` or `-fetch-newsgroups-from-remote` the fetcher refuses to start (exit code 2): the dry run changes nothing, run those on their own |
 
 Dry-run output, one line per selected group, then a summary:
 
@@ -143,7 +154,10 @@ pinned): its LIST failed, or the group is not in its LIST. When every pinned pro
 disabled (or lacks host, port or max connections) it says so.
 
 `-fetch-newsgroups-from-remote` uses the primary or `-provider`. It adds only the groups that the
-routing lets that provider serve (the provider is one of the group's candidates). Example:
+routing lets that provider serve (the provider is one of the group's candidates). It uses the
+same provider rules as a fetch run: a provider without host, port or max connections above 0
+counts as disabled, so it is never the list provider and the groups pinned to it are not added.
+Example:
 
 ```
 ./pugleaf-fetcher -fetch-newsgroups-from-remote '$all' -fetch-newsgroups-force -provider news.gmane.io

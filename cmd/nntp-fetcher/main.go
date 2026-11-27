@@ -131,6 +131,10 @@ func main() {
 		showUsageExamples()
 		os.Exit(0)
 	}
+	if err := checkFlagCombos(*routingDryRun, *resetProgress, *updateList); err != nil {
+		fmt.Fprintf(os.Stderr, "[FETCHER]: %v\n", err)
+		os.Exit(2)
+	}
 	// Validate -download-start-date before anything is opened (the workers use the parsed value)
 	var downloadStart time.Time
 	if *downloadStartDate != "" {
@@ -234,7 +238,7 @@ func main() {
 	}
 	// Routing (plan fetcher-group-routing): without routing and pins the router's only
 	// participant is the first enabled usable provider, the one the fetcher always used.
-	router, err := nntp.NewGroupRouter(routerProviders(providers, fetchUsable), routes)
+	router, err := newFetchRouter(providers, routes)
 	if err != nil {
 		log.Fatalf("[FETCHER-ROUTE]: Invalid routing: %v", err)
 	}
@@ -918,6 +922,11 @@ func runPass(proc *processor.Processor, pool *nntp.Pool, bq *processor.BatchQueu
 	// Every DownloadArticles call has returned and its feeder has stopped (DownloadArticles
 	// waits for it): nothing sends to GetQ any more. Close it so the article workers end,
 	// then wait for the check side (on a shutdown it drains Check until the feeder stops).
+	// Single-sender invariant: processor.feedDownloadRun is the only sender on GetQ and
+	// DownloadArticles returns only after it stopped; a new GetQ sender, or a download path
+	// that returns before its feeder stopped, would make this close panic (pinned by
+	// processor's TestDLArtPassSwapFeederJoined). The download workers (waitHere) are the
+	// only callers of DownloadArticles in a pass.
 	close(bq.GetQ)
 	wgGet.Wait()
 	<-checkDone
@@ -1142,7 +1151,10 @@ func UpdateNewsgroupList(dataDir string, updateList *string, excludePrefix *stri
 	if err != nil {
 		return fmt.Errorf("failed to get global routes: %w", err)
 	}
-	router, err := nntp.NewGroupRouter(routerProviders(providers, listUsable), routes)
+	// the fetch run's router: the list sync may only pick and fill a provider the fetcher can
+	// fetch from (host, port and max conns set), and pins to an unusable provider skip their
+	// groups here too
+	router, err := newFetchRouter(providers, routes)
 	if err != nil {
 		return fmt.Errorf("invalid routing: %w", err)
 	}
