@@ -89,6 +89,7 @@ func showUsageExamples() {
 	fmt.Println("  -history=false         do not use the message-id history index [true]")
 	fmt.Println("  -reuse-crossposts=false  download crossposts again instead of copying them (needs -history) [true]")
 	fmt.Println("  -useshorthashlen N     history short hash length 2-7, fixed after the first run [7]")
+	fmt.Println("  -laxmid                accept message-ids without '@' (RFC 3977 syntax, INN's laxmid) [false]")
 	fmt.Println()
 }
 
@@ -122,9 +123,14 @@ func main() {
 		providerName      = flag.String("provider", "", "Use only this provider (by name): only its pass of the fetch run (the LIST of every provider taking part is still read, the assignment is global), and the provider of -reset-progress and -fetch-newsgroups-from-remote (default: every pass; the primary for those two)")
 		routingDryRun     = flag.Bool("routing-dry-run", false, "Print the group -> provider assignment and the skipped groups of this run, then exit without fetching articles (refuses -reset-progress and -fetch-newsgroups-from-remote, exit code 2)")
 		showHelp          = flag.Bool("help", false, "Show usage examples and exit")
+		laxMsgID          = flag.Bool("laxmid", false, "accept RFC 3977 message-ids without '@' (like INN's laxmid), e.g. <12799969_70875456> of old mailing-list gateways; default: RFC 5536 msg-id only")
 	)
 	flag.Parse()
 	history.ENABLE_HISTORY = *useHistory
+	common.SetLaxMessageID(*laxMsgID)
+	if *laxMsgID {
+		log.Printf("[FETCHER]: -laxmid: message-ids without '@' are accepted (RFC 3977 syntax)")
+	}
 	processor.ReuseCrossposts = *reuseCrossposts && *useHistory
 	// Show help if requested
 	if *showHelp {

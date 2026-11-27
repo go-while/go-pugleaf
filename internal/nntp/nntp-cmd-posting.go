@@ -531,7 +531,10 @@ func (c *ClientConnection) injectProtoArticle(head []string) ([]string, error) {
 	now := time.Now()
 	generated := false
 	if hasMsgID {
-		if !common.ValidMessageID(common.HeaderValue(head, "Message-ID")) {
+		// Always RFC 5536, also with -laxmid: the lax syntax is for relaying old gateway
+		// articles; a poster must not claim such a guessable id before the real article
+		// arrives (it would then be refused as a duplicate).
+		if !common.ValidStrictMessageID(common.HeaderValue(head, "Message-ID")) {
 			return nil, rejected("invalid message-id")
 		}
 	} else {
