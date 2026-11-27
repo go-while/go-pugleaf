@@ -97,12 +97,19 @@ var (
 	RunRSLIGHTImport = false
 
 	// Global Batch Queue (proc_DLArt.go)
-	Batch = &BatchQueue{
+	Batch = NewBatchQueue()
+)
+
+// NewBatchQueue returns an empty BatchQueue with the channel sizes of the global Batch (TodoQ
+// holds DownloadMaxPar groups). nntp-fetcher gives each provider pass a fresh one, because a
+// pass closes the GetQ of its queue when it ends.
+func NewBatchQueue() *BatchQueue {
+	return &BatchQueue{
 		Check: make(chan *string, 1),                      // check newsgroups
 		TodoQ: make(chan *nntp.GroupInfo, DownloadMaxPar), // todo newsgroups
 		GetQ:  make(chan *BatchItem, 128),                 // get articles
 	}
-)
+}
 
 // NewProcessorE creates a Processor and returns an error instead of exiting the process
 // when the hostname is missing or invalid or the history system cannot be initialized.
