@@ -465,6 +465,16 @@ func closeFetchPools(pools []*nntp.Pool) {
 	}
 }
 
+// returnBatchItem hands a fetched (or failed) item back to its DownloadArticles run. After a
+// shutdown signal nobody processes results any more (drainLateResults stops too), so the item
+// is dropped instead of blocking: runPass waits for the article workers.
+func returnBatchItem(item *processor.BatchItem) {
+	select {
+	case item.ReturnQ <- item:
+	case <-common.ShutdownChan:
+	}
+}
+
 // passOptions are the run-wide settings every provider pass uses.
 type passOptions struct {
 	db                *database.Database
@@ -711,8 +721,8 @@ func runPass(proc *processor.Processor, pool *nntp.Pool, bq *processor.BatchQueu
 					// nils item.MessageID/GroupName as soon as it takes the item, so a
 					// read after the send is a race and a nil dereference.
 					msgID, groupName := *item.MessageID, *item.GroupName
-					item.Error = err     // Set error on item
-					item.ReturnQ <- item // Send failed item back
+					item.Error = err      // Set error on item
+					returnBatchItem(item) // Send failed item back
 					switch err {
 					case nntp.ErrArticleNotFound, nntp.ErrArticleRemoved:
 						// article not found, not a big deal
@@ -732,8 +742,8 @@ func runPass(proc *processor.Processor, pool *nntp.Pool, bq *processor.BatchQueu
 						continue
 					}
 				}
-				item.Article = art   // set pointer
-				item.ReturnQ <- item // Send back the successfully downloaded article
+				item.Article = art    // set pointer
+				returnBatchItem(item) // Send back the successfully downloaded article
 				mux.Lock()
 				st.downloaded++
 				mux.Unlock()
