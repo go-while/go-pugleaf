@@ -163,8 +163,9 @@ type HistoryConfig struct {
 	// is the setting that shares memory: mapped pages are the kernel's page cache pages of the
 	// file, shared by all connections and processes. On ZFS those pages sit in the Linux page
 	// cache on top of the ARC (the data is held twice), so there the ARC size matters more and
-	// a large mmap may bring little. A mapping also turns a disk I/O error on a mapped page into
-	// SIGBUS instead of an error return (SQLite behaviour).
+	// a large mmap may bring little. A mapping also turns a disk I/O error on a mapped page, or a
+	// history file truncated or replaced underneath a running process, into SIGBUS instead of an
+	// error return (SQLite behaviour).
 	PageCacheMB int `yaml:"page_cache_mb" json:"page_cache_mb"` // page cache per connection in MiB (0 = 8000 KiB, _cache_size=-8000)
 	MmapMB      int `yaml:"mmap_mb" json:"mmap_mb"`             // PRAGMA mmap_size per connection in MiB (0 = 16 MiB)
 }
