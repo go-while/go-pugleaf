@@ -163,7 +163,9 @@ func (w *spoolWalker) stopped() bool {
 
 // setFileSource points w.opts at the input's options plus the source of file name: its
 // directory (SPOOL/alt/test/1 -> alt.test) and, for an mbox file in the spool, the group
-// of its name (targetGroup prefers them when the article lists them).
+// of its name (targetGroup prefers them when the article lists them; with -foreign skip an
+// article of such an mbox that lists neither is skipped as foreign, the directory alone never
+// skips one). The input's own name (a disc image, zip or .tar.gz) is no file-name group here.
 func (w *spoolWalker) setFileSource(name string) {
 	w.file = *w.base
 	w.file.sourceDir = w.sourceDirOf(path.Dir(name))
@@ -431,8 +433,8 @@ func (w *spoolWalker) progress() {
 	if w.c.Read%progressEvery != 0 {
 		return
 	}
-	log.Printf("[MBOX-IMPORT] progress file=%q files=%d read=%d stored=%d present=%d skipped=%d rejected=%d errors=%d",
-		w.label, w.c.Files, w.c.Read, w.c.Stored, w.c.Present, w.c.skippedTotal(), w.c.Rejected, w.c.Errors)
+	log.Printf("[MBOX-IMPORT] progress file=%q files=%d read=%d stored=%d present=%d skipped=%d (%s) rejected=%d errors=%d",
+		w.label, w.c.Files, w.c.Read, w.c.Stored, w.c.Present, w.c.skippedTotal(), w.c.skippedDetail(), w.c.Rejected, w.c.Errors)
 }
 
 // spoolSplitArticle splits the bytes of a one-article file into its header lines (without

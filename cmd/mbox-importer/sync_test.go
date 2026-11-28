@@ -189,7 +189,8 @@ func TestMboxSyncImport(t *testing.T) {
 	}
 
 	// 0 = no limit: the big article is stored
-	in = writeFile(t, "de.test.sync.big.mbox", syArticle("<big@sync.example>", nil, big))
+	// (named after the article's group: de.test.sync.big would make it foreign, -foreign skip)
+	in = writeFile(t, "de.test.sync.mbox", syArticle("<big@sync.example>", nil, big))
 	sink = newCaptureSink()
 	res = importInputs([]string{in}, &runOptions{}, sink, make(chan struct{}))
 	if res.Total.Stored != 1 || res.Total.Skipped[skipTooBig] != 0 {

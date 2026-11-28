@@ -193,6 +193,7 @@ type runOptions struct {
 	groupFromName                      bool   // -group-from-name: the target group of an input is its file name (inputOptions)
 	sourceGroup                        string // group named by the input's file name, preferred when the article lists it (targetGroup)
 	sourceDir                          string // spool directory of the article file ("SPOOL/alt/test"), preferred the same way
+	foreignFile                        bool   // -foreign file: an article that does not list sourceGroup goes to its first group; false (skip): it is skipped as foreign (targetGroup)
 	spool                              bool   // -spool: a positional directory or .zip input is a news spool (disc.go)
 	history, dryRun, keepBinary        bool
 	markDone, strictMsgID              bool
@@ -236,8 +237,8 @@ func readMbox(src *source, opts *runOptions, sink inputSink, stop <-chan struct{
 		c.Read++
 		handleMessage(c, msg.Headers(), msg.BodyReader(), opts, sink)
 		if c.Read%progressEvery == 0 {
-			log.Printf("[MBOX-IMPORT] progress file=%q read=%d stored=%d present=%d skipped=%d rejected=%d errors=%d",
-				src.Path, c.Read, c.Stored, c.Present, c.skippedTotal(), c.Rejected, c.Errors)
+			log.Printf("[MBOX-IMPORT] progress file=%q read=%d stored=%d present=%d skipped=%d (%s) rejected=%d errors=%d",
+				src.Path, c.Read, c.Stored, c.Present, c.skippedTotal(), c.skippedDetail(), c.Rejected, c.Errors)
 		}
 	}
 }
@@ -848,7 +849,20 @@ func importInput(path string, opts *runOptions, sink articleSink, stop <-chan st
 	for _, nm := range samples {
 		log.Printf("[MBOX-IMPORT]   near-miss file=%q line=%d %q", path, nm.line, nm.text)
 	}
+	warnAllForeign(path, c, opts)
 	return c, inputErr, stopped
+}
+
+// warnAllForeign logs a warning when foreign skips (targetGroup) took every article of an
+// input that was neither stored nor present: the file name most likely does not name the
+// group of its articles (an unknown archive suffix such as ".2014"), and the input should be
+// imported again with -foreign file.
+func warnAllForeign(path string, c *counters, opts *runOptions) {
+	if n := c.Skipped[skipForeign]; n > 0 && c.Stored == 0 && c.Present == 0 {
+		log.Printf("[MBOX-IMPORT] WARNING file=%q: all %d importable articles skipped as foreign: none lists %q or a group below it; "+
+			"if the file name does not name their group, import it again with -foreign file (with the tracking database: and -reimport)",
+			path, n, opts.sourceGroup)
+	}
 }
 
 // markDoneInput renames a fully imported input to INPUT.done. It reports whether the rename
@@ -883,8 +897,8 @@ func logTotals(r *runSummary) {
 	if t == nil {
 		t = newCounters("")
 	}
-	log.Printf("[MBOX-IMPORT] done inputs=%d marked-done=%d input-errors=%d read=%d stored=%d present=%d skipped=%d rejected=%d errors=%d commit-errors=%d",
-		r.Inputs, r.MarkedDone, r.InputErrors, t.Read, t.Stored, t.Present, t.skippedTotal(), t.Rejected, t.Errors, r.CommitErrors)
+	log.Printf("[MBOX-IMPORT] done inputs=%d marked-done=%d input-errors=%d read=%d stored=%d present=%d skipped=%d (%s) rejected=%d errors=%d commit-errors=%d",
+		r.Inputs, r.MarkedDone, r.InputErrors, t.Read, t.Stored, t.Present, t.skippedTotal(), t.skippedDetail(), t.Rejected, t.Errors, r.CommitErrors)
 }
 
 // logDryRunGroups logs the article count per target group, largest first.

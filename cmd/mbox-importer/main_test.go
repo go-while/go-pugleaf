@@ -328,7 +328,7 @@ func TestMboxCmdDryRun(t *testing.T) {
 		fmt.Sprintf("[MBOX-IMPORT] dry-run group=%q articles=1", miAlpha),
 		fmt.Sprintf("[MBOX-IMPORT] dry-run group=%q articles=1", miBeta),
 		fmt.Sprintf("[MBOX-IMPORT] file=%q read=3 stored=2 present=0 skipped=1 (no-subject=1) rejected=0 errors=0 parser-skipped=0 near-misses=0 stopped-early=false unread=false marked-done=false", in),
-		"[MBOX-IMPORT] done inputs=1 marked-done=0 input-errors=0 read=3 stored=2 present=0 skipped=1 rejected=0 errors=0 commit-errors=0",
+		"[MBOX-IMPORT] done inputs=1 marked-done=0 input-errors=0 read=3 stored=2 present=0 skipped=1 (no-subject=1) rejected=0 errors=0 commit-errors=0",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("log lacks %q\n%s", want, out)
