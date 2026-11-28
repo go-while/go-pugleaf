@@ -25,7 +25,9 @@ var ErrInvalidCommandArg = errors.New("nntp: invalid command argument")
 const maxClientCommandLine = 510
 
 // validMessageIDArg reports whether id may be sent as a message-id argument
-// (common.ValidMessageID: RFC 5536 msg-id, at most 250 octets).
+// (common.ValidMessageID: RFC 5536 msg-id, at most 250 octets; with -laxmid
+// (common.SetLaxMessageID) the RFC 3977 message-id, which needs no "@"). Either
+// syntax refuses SP, CR, LF and other controls, so the id is one safe argument.
 func validMessageIDArg(id string) error {
 	if !common.ValidMessageID(id) {
 		return fmt.Errorf("%w: message-id %q", ErrInvalidCommandArg, id)

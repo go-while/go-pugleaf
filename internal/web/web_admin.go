@@ -32,6 +32,8 @@ type AdminPageData struct {
 	NewsgroupSearch               string
 	SearchDescription             bool // Added for description search option
 	Providers                     []*models.Provider
+	GroupRoutes                   []*GroupRouteView // global routing pins (providers tab only)
+	ProviderPresets               []ProviderPreset  // preset menu of the provider create form
 	APITokens                     []*database.APIToken
 	AIModels                      []*models.AIModel
 	NNTPUsers                     []*models.NNTPUser

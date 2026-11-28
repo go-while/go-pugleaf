@@ -2,11 +2,13 @@ package main
 
 // News spool inputs (plan mbox-import-discs): a directory tree, a zip file or an unpacked
 // disc image with one article per file (NetNews/CD, NetNews Offline, utzoo, InfoMagic CDs).
+// A .tar.gz spool is streamed through the same walker (targz.go).
 
 import (
 	"bufio"
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"log"
@@ -38,6 +40,10 @@ const spoolReadBufferSize = 64 * 1024
 // empty line between the header block and the body, which its accounting of the cap leaves
 // out, and one more byte to be over it.
 const spoolSizeSlack = 2
+
+// spoolArtPrefix starts the name of an article file in the textusenet and gmane spools
+// (".art1", ".art10124"); the digits after it are the article number (spoolArticleNumber).
+const spoolArtPrefix = ".art"
 
 // spoolANewsID matches the first line of an A-news batch, "A<site>.<n>" (utzoo 1981-83).
 var spoolANewsID = regexp.MustCompile(`^A[A-Za-z0-9_.-]+\.[0-9]+$`)
@@ -81,7 +87,7 @@ func (e *spoolErrReader) Read(p []byte) (int, error) {
 // spoolWalker is the state of one spool walk: what it reads, where it reports and the
 // buffers, which are reused for every file (a disc holds millions of them).
 type spoolWalker struct {
-	fsys  fs.FS
+	fsys  fs.FS       // nil for a .tar.gz spool, which hands its members over itself (targz.go)
 	label string      // the input as the log names it (the image or directory)
 	base  *runOptions // the options of the input
 	opts  *runOptions // base with the source group and directory of the file being read
@@ -95,6 +101,12 @@ type spoolWalker struct {
 	body bytes.Reader   // the body of that article, handed to handleMessage
 	br   *bufio.Reader  // the read buffer of an mbox file inside the spool
 	rest spoolErrReader // the read errors of an mbox or A-news file
+
+	// The hierarchy a .tar.gz spool leaves out of its member paths (tarGroupPrefix):
+	// gmane.psychology.tar.gz holds psychology/behavior-analysis/.art1, so a directory at
+	// or below topDir ("psychology") is taken as below prefixDir ("gmane") as well. Both
+	// are "" for every other spool.
+	prefixDir, topDir string
 }
 
 // readSpool walks fsys (os.DirFS of a directory or an unpacked image, or a *zip.Reader) and
@@ -118,7 +130,16 @@ type spoolWalker struct {
 // file had ended there. StoppedEarly is only set by a stuck mbox parser inside the spool, as
 // it is for an mbox input.
 func readSpool(fsys fs.FS, label string, opts *runOptions, sink inputSink, stop <-chan struct{}) (*counters, error) {
-	w := &spoolWalker{
+	w := newSpoolWalker(fsys, label, opts, sink, stop)
+	if w.stopped() {
+		return w.c, errStopped
+	}
+	return w.c, w.walkDir(".")
+}
+
+// newSpoolWalker returns the walker of one spool input with fresh counters and buffers.
+func newSpoolWalker(fsys fs.FS, label string, opts *runOptions, sink inputSink, stop <-chan struct{}) *spoolWalker {
+	return &spoolWalker{
 		fsys:  fsys,
 		label: label,
 		base:  opts,
@@ -129,10 +150,6 @@ func readSpool(fsys fs.FS, label string, opts *runOptions, sink inputSink, stop 
 		buf:   make([]byte, spoolPeekSize),
 		br:    bufio.NewReaderSize(bytes.NewReader(nil), spoolReadBufferSize),
 	}
-	if w.stopped() {
-		return w.c, errStopped
-	}
-	return w.c, w.walkDir(".")
 }
 
 // stopped reports whether the shutdown signal has arrived.
@@ -146,16 +163,43 @@ func (w *spoolWalker) stopped() bool {
 }
 
 // setFileSource points w.opts at the input's options plus the source of file name: its
-// directory (SPOOL/alt/test/1 -> alt.test) and, for an mbox file in the spool, the group
-// of its name (targetGroup prefers them when the article lists them).
+// directory (SPOOL/alt/test/1 -> alt.test), which targetGroup prefers when the article lists
+// it (the directory alone never makes an article foreign). The input's own name (a disc
+// image, zip or .tar.gz) is no file-name group here, and neither is the name of a file before
+// it is classified: only an mbox file gets one (setMboxFileGroup).
 func (w *spoolWalker) setFileSource(name string) {
 	w.file = *w.base
-	w.file.sourceDir = path.Dir(name)
+	w.file.sourceDir = w.sourceDirOf(path.Dir(name))
 	w.file.sourceGroup = ""
+	w.opts = &w.file
+}
+
+// setMboxFileGroup gives an mbox file of the spool the group of its name (DOUG.alt.test.mbox
+// -> alt.test): targetGroup prefers it when the article lists it, and with -foreign skip an
+// article that lists neither it nor the directory's group is skipped as foreign. A
+// one-article file or an A-news batch never gets one: a name like news.backup.mbox on such a
+// file says nothing about its group.
+func (w *spoolWalker) setMboxFileGroup(name string) {
 	if g, err := groupFromFileName(name); err == nil {
 		w.file.sourceGroup = g
 	}
-	w.opts = &w.file
+}
+
+// sourceDirOf returns the spool directory targetGroup matches the article's groups against:
+// dir itself, or, in a .tar.gz spool named after a hierarchy (prefixDir, topDir), a dir at
+// or below topDir taken as below prefixDir (psychology/behavior-analysis in
+// gmane.psychology.tar.gz -> gmane/psychology/behavior-analysis). The longer path still ends
+// with dir, so every group dir alone matches keeps matching (groupOfSpoolDir), and the
+// longest listed group wins. topDir is compared case-insensitively, as groupOfSpoolDir does.
+func (w *spoolWalker) sourceDirOf(dir string) string {
+	t := w.topDir
+	if t == "" || len(dir) < len(t) || !strings.EqualFold(dir[:len(t)], t) {
+		return dir
+	}
+	if len(dir) > len(t) && dir[len(t)] != '/' {
+		return dir // "psychologyx" is not below "psychology"
+	}
+	return w.prefixDir + "/" + dir
 }
 
 // fileError counts and logs a file or directory of the spool that could not be read.
@@ -212,6 +256,22 @@ func (w *spoolWalker) readFile(name string) error {
 		return nil
 	}
 	defer func() { _ = f.Close() }()
+	return w.readOpened(name, f)
+}
+
+// readMember is readFile for a file the caller reads itself (a member of a .tar.gz spool,
+// streamed out of the archive, targz.go): it is counted, classified and read the same way.
+func (w *spoolWalker) readMember(name string, f io.Reader) error {
+	w.c.Files++
+	if isXrefPointerName(name) {
+		w.c.XrefPointers++
+		return nil
+	}
+	return w.readOpened(name, f)
+}
+
+// readOpened classifies one opened regular file of the spool by its first bytes and reads it.
+func (w *spoolWalker) readOpened(name string, f io.Reader) error {
 	w.setFileSource(name)
 
 	n, err := io.ReadFull(f, w.buf)
@@ -227,6 +287,7 @@ func (w *spoolWalker) readFile(name string) error {
 	peek := w.buf[:n]
 	switch classifySpoolFile(peek, truncated) {
 	case spoolMboxFile:
+		w.setMboxFileGroup(name)
 		return w.readMboxFile(name, peek, f)
 	case spoolANewsBatch:
 		return w.readANewsFile(name, peek, f)
@@ -292,6 +353,15 @@ func (w *spoolWalker) readMboxFile(name string, peek []byte, f io.Reader) error 
 		}
 		return nil
 	}
+	// the counts before this file: an mbox named after a group whose importable articles
+	// were all skipped as foreign fails the spool input (markAllForeign)
+	since := w.c.mark()
+	defer func() {
+		if !w.stopped() && foreignOnly(w.c, since) {
+			markAllForeign(w.c, fmt.Sprintf("spool file=%q mbox=%q", w.label, name), w.opts.sourceGroup,
+				w.c.Skipped[skipForeign]-since.foreign)
+		}
+	}()
 	lastErr := ""
 	for {
 		if w.stopped() {
@@ -310,6 +380,7 @@ func (w *spoolWalker) readMboxFile(name string, peek []byte, f io.Reader) error 
 			}
 			lastErr = err.Error()
 			w.c.ParserSkipped++
+			w.c.noteUnknown(1, w.opts)
 			log.Printf("[MBOX-IMPORT] spool file=%q: mbox %q: parser skipped a message: %v", w.label, name, err)
 			continue
 		}
@@ -382,8 +453,8 @@ func (w *spoolWalker) progress() {
 	if w.c.Read%progressEvery != 0 {
 		return
 	}
-	log.Printf("[MBOX-IMPORT] progress file=%q files=%d read=%d stored=%d present=%d skipped=%d rejected=%d errors=%d",
-		w.label, w.c.Files, w.c.Read, w.c.Stored, w.c.Present, w.c.skippedTotal(), w.c.Rejected, w.c.Errors)
+	log.Printf("[MBOX-IMPORT] progress file=%q files=%d read=%d stored=%d present=%d skipped=%d (%s) rejected=%d errors=%d",
+		w.label, w.c.Files, w.c.Read, w.c.Stored, w.c.Present, w.c.skippedTotal(), w.c.skippedDetail(), w.c.Rejected, w.c.Errors)
 }
 
 // spoolSplitArticle splits the bytes of a one-article file into its header lines (without
@@ -431,10 +502,11 @@ func isXrefPointerName(name string) bool {
 	return len(name) >= len(".XRF") && strings.EqualFold(name[len(name)-len(".XRF"):], ".XRF")
 }
 
-// spoolNameLess orders the entries of one spool directory: all-digit names (article
-// numbers and year directories) come first in numeric order, so 10 comes after 9, and
-// every other name after them in lexical order. Both halves are ordered among themselves,
-// which keeps the comparison a total order even for names such as "5.XRF".
+// spoolNameLess orders the entries of one spool directory: article numbers (all-digit names,
+// year directories, and ".artN" files as in the textusenet and gmane spools) come first in
+// numeric order, so 10 comes after 9, and every other name after them in lexical order.
+// Both halves are ordered among themselves, which keeps the comparison a total order even
+// for names such as "5.XRF".
 func spoolNameLess(a, b string) bool {
 	an, aok := spoolArticleNumber(a)
 	bn, bok := spoolArticleNumber(b)
@@ -447,9 +519,11 @@ func spoolNameLess(a, b string) bool {
 	return a < b
 }
 
-// spoolArticleNumber returns the value of an all-digit name; ok is false for every other
-// name (and for one with more digits than fit, which is ordered lexically).
+// spoolArticleNumber returns the value of an all-digit name, or of the digits of a ".artN"
+// name (the article files of the textusenet and gmane spools, ".art10124"); ok is false for
+// every other name (and for one with more digits than fit, which is ordered lexically).
 func spoolArticleNumber(name string) (n uint64, ok bool) {
+	name = strings.TrimPrefix(name, spoolArtPrefix)
 	if name == "" {
 		return 0, false
 	}

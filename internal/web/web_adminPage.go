@@ -408,6 +408,18 @@ func (s *WebServer) adminPage(c *Context) {
 		spamPagination = models.NewPaginationInfo(spamPage, spamPageSize, spamCount)
 	}
 
+	// Global routing pins of the providers tab (plan fetcher-group-routing)
+	var groupRoutes []*GroupRouteView
+	if activeTab == "providers" {
+		routes, err := s.DB.GetGroupRoutes()
+		if err != nil {
+			log.Printf("Failed to load group routes: %v", err)
+			s.renderError(c, http.StatusInternalServerError, "Database Error", "Failed to load group routes")
+			return
+		}
+		groupRoutes = groupRouteViews(routes, providers)
+	}
+
 	// Handle post queue data if on postqueue tab
 	var postQueue []*database.PostQueueEntryWithDetails
 	var queueStats map[string]int
@@ -535,6 +547,8 @@ func (s *WebServer) adminPage(c *Context) {
 		NewsgroupSearch:            searchTerm,
 		SearchDescription:          searchDescription,
 		Providers:                  providers,
+		GroupRoutes:                groupRoutes,
+		ProviderPresets:            providerPresets(),
 		APITokens:                  apiTokens,
 		AIModels:                   aiModels,
 		NNTPUsers:                  nntpUsers,
@@ -619,6 +633,7 @@ var adminTemplateFuncs = template.FuncMap{
 		}
 		return a / b
 	},
+	"routingShort": routingShort,
 }
 
 // adminTemplateFiles are the modular admin templates (names inside web/templates).

@@ -22,7 +22,9 @@
                         All 'news-*.pugleaf.net' servers begin retention in September 2025.<br>
                         Enable only your nearest pugleaf server for best performance!<br>
                         <br>
-                        pugleaf-fetcher will only fetch from first enabled provider!<br>
+                        pugleaf-fetcher: the primary is the first enabled provider (by priority) without routing.<br>
+                        A provider with routing serves the groups its patterns want first, the primary is their fallback.<br>
+                        Global routing (below) pins groups to providers: only the pinned providers are used, no fallback.<br>
                         post-queue will try to post articles to all providers where posting is enabled.
                         </p>
                     </div>
@@ -41,6 +43,7 @@
                                   <th>SSL</th>
                                   <th>C</th>
                                   <th>Size</th>
+                                  <th>Routing</th>
                                   <!--<th>Created</th>-->
                                   <th>Delete</th>
                                   <th>Prio</th>
@@ -81,6 +84,7 @@
 
                                   <td alt="max conns">{{.MaxConns}}</td>
                                   <td alt="max article size">{{.MaxArtSize}}</td>
+                                  <td alt="routing" title="{{.Routing}}">{{if .Routing}}<code>{{routingShort .Routing}}</code>{{else}}<span class="text-muted">&ndash;</span>{{end}}</td>
                                   <!--<td>{{.CreatedAt.Format "2006-01-02 15:04"}}</td>-->
                                   <td>
                                     {{if not .Enabled}}
@@ -212,6 +216,13 @@
                                                             <input type="number" class="form-control" name="max_art_size" value="{{.MaxArtSize}}" min="0" max="16777216"><small>bytes (0 = no limit)</small>
                                                         </div>
                                                     </div>
+                                                    <div class="col-md-6">
+                                                        <div class="mb-3">
+                                                            <label class="form-label">Fetcher routing</label>
+                                                            <textarea class="form-control" name="routing" rows="2" placeholder="empty = no restriction, e.g. gmane.*, gwene.*">{{.Routing}}</textarea>
+                                                            <small class="text-muted">Groups the fetcher takes from this provider: patterns separated by commas or blanks, '!' excludes, the last match wins, '@' is not supported.</small>
+                                                        </div>
+                                                    </div>
                                                 </div>
                                                 <hr class="my-3">
 
@@ -318,6 +329,24 @@
               <div class="card-body">
                   <form autocomplete="off" method="POST" action="/admin/providers?tab=providers">
                       <input autocomplete="false" name="hidden" type="text" style="display:none;">
+                      {{if .ProviderPresets}}
+                      <div class="row">
+                          <div class="col-md-6">
+                              <div class="mb-3">
+                                  <label for="provider_preset" class="form-label">Preset (public servers listed by newsdeef.eu)</label>
+                                  <select class="form-select" id="provider_preset" aria-label="provider preset">
+                                      <option value="">preset&hellip;</option>
+                                      {{range .ProviderPresets}}<option value="{{.Host}}" data-name="{{.Name}}" data-routing="{{.Routing}}">{{.Host}}: {{.Routing}}</option>{{end}}
+                                  </select>
+                                  <div class="form-text">
+                                      Fills host, name and routing; type port and SSL yourself (119 without SSL when unsure). Nothing is saved until you press Add Provider.
+                                      {{range .ProviderPresets}}{{if .Note}}<br><strong>{{.Host}}:</strong> {{.Note}}{{end}}{{end}}
+                                  </div>
+                              </div>
+                          </div>
+                      </div>
+                      <hr class="my-3">
+                      {{end}}
                       <div class="row">
                           <div class="col-md-2">
                               <div class="mb-3">
@@ -430,6 +459,13 @@
                                   <input type="number" class="form-control" id="provider_max_art_size" name="max_art_size" value="32768" min="1" max="16777216">
                               </div>
                           </div>
+                          <div class="col-md-6">
+                              <div class="mb-3">
+                                  <label for="provider_routing" class="form-label">Fetcher routing</label>
+                                  <textarea class="form-control" id="provider_routing" name="routing" rows="2" placeholder="empty = no restriction, e.g. gmane.*, gwene.*"></textarea>
+                                  <small class="text-muted">Groups the fetcher takes from this provider: patterns separated by commas or blanks, '!' excludes, the last match wins, '@' is not supported.</small>
+                              </div>
+                          </div>
                       </div>
 
                       <hr class="my-3">
@@ -513,5 +549,171 @@
           </div>
       </div>
   </div><!-- end Add Provider -->
+
+  <!-- Global routing -->
+  <div class="row mt-3">
+      <div class="col-12">
+          <div class="card">
+              <div class="card-header bg-dark text-white">
+                  <div class="d-flex justify-content-between align-items-center">
+                      <h5 class="card-title mb-0">📌 Global routing</h5>
+                      <span class="badge bg-light text-dark">{{len .GroupRoutes}} routes</span>
+                  </div>
+                  <p class="mb-0 mt-2">
+                  A group that an enabled route wants is fetched only from the route's provider (several routes: lower priority first), never from any other provider.<br>
+                  A route beats the provider's own routing. If its provider is disabled, the group is not fetched at all.
+                  </p>
+              </div>
+              <div class="card-body">
+                  {{if .GroupRoutes}}
+                  <div class="table-responsive">
+                      <table class="table table-striped">
+                          <thead>
+                              <tr>
+                                  <th>Use</th>
+                                  <th>Edit</th>
+                                  <th>Patterns</th>
+                                  <th>Provider</th>
+                                  <th>Prio</th>
+                                  <th>Notes</th>
+                                  <th>Delete</th>
+                              </tr>
+                          </thead>
+                          <tbody>
+                              {{range .GroupRoutes}}
+                              <tr>
+                                  <td>
+                                      <form method="POST" action="/admin/routes/toggle?tab=providers" style="display: inline;">
+                                          <input type="hidden" name="id" value="{{.ID}}">
+                                          <button type="submit" class="btn btn-sm btn-link p-0" title="{{if .Enabled}}disable{{else}}enable{{end}} route">{{if .Enabled}}✅{{else}}🔴{{end}}</button>
+                                      </form>
+                                  </td>
+                                  <td>
+                                      <button type="button" class="btn btn-outline-primary btn-sm" data-bs-toggle="collapse" data-bs-target="#edit-route-{{.ID}}">Edit</button>
+                                  </td>
+                                  <td><code>{{.Patterns}}</code></td>
+                                  <td>{{if .ProviderName}}{{.ProviderName}}{{if not .ProviderEnabled}} <span class="badge bg-secondary">disabled</span>{{end}}{{else}}<span class="text-danger">provider {{.ProviderID}} missing</span>{{end}}</td>
+                                  <td>{{.Priority}}</td>
+                                  <td>{{.Notes}}</td>
+                                  <td>
+                                      <form method="POST" action="/admin/routes/delete?tab=providers" style="display: inline;">
+                                          <input type="hidden" name="id" value="{{.ID}}">
+                                          <button type="submit" class="btn btn-outline-danger btn-sm">Delete</button>
+                                      </form>
+                                  </td>
+                              </tr>
+                              <tr class="collapse" id="edit-route-{{.ID}}">
+                                  <td colspan="7">
+                                      <form method="POST" action="/admin/routes/update?tab=providers">
+                                          <input type="hidden" name="id" value="{{.ID}}">
+                                          <div class="row">
+                                              <div class="col-md-4">
+                                                  <div class="mb-3">
+                                                      <label class="form-label">Patterns</label>
+                                                      <input type="text" class="form-control" name="patterns" value="{{.Patterns}}" required>
+                                                  </div>
+                                              </div>
+                                              <div class="col-md-3">
+                                                  <div class="mb-3">
+                                                      <label class="form-label">Provider</label>
+                                                      <select class="form-select" name="provider_id" required>
+                                                          {{$pid := .ProviderID}}
+                                                          {{range $.Providers}}<option value="{{.ID}}" {{if eq .ID $pid}}selected{{end}}>{{.Name}}{{if not .Enabled}} (disabled){{end}}</option>{{end}}
+                                                      </select>
+                                                  </div>
+                                              </div>
+                                              <div class="col-md-1">
+                                                  <div class="mb-3">
+                                                      <label class="form-label">Priority</label>
+                                                      <input type="number" class="form-control" name="priority" value="{{.Priority}}" min="0" max="1000000">
+                                                  </div>
+                                              </div>
+                                              <div class="col-md-3">
+                                                  <div class="mb-3">
+                                                      <label class="form-label">Notes</label>
+                                                      <input type="text" class="form-control" name="notes" value="{{.Notes}}" maxlength="1024">
+                                                  </div>
+                                              </div>
+                                              <div class="col-md-1">
+                                                  <div class="form-check mt-4">
+                                                      <input class="form-check-input" type="checkbox" name="enabled" {{if .Enabled}}checked{{end}}>
+                                                      <label class="form-check-label">Enabled</label>
+                                                  </div>
+                                              </div>
+                                          </div>
+                                          <button type="submit" class="btn btn-primary btn-sm">Update Route</button>
+                                      </form>
+                                  </td>
+                              </tr>
+                              {{end}}
+                          </tbody>
+                      </table>
+                  </div>
+                  {{else}}
+                  <div class="alert alert-info">
+                      <strong>No global routes.</strong> Groups go to the providers by their routing and to the primary.
+                  </div>
+                  {{end}}
+
+                  {{if .Providers}}
+                  <h6 class="mt-3">Add route</h6>
+                  <form method="POST" action="/admin/routes?tab=providers">
+                      <div class="row">
+                          <div class="col-md-4">
+                              <div class="mb-3">
+                                  <label for="route_patterns" class="form-label">Patterns</label>
+                                  <input type="text" class="form-control" id="route_patterns" name="patterns" required placeholder="e.g. gmane.*, gwene.*">
+                              </div>
+                          </div>
+                          <div class="col-md-3">
+                              <div class="mb-3">
+                                  <label for="route_provider" class="form-label">Provider</label>
+                                  <select class="form-select" id="route_provider" name="provider_id" required>
+                                      {{range .Providers}}<option value="{{.ID}}">{{.Name}}{{if not .Enabled}} (disabled){{end}}</option>{{end}}
+                                  </select>
+                              </div>
+                          </div>
+                          <div class="col-md-1">
+                              <div class="mb-3">
+                                  <label for="route_priority" class="form-label">Priority</label>
+                                  <input type="number" class="form-control" id="route_priority" name="priority" value="0" min="0" max="1000000">
+                              </div>
+                          </div>
+                          <div class="col-md-3">
+                              <div class="mb-3">
+                                  <label for="route_notes" class="form-label">Notes</label>
+                                  <input type="text" class="form-control" id="route_notes" name="notes" maxlength="1024" placeholder="Optional">
+                              </div>
+                          </div>
+                          <div class="col-md-1">
+                              <div class="form-check mt-4">
+                                  <input class="form-check-input" type="checkbox" id="route_enabled" name="enabled" checked>
+                                  <label class="form-check-label" for="route_enabled">Enabled</label>
+                              </div>
+                          </div>
+                      </div>
+                      <small class="text-muted d-block mb-2">Patterns separated by commas or blanks, '!' excludes, the last match wins, '@' is not supported.</small>
+                      <button type="submit" class="btn btn-success">Add Route</button>
+                  </form>
+                  {{end}}
+              </div>
+          </div>
+      </div>
+  </div><!-- end Global routing -->
 </div>
+<script>
+  // Provider presets: picking one fills host, name and routing of the create form (still editable).
+  (function () {
+    var sel = document.getElementById('provider_preset');
+    if (!sel) { return; }
+    sel.addEventListener('change', function () {
+      var opt = sel.options[sel.selectedIndex];
+      if (!opt || !opt.value) { return; }
+      var set = function (id, v) { var el = document.getElementById(id); if (el) { el.value = v; } };
+      set('provider_host', opt.value);
+      set('provider_name', opt.dataset.name || '');
+      set('provider_routing', opt.dataset.routing || '');
+    });
+  })();
+</script>
 {{end}}

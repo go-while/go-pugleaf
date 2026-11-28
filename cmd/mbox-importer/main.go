@@ -2,7 +2,8 @@
 // go-pugleaf databases through the processor's bulk path: every article is filed into one
 // group, crossposts are not processed. The group is -group, else the input's own group (the
 // file name alt.test.mbox.zip, a spool directory alt/test) when the article lists it, else the
-// first group of its Newsgroups header (targetGroup).
+// first group of its Newsgroups header (targetGroup); an article of a file named after a group
+// that does not list it is skipped as foreign (-foreign skip, the default).
 package main
 
 import (
@@ -26,6 +27,13 @@ import (
 )
 
 var appVersion = "-unset-"
+
+// Values of -foreign: what happens to an article that does not list the group its input's
+// file name names (targetGroup).
+const (
+	foreignSkip = "skip" // skipped, counted as "foreign" (the default)
+	foreignFile = "file" // filed into the first group of its Newsgroups header
+)
 
 func main() {
 	os.Exit(run(os.Args[1:]))
@@ -53,8 +61,11 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		nntpHostname    = fs.String("nntphostname", "", "your NNTP hostname: required on the first run, later runs use the value stored in the database (must resolve in DNS)")
 		useShortHashLen = fs.Int("useshorthashlen", 7, "legacy short hash length (2-7); fixed after the first run, later runs use the stored value")
 		useHistory      = fs.Bool("history", true, "maintain and use the message-id history index (<data>/history)")
-		forceGroup      = fs.String("group", "", "file every article into this group (default: the input's own group when the article lists it, else the first group of its Newsgroups header)")
+		histCacheMB     = fs.Int("history-cache-mb", 0, fmt.Sprintf("SQLite page cache of the history index, private to each connection, in MiB (0 = default 8000 KiB; sensible: a few tens; the total can reach 128 x the value: 8 connections per file, 16 files; at most %d, larger values are clamped)", history.MaxPageCacheMB))
+		histMmapMB      = fs.Int("history-mmap-mb", 0, fmt.Sprintf("SQLite mmap size of the history index per connection in MiB, the setting that shares memory: mapped pages are the kernel page cache (0 = default 16; at most %d, SQLite's own limit, larger values are clamped). On ZFS the mapped pages are held on top of the ARC, so the ARC size matters more there; a disk I/O error on a mapped page ends the process with SIGBUS", history.MaxMmapMB))
+		forceGroup      = fs.String("group", "", "file every article into this group (default: the input's own group when the article lists it, else the first group of its Newsgroups header, see -foreign)")
 		groupFromName   = fs.Bool("group-from-name", false, "file every article of an input into the group named by its file name (de.comm.foo.mbox.gz -> de.comm.foo); not with -group")
+		foreignFlag     = fs.String("foreign", foreignSkip, "an article in an input whose file name names a group or hierarchy (alt.test.20141010.mbox.gz, free.pt.mbox.7z) that lists neither that group nor a group below it: skip (counted as skipped foreign) or file (into the first group of its Newsgroups header); no effect with -group, -group-from-name or a name without a dot")
 		sevenZip        = fs.String("7z", "7z", "program used to unpack .7z inputs (name in PATH or a full path)")
 		discReader      = fs.String("disc-reader", discReaderAuto, "how a disc image is read: mount (fuseiso for .iso/.cdr, squashfuse for .sqsh, read in place), 7z (unpack into -tmpdir), auto (mount when the tool is installed and the mount works, else 7z)")
 		zstdProg        = fs.String("zstd", "zstd", "program used to read UAT archives (.usenet, .usenet.xz, .usenet.7z; name in PATH or a full path)")
@@ -70,6 +81,7 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		maxBatch        = fs.Int("max-batch", 1000, "articles the batch writer commits per group database transaction (100-1000)")
 		maxArtSize      = fs.Int("max-article-size", defaultMaxArticleSize, "skip articles larger than this many bytes, header and body, counted as too-big (0 = no limit)")
 		maxQueue        = fs.Int("max-queue", 0, "articles the batch writer may hold queued over all groups (16-100000; 0 = 2 x parallel x max-batch, at least 1280)")
+		noThreading     = fs.Bool("no-threading", false, "store articles without threading them (no threads, thread_cache or reply_count updates): faster bulk imports; the web view shows the new articles in threads only after recover-db -rebuild-threads (or -reorder-by-datesent) for each imported group")
 		trackDBFlag     = fs.String("trackdb", "", "import tracking database (\"\" = <data>/cfg/"+trackDBName+", \"off\" = no tracking); never opened in a dry run")
 		reimport        = fs.Bool("reimport", false, "import an input the tracking database knows as done again")
 		logDB           = fs.Bool("log-db", true, "write the log output of the run into the tracking database as well")
@@ -100,6 +112,12 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 	case discReaderAuto, discReaderMount, discReader7z:
 	default:
 		fmt.Fprintf(fs.Output(), "mbox-importer: -disc-reader %q is not auto, mount or 7z\n", *discReader)
+		return 2
+	}
+	switch *foreignFlag {
+	case foreignSkip, foreignFile:
+	default:
+		fmt.Fprintf(fs.Output(), "mbox-importer: -foreign %q is not skip or file\n", *foreignFlag)
 		return 2
 	}
 	if *pprofAddr != "" {
@@ -168,6 +186,10 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		fmt.Fprintf(fs.Output(), "mbox-importer: -useshorthashlen %d is not in 2-7\n", *useShortHashLen)
 		return 2
 	}
+	if *histCacheMB < 0 || *histMmapMB < 0 {
+		fmt.Fprintf(fs.Output(), "mbox-importer: -history-cache-mb %d / -history-mmap-mb %d: negative (0 = default)\n", *histCacheMB, *histMmapMB)
+		return 2
+	}
 	if *commitTimeout < 0 {
 		fmt.Fprintf(fs.Output(), "mbox-importer: -commit-timeout %v is negative\n", *commitTimeout)
 		return 2
@@ -203,6 +225,7 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		useShortHashLen: *useShortHashLen,
 		parallel:        *parallel,
 		groupFromName:   *groupFromName,
+		foreignFile:     *foreignFlag == foreignFile,
 		history:         *useHistory,
 		dryRun:          *dryRun,
 		keepBinary:      *keepBinary,
@@ -220,6 +243,9 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		uat.MaxMessageSize = opts.maxArticleSize
 	}
 	history.ENABLE_HISTORY = opts.history // read once by NewHistory
+	// SQLite memory of the history index, read by processor.NewProcessorE (0 = default)
+	processor.HistoryPageCacheMB = *histCacheMB
+	processor.HistoryMmapMB = *histMmapMB
 	database.GlobalDateParser = processor.ParseNNTPDate
 
 	stop := stopChan
@@ -273,6 +299,9 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		defer func() { track.close(lastRun, code) }()
 	}
 	log.Printf("[MBOX-IMPORT] Starting go-pugleaf mbox-importer (version %s) parallel=%d max-batch=%d max-queue=%d", config.AppVersion, *parallel, *maxBatch, queueSize)
+	if !opts.history && (*histCacheMB != 0 || *histMmapMB != 0) {
+		log.Printf("[MBOX-IMPORT] -history-cache-mb / -history-mmap-mb have no effect with -history=false")
+	}
 	for _, err := range expandErrs {
 		log.Printf("[MBOX-IMPORT] input error: %v", err)
 	}
@@ -309,6 +338,10 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 	cfg.BackupDir = filepath.Join(opts.dataDir, "backups")
 	cfg.MaxDBbatch = *maxBatch // articles per group database transaction (db_batch.go)
 	cfg.MaxQueued = queueSize  // queued over all groups before the batch divider brakes (db_batch.go)
+	cfg.DisableThreading = *noThreading
+	if *noThreading {
+		log.Printf("[MBOX-IMPORT] -no-threading: articles are stored without threads; run recover-db -rebuild-threads for each imported group afterwards")
+	}
 	db, err := database.OpenDatabase(cfg)
 	if err != nil {
 		log.Printf("[MBOX-IMPORT] Failed to initialize database: %v", err)
@@ -339,7 +372,7 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		return 1
 	}
 
-	res := importScans(planned, scan, opts, newProcessorSink(db, proc), stop, track)
+	res := importScans(planned, scan, opts, newProcessorSink(db, proc, stop), stop, track)
 	res.InputErrors += len(expandErrs)
 	res.Inputs += len(expandErrs)
 	logTotals(res)

@@ -278,20 +278,33 @@ func (h *History) enqueue(kind uint8, messageID string, groupID, articleNum int6
 		}
 		return false
 	}
-	// count first, then check closed: the writer checks closed before pending, so it can not miss this op
+	if h.acquireAdmission(nil) != nil {
+		return false
+	}
+	return h.queueOp(historyOp{op: kind, messageID: messageID, groupID: groupID, articleNum: articleNum})
+}
+
+// queueOp takes ownership of the caller's capacity in admission mode. Each
+// producer holds a slot from the same budget, so a reserved send has room.
+func (h *History) queueOp(op historyOp) bool {
+	// Count before checking closed so the writer cannot miss an in-flight send.
 	h.pending.Add(1)
 	if h.closed.Load() {
 		h.pending.Add(-1)
+		h.releaseAdmission(1)
 		if h.closedWarned.CompareAndSwap(false, true) {
-			log.Printf("[HISTORY] WARN: op after Close() dropped: op=%d messageID='%s' groupID=%d (further drops are not logged)", kind, messageID, groupID)
+			log.Printf("[HISTORY] WARN: op after Close() dropped: op=%d messageID='%s' groupID=%d (further drops are not logged)", op.op, op.messageID, op.groupID)
 		}
 		return false
 	}
-	h.opChan <- historyOp{op: kind, messageID: messageID, groupID: groupID, articleNum: articleNum}
-	if kind == opAdd {
+	h.opChan <- op
+	switch op.op {
+	case opAdd:
 		h.stats.adds.Add(1)
-	} else {
+	case opRemove:
 		h.stats.removes.Add(1)
+	case opReject:
+		h.stats.rejects.Add(1)
 	}
 	return true
 }
@@ -629,6 +642,9 @@ func (h *History) Close() error {
 		}
 		log.Printf("[HISTORY] History system closed")
 	})
+	if writeErr := h.admissionErr.Load(); writeErr != nil {
+		err = errors.Join(err, *writeErr)
+	}
 	return err
 }
 
@@ -721,6 +737,7 @@ func (h *History) flushBatch(batch []historyOp) {
 		if err != nil {
 			log.Printf("[HISTORY] ERROR: dropping op for messageID='%s': %v", op.messageID, err)
 			h.stats.errors.Add(1)
+			h.recordAdmissionError(err)
 			continue
 		}
 		perFile[dbIndex] = append(perFile[dbIndex], routedOp{historyOp: op, tableName: tableName})
@@ -738,6 +755,7 @@ func (h *History) flushBatch(batch []historyOp) {
 			if err := h.executeDBTransaction(dbIdx, ops); err != nil {
 				log.Printf("[HISTORY] ERROR: dropping %d ops for database %x: %v", len(ops), dbIdx, err)
 				h.stats.errors.Add(1)
+				h.recordAdmissionError(fmt.Errorf("write history database %x: %w", dbIdx, err))
 				return
 			}
 			h.stats.committed.Add(int64(len(ops)))
@@ -747,6 +765,7 @@ func (h *History) flushBatch(batch []historyOp) {
 
 	h.stats.flushes.Add(1)
 	h.pending.Add(-int64(n))
+	h.releaseAdmission(n)
 	if HistoryDEBUG {
 		log.Printf("[HISTORY] flushBatch: %d ops took %v (pending=%d)", n, time.Since(start), h.pending.Load())
 	}

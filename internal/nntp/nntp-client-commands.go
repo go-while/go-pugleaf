@@ -536,7 +536,7 @@ func (c *BackendConn) XHdr(groupName, field string, start, end int64) ([]HeaderL
 	// Parse header lines
 	var headers = make([]HeaderLine, 0, len(lines))
 	for _, line := range lines {
-		header, err := c.parseHeaderLine(line)
+		header, err := c.parseHeaderLine(field, line)
 		if err != nil {
 			continue // Skip malformed lines
 		}
@@ -776,7 +776,7 @@ func (c *BackendConn) xhdrStreamedBatch(groupName, field string, start, end int6
 		}
 
 		// Parse the header line
-		header, parseErr := c.parseHeaderLine(line)
+		header, parseErr := c.parseHeaderLine(field, line)
 		if parseErr != nil {
 			log.Printf("[ERROR] XHdrStreamed parse error ng: '%s' err='%v'", groupName, parseErr)
 			continue // Skip malformed lines
@@ -1145,16 +1145,25 @@ func (c *BackendConn) parseOverviewLine(line string) (OverviewLine, error) {
 		Subject:    parts[1],
 		From:       parts[2],
 		Date:       parts[3],
-		MessageID:  parts[4],
+		MessageID:  trimOverviewMessageID(parts[4]),
 		References: parts[5],
 		Bytes:      bytes,
 		Lines:      lines,
 	}, nil
 }
 
-// parseHeaderLine parses a single XHDR response line
-// Format: articlenum<space>header-value
-func (c *BackendConn) parseHeaderLine(line string) (HeaderLine, error) {
+// trimOverviewMessageID removes the SP and HT around a message-id taken from an overview or
+// XHDR reply: some servers answer "1  <id@host>" or a field with a leading blank, and the id
+// with its blank would fail the argument check of ARTICLE (validMessageIDArg), so a valid
+// article would be skipped. Only the surrounding blanks go; the id itself is not touched.
+func trimOverviewMessageID(id string) string {
+	return strings.Trim(id, " \t")
+}
+
+// parseHeaderLine parses a single XHDR response line of the header field
+// Format: articlenum<space>header-value. For the Message-ID field the value is trimmed
+// (trimOverviewMessageID); the values of other fields are returned as sent.
+func (c *BackendConn) parseHeaderLine(field, line string) (HeaderLine, error) {
 	parts := strings.SplitN(line, " ", 2)
 	if len(parts) < 2 {
 		return HeaderLine{}, fmt.Errorf("malformed XHDR line: %s", line)
@@ -1168,6 +1177,9 @@ func (c *BackendConn) parseHeaderLine(line string) (HeaderLine, error) {
 	headerline := HeaderLine{
 		ArticleNum: articleNum,
 		Value:      parts[1],
+	}
+	if strings.EqualFold(field, "message-id") {
+		headerline.Value = trimOverviewMessageID(headerline.Value)
 	}
 	return headerline, nil
 }

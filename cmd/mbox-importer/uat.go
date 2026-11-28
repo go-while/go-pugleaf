@@ -134,6 +134,9 @@ func importUAT(path string, opts *runOptions, sink articleSink, stop <-chan stru
 			body = nil
 		}
 		handleLines(c, head, body, isBinary, opts, in)
+		if c.admissionStopped {
+			return errStopped
+		}
 		if c.Read%progressEvery == 0 {
 			log.Printf("[MBOX-IMPORT] progress file=%q read=%d of %d stored=%d present=%d skipped=%d rejected=%d errors=%d",
 				path, c.Read, p.Count(), c.Stored, c.Present, c.skippedTotal(), c.Rejected, c.Errors)
@@ -159,6 +162,7 @@ func importUAT(path string, opts *runOptions, sink articleSink, stop <-chan stru
 		// messages over uat.MaxMessageSize (-max-article-size): read past by Each
 		c.Read += p.TooBig
 		c.Skipped[skipTooBig] += p.TooBig
+		c.noteUnknown(p.TooBig, opts) // no header: they may be the package's own articles
 		log.Printf("[MBOX-IMPORT] uat file=%q skipped %d message(s) over -max-article-size", path, p.TooBig)
 	}
 	closeErr := p.Close()
@@ -171,12 +175,16 @@ func importUAT(path string, opts *runOptions, sink articleSink, stop <-chan stru
 		log.Printf("[MBOX-IMPORT] file=%q commit wait: %v", path, waitErr)
 		c.CommitFailed = true
 	}
+	if !stopped && foreignOnly(c, foreignMark{}) {
+		markAllForeign(c, fmt.Sprintf("file=%q", path), opts.sourceGroup, c.Skipped[skipForeign])
+		inputErr = true
+	}
 
 	switch {
 	case opts.dryRun || !opts.markDone:
-	case stopped || c.StoppedEarly || closeErr != nil || c.Errors > 0 || waitErr != nil:
-		log.Printf("[MBOX-IMPORT] file=%q not marked done (stopped=%t stopped-early=%t unread=%t close-error=%t errors=%d commit-wait-error=%t)",
-			path, stopped, c.StoppedEarly, c.Unread, closeErr != nil, c.Errors, waitErr != nil)
+	case stopped || c.StoppedEarly || closeErr != nil || c.Errors > 0 || waitErr != nil || c.AllForeign > 0:
+		log.Printf("[MBOX-IMPORT] file=%q not marked done (stopped=%t stopped-early=%t unread=%t close-error=%t errors=%d commit-wait-error=%t all-foreign=%t)",
+			path, stopped, c.StoppedEarly, c.Unread, closeErr != nil, c.Errors, waitErr != nil, c.AllForeign > 0)
 	case strings.HasSuffix(path, ".done"):
 		log.Printf("[MBOX-IMPORT] file=%q already named .done: not renamed", path)
 	default:

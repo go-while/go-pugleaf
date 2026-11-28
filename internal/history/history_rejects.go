@@ -196,18 +196,10 @@ func (h *History) enqueueReject(messageID string) bool {
 		}
 		return false
 	}
-	// count first, then check closed: the writer checks closed before pending, so it can not miss this op
-	h.pending.Add(1)
-	if h.closed.Load() {
-		h.pending.Add(-1)
-		if h.closedWarned.CompareAndSwap(false, true) {
-			log.Printf("[HISTORY] WARN: op after Close() dropped: op=%d messageID='%s' (further drops are not logged)", opReject, messageID)
-		}
+	if h.acquireAdmission(nil) != nil {
 		return false
 	}
-	h.opChan <- historyOp{op: opReject, messageID: messageID}
-	h.stats.rejects.Add(1)
-	return true
+	return h.queueOp(historyOp{op: opReject, messageID: messageID})
 }
 
 // PruneRejects deletes every remembered reject older than days days and returns the number of

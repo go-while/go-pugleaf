@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/go-while/go-pugleaf/internal/common"
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/feed"
@@ -37,6 +38,7 @@ var (
 	peerStatsDays   int
 	noPostThreads   bool
 	useHistory      bool
+	laxMsgID        bool
 
 	idleTimeout         time.Duration
 	articleDelay        time.Duration
@@ -85,8 +87,13 @@ func main() {
 	flag.StringVar(&innArtLogPath, "inn-artlog", "", "write one line per rejected incoming feed article (437/439, with the reason) in the format of INN's news log to this file; empty = off")
 	flag.IntVar(&peerStatsDays, "peer-stats-days", 90, "keep the hourly peer statistics (data/cfg/peer-stats.sq3, web /admin/peers/stats) this many days")
 	flag.DurationVar(&postCommitWait, "post-commit-wait", nntp.DefaultPostCommitWait, "wait for the batch writer to commit a POSTed article before answering 240 (0 = answer at once, the article is still stored)")
+	flag.BoolVar(&laxMsgID, "laxmid", false, "accept RFC 3977 message-ids without '@' (like INN's laxmid) in IHAVE, CHECK, TAKETHIS and the outgoing feed (POST stays strict; without it queued such articles wait); default: RFC 5536 msg-id only")
 	flag.Parse()
 	history.ENABLE_HISTORY = useHistory
+	common.SetLaxMessageID(laxMsgID)
+	if laxMsgID {
+		log.Printf("[NNTP]: -laxmid: message-ids without '@' are accepted (RFC 3977 syntax)")
+	}
 
 	xref, err := nntp.ParseXrefMode(xrefMode)
 	if err != nil {

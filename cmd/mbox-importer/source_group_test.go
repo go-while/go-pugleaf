@@ -24,7 +24,17 @@ func TestSourceGroupTargetGroup(t *testing.T) {
 		{"no source: first group", "a.one,a.two", runOptions{}, "a.one", skipNone},
 		{"file group listed second", "a.typo,a.two", runOptions{sourceGroup: "a.two"}, "a.two", skipNone},
 		{"file group in another case", "A.Two,a.one", runOptions{sourceGroup: "a.two"}, "a.two", skipNone},
-		{"file group not listed: first group", "a.one,a.two", runOptions{sourceGroup: "b.other"}, "a.one", skipNone},
+		{"file group not listed, -foreign file: first group", "a.one,a.two", runOptions{sourceGroup: "b.other", foreignFile: true}, "a.one", skipNone},
+		{"file group not listed: foreign", "a.one,a.two", runOptions{sourceGroup: "b.other"}, "", skipForeign},
+		{"hierarchy dump, nothing below it: foreign", "free.ptx,x.y", runOptions{sourceGroup: "free.pt"}, "", skipForeign},
+		{"hierarchy dump, nothing below it, -foreign file: first group", "free.ptx,x.y", runOptions{sourceGroup: "free.pt", foreignFile: true}, "free.ptx", skipNone},
+		{"one-word file name is no group: first group", "a.one,a.two", runOptions{sourceGroup: "export"}, "a.one", skipNone},
+		{"one-word file name listed: filed", "a.one,export", runOptions{sourceGroup: "export"}, "export", skipNone},
+		{"bad first group, source not listed: foreign", "bad/group,a.two", runOptions{sourceGroup: "b.other"}, "", skipForeign},
+		{"spool directory not listed, no file group: first group", "a.one,a.two", runOptions{sourceDir: "SPOOL/alt/test"}, "a.one", skipNone},
+		{"spool directory not listed, mbox in the spool not listed: foreign", "a.one,a.two", runOptions{sourceDir: "SPOOL/alt/test", sourceGroup: "b.other"}, "", skipForeign},
+		{"spool directory listed, mbox in the spool not listed: directory", "a.one,alt.test", runOptions{sourceDir: "SPOOL/alt/test", sourceGroup: "b.other"}, "alt.test", skipNone},
+		{"forced group, foreign article: forced", "a.one,a.two", runOptions{group: "f.orced", sourceGroup: "b.other"}, "f.orced", skipNone},
 		{"hierarchy dump: first group below it", "x.y,free.pt.foo,free.pt.bar", runOptions{sourceGroup: "free.pt"}, "free.pt.foo", skipNone},
 		{"prefix needs a dot", "free.ptx,free.pt.foo", runOptions{sourceGroup: "free.pt"}, "free.pt.foo", skipNone},
 		{"spool directory", "alt.typo,alt.test", runOptions{sourceDir: "SPOOL/alt/test"}, "alt.test", skipNone},
@@ -54,7 +64,8 @@ func TestSourceGroupTargetGroup(t *testing.T) {
 
 // TestSourceGroupMboxCrosspost: one crosspost in two per-group archives whose header names
 // a third group first. Each archive files it into its own group; the first group is never
-// created. An article that does not list its archive's group goes to its first group.
+// created. An article that does not list its archive's group goes to its first group with
+// -foreign file (the default, skip, is TestForeignMbox).
 func TestSourceGroupMboxCrosspost(t *testing.T) {
 	miNeedDB(t)
 	miSetup(t)
@@ -66,7 +77,7 @@ func TestSourceGroupMboxCrosspost(t *testing.T) {
 	beta := miWrite(t, dir, miBeta+".mbox", miArticle(miID1, cross, "crosspost")+miArticle(miID2, miBeta, "own"))
 	data := filepath.Join(t.TempDir(), "data")
 
-	code, sum := miRun(t, "-data", data, alpha, beta)
+	code, sum := miRun(t, "-data", data, "-foreign", "file", alpha, beta)
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}

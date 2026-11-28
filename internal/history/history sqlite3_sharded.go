@@ -47,6 +47,8 @@ type ShardConfig struct {
 	BaseDir      string // Base directory for database files
 	MaxOpenPerDB int    // Max connections per database
 	Timeout      int64  // Idle connection timeout in seconds
+	CacheKiB     int    // SQLite page cache per connection in KiB (0 = historyDefaultCacheKiB)
+	MmapBytes    int64  // PRAGMA mmap_size per connection in bytes (0 = historyDefaultMmapBytes)
 }
 
 // GetShardConfig returns the configuration for a given shard mode
@@ -56,19 +58,20 @@ func GetShardConfig(mode int) (numDBs, tablesPerDB int, description string) {
 
 // NewSQLite3DB creates a new SQLite3 database pool.
 // All connection settings are applied per connection: DSN params (opts.params)
-// plus the ConnectHook of the registered history driver.
+// plus the ConnectHook of the pool's historyConnector (mmap size opts.mmapBytes).
 func NewSQLite3DB(opts *SQLite3Opts) (*SQLite3DB, error) {
-	registerHistoryDriver()
+	registerHistoryDriver() // raw opens by historyDriverName (tests, tools) find the driver
 
 	connectionString := opts.dbPath
 	if opts.params != "" {
 		connectionString += opts.params
 	}
-
-	db, err := sql.Open(historyDriverName, connectionString)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open database: %v", err)
+	mmapBytes := opts.mmapBytes
+	if mmapBytes <= 0 {
+		mmapBytes = historyDefaultMmapBytes
 	}
+
+	db := sql.OpenDB(newHistoryConnector(connectionString, mmapBytes))
 
 	db.SetMaxOpenConns(opts.maxOpen)
 	db.SetMaxIdleConns(opts.initOpen)
@@ -104,6 +107,16 @@ func NewSQLite3ShardedDB(config *ShardConfig, createTables bool) (*SQLite3Sharde
 	if config.Timeout < 30 {
 		config.Timeout = 300
 	}
+	if config.CacheKiB <= 0 {
+		config.CacheKiB = historyDefaultCacheKiB
+	}
+	config.CacheKiB = min(config.CacheKiB, MaxPageCacheMB*1024)
+	if config.MmapBytes <= 0 {
+		config.MmapBytes = historyDefaultMmapBytes
+	}
+	config.MmapBytes = min(config.MmapBytes, int64(MaxMmapMB)<<20)
+	log.Printf("[HISTORY] page cache %d MiB per connection (_cache_size=-%d, max %d connections per file), mmap %d MiB per file (mmap_size=%d)",
+		(config.CacheKiB+512)/1024, config.CacheKiB, config.MaxOpenPerDB, config.MmapBytes>>20, config.MmapBytes)
 
 	s := &SQLite3ShardedDB{
 		shardMode:   config.Mode,
@@ -118,11 +131,12 @@ func NewSQLite3ShardedDB(config *ShardConfig, createTables bool) (*SQLite3Sharde
 	// Initialize database pools
 	for i := 0; i < numDBs; i++ {
 		opts := &SQLite3Opts{
-			dbPath:   filepath.Join(config.BaseDir, fmt.Sprintf("hashdb_%x.sqlite3", i)),
-			params:   historyDSNParams,
-			maxOpen:  config.MaxOpenPerDB,
-			initOpen: config.MaxOpenPerDB, // keep connections (and their settings) around
-			timeout:  config.Timeout,
+			dbPath:    filepath.Join(config.BaseDir, fmt.Sprintf("hashdb_%x.sqlite3", i)),
+			params:    historyDSNParams(config.CacheKiB),
+			maxOpen:   config.MaxOpenPerDB,
+			initOpen:  config.MaxOpenPerDB, // keep connections (and their settings) around
+			timeout:   config.Timeout,
+			mmapBytes: config.MmapBytes,
 		}
 
 		db, err := NewSQLite3DB(opts)

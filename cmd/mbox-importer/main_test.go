@@ -120,8 +120,13 @@ func miSetup(t *testing.T) {
 // miNewProcessor is processor.NewProcessorE without the hostname check
 // (cmd/nntp-server/server_e2e_test.go does the same).
 func miNewProcessor(db *database.Database, hashLen int) (*processor.Processor, error) {
+	return miNewProcessorWithBatch(db, hashLen, history.DefaultBatchSize)
+}
+
+func miNewProcessorWithBatch(db *database.Database, hashLen, batchSize int) (*processor.Processor, error) {
 	cfg := history.DefaultConfig()
 	cfg.HistoryDir = filepath.Join(db.GetDataDir(), "history")
+	cfg.BatchSize = batchSize
 	cfg.BatchTimeout = 50 // ms
 	cfg.MaxConnections = 4
 	cfg.UseShortHashLen = hashLen
@@ -230,8 +235,7 @@ func miCheckGroups(t *testing.T, dir string, want map[string][]string, ids []str
 	})
 }
 
-// miCheckHistory checks that the history index under dir knows every id.
-func miCheckHistory(t *testing.T, dir string, ids ...string) {
+func miWithHistory(t *testing.T, dir string, fn func(*history.History)) {
 	t.Helper()
 	oldEnable := history.ENABLE_HISTORY
 	history.ENABLE_HISTORY = true
@@ -249,12 +253,20 @@ func miCheckHistory(t *testing.T, dir string, ids ...string) {
 			t.Errorf("history close: %v", err)
 		}
 	}()
-	for _, id := range ids {
-		ok, err := h.Exists(id)
-		if err != nil || !ok {
-			t.Errorf("history Exists(%s) = %t, %v", id, ok, err)
+	fn(h)
+}
+
+// miCheckHistory checks that the history index under dir knows every id.
+func miCheckHistory(t *testing.T, dir string, ids ...string) {
+	t.Helper()
+	miWithHistory(t, dir, func(h *history.History) {
+		for _, id := range ids {
+			ok, err := h.Exists(id)
+			if err != nil || !ok {
+				t.Errorf("history Exists(%s) = %t, %v", id, ok, err)
+			}
 		}
-	}
+	})
 }
 
 // miCheck compares the totals of a run.
@@ -316,7 +328,7 @@ func TestMboxCmdDryRun(t *testing.T) {
 		fmt.Sprintf("[MBOX-IMPORT] dry-run group=%q articles=1", miAlpha),
 		fmt.Sprintf("[MBOX-IMPORT] dry-run group=%q articles=1", miBeta),
 		fmt.Sprintf("[MBOX-IMPORT] file=%q read=3 stored=2 present=0 skipped=1 (no-subject=1) rejected=0 errors=0 parser-skipped=0 near-misses=0 stopped-early=false unread=false marked-done=false", in),
-		"[MBOX-IMPORT] done inputs=1 marked-done=0 input-errors=0 read=3 stored=2 present=0 skipped=1 rejected=0 errors=0 commit-errors=0",
+		"[MBOX-IMPORT] done inputs=1 marked-done=0 input-errors=0 read=3 stored=2 present=0 skipped=1 (no-subject=1) rejected=0 errors=0 commit-errors=0",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("log lacks %q\n%s", want, out)
@@ -387,6 +399,66 @@ func TestMboxCmdForcedGroup(t *testing.T) {
 	}
 	miCheck(t, sum, 4, 2, 0, 0, 0, "no-subject=1,no-newsgroups=1")
 	miCheckGroups(t, data, map[string][]string{forced: {miID1, miID2}}, []string{miID1, miID2, miID3}, miAlpha, miBeta)
+}
+
+// TestMboxCmdNoThreading: -no-threading stores the articles (and their history entries) but
+// writes no threads rows, no thread_cache row and no reply_count; the same import without the
+// flag threads the reply under its root.
+func TestMboxCmdNoThreading(t *testing.T) {
+	miNeedDB(t)
+	miSetup(t)
+	const forced = "t.mbox.forced"
+	// threading counts the threads rows, thread_cache rows and the root's reply_count of forced
+	threading := func(data string) (threads, caches, replies int) {
+		t.Helper()
+		miWithDB(t, data, func(db *database.Database) {
+			g, err := db.GetGroupDB(forced)
+			if err != nil {
+				t.Fatalf("GetGroupDB %s: %v", forced, err)
+			}
+			defer g.Return()
+			for _, q := range []struct {
+				query string
+				arg   []any
+				dst   *int
+			}{
+				{"SELECT COUNT(*) FROM threads", nil, &threads},
+				{"SELECT COUNT(*) FROM thread_cache", nil, &caches},
+				{"SELECT reply_count FROM articles WHERE message_id = ?", []any{miID1}, &replies},
+			} {
+				if err := g.DB.QueryRow(q.query, q.arg...).Scan(q.dst); err != nil {
+					t.Fatalf("%s: %v", q.query, err)
+				}
+			}
+		})
+		return
+	}
+	for _, tc := range []struct {
+		name                     string
+		args                     []string
+		threads, caches, replies int
+	}{
+		{"threaded", nil, 2, 1, 1},
+		{"no-threading", []string{"-no-threading"}, 0, 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := filepath.Join(t.TempDir(), "data")
+			in := miWrite(t, t.TempDir(), "g.mbox", miFixture())
+			args := append(append([]string{"-data", data, "-group", forced}, tc.args...), in)
+			code, sum := miRun(t, args...)
+			if code != 0 {
+				t.Fatalf("exit %d", code)
+			}
+			miCheck(t, sum, 3, 2, 0, 0, 0, "no-subject=1")
+			miCheckGroups(t, data, map[string][]string{forced: {miID1, miID2}}, []string{miID1, miID2, miID3})
+			miCheckHistory(t, data, miID1, miID2)
+			threads, caches, replies := threading(data)
+			if threads != tc.threads || caches != tc.caches || replies != tc.replies {
+				t.Errorf("threads=%d thread_cache=%d reply_count=%d, want %d/%d/%d",
+					threads, caches, replies, tc.threads, tc.caches, tc.replies)
+			}
+		})
+	}
 }
 
 func TestMboxCmdStopped(t *testing.T) {
