@@ -60,18 +60,37 @@ type counters struct {
 	AllForeign      int
 	AllForeignGroup string
 	// routed counts the articles that passed the skip rules and the header rewrite and were
-	// handed to targetGroup (handleLines): the base of foreignOnly.
-	routed int
+	// handed to targetGroup (handleLines); own counts the articles skipped before that
+	// (binary, no-body, too-big, ...) whose Newsgroups header lists the input's file-name
+	// group or a group below it (noteOwn). Both are the base of foreignOnly.
+	routed, own int
 }
 
-// foreignOnly reports whether every article that reached targetGroup since the snapshot
-// (routed, foreign skips) was skipped as foreign: at least one, and no other outcome. An
-// article skipped before targetGroup (binary, no-body, too-big, ...) does not count; one
-// that was stored, present, rejected, errored or skipped by targetGroup for another reason
-// means the name does give a group the input holds.
-func foreignOnly(c *counters, routed, foreign int) bool {
-	n := c.Skipped[skipForeign] - foreign
-	return n > 0 && n == c.routed-routed
+// foreignMark is a snapshot of the counts foreignOnly compares (counters.mark).
+type foreignMark struct{ routed, own, foreign int }
+
+// mark returns the snapshot foreignOnly measures from.
+func (c *counters) mark() foreignMark {
+	return foreignMark{routed: c.routed, own: c.own, foreign: c.Skipped[skipForeign]}
+}
+
+// foreignOnly reports whether the articles since the snapshot show that the file's name gives
+// no group of theirs: at least one was skipped as foreign, every article that reached
+// targetGroup was (none stored, present, rejected, in error or skipped by targetGroup for
+// another reason), and no article skipped before targetGroup (a yEnc binary, an empty body,
+// one over -max-article-size, ...) lists the name's group either. A group file whose own
+// articles are all binaries plus one stray foreign article is therefore no all-foreign file.
+func foreignOnly(c *counters, since foreignMark) bool {
+	n := c.Skipped[skipForeign] - since.foreign
+	return n > 0 && n == c.routed-since.routed && c.own == since.own
+}
+
+// noteOwn counts an article skipped before targetGroup that lists the input's file-name group
+// or a group below it (counters.own); a no-op unless foreign skips are on (foreignSkips).
+func (c *counters) noteOwn(rawHead []string, opts *runOptions) {
+	if foreignSkips(opts) && groupOfSource(opts.sourceGroup, listedGroups(rawHead)) != "" {
+		c.own++
+	}
 }
 
 // markAllForeign records and logs a file whose importable articles were all skipped as
@@ -147,6 +166,7 @@ func (c *counters) add(o *counters) {
 	c.ANewsBatches += o.ANewsBatches
 	c.FileErrors += o.FileErrors
 	c.routed += o.routed
+	c.own += o.own
 	for r, n := range o.Skipped {
 		c.Skipped[r] += n
 	}
@@ -300,6 +320,7 @@ func handleMessage(c *counters, rawHead []string, bodyReader io.Reader, opts *ru
 	body, isBinary, tooBig := readBody(bodyReader, opts.keepBinary, maxBody)
 	if tooBig {
 		c.Skipped[skipTooBig]++
+		c.noteOwn(rawHead, opts)
 		msgid, _ := headerField(rawHead, "Message-ID")
 		log.Printf("[MBOX-IMPORT] skipped msgid=%q: article over -max-article-size %d bytes", msgid, opts.maxArticleSize)
 		return
@@ -319,22 +340,27 @@ func handleMessage(c *counters, rawHead []string, bodyReader io.Reader, opts *ru
 // skip rules, the header rewrite, the target-group rule and the sink. isBinary says the body
 // was yEnc and left out (readBody), so the article counts as "binary", not "no-body".
 func handleLines(c *counters, rawHead, body []string, isBinary bool, opts *runOptions, sink inputSink) {
+	// a skip before targetGroup: the article still tells whether the name gives a group
+	skip := func(r skipReason) {
+		c.Skipped[r]++
+		c.noteOwn(rawHead, opts)
+	}
 	msgid, reason := messageIDFromHeaders(rawHead, opts.strictMsgID)
 	if reason != skipNone {
-		c.Skipped[reason]++
+		skip(reason)
 		return
 	}
 	if isBinary {
-		c.Skipped[skipBinary]++
+		skip(skipBinary)
 		return
 	}
 	if len(body) == 0 {
-		c.Skipped[skipNoBody]++
+		skip(skipNoBody)
 		return
 	}
 	head, reason := rewriteHead(msgid, rawHead)
 	if reason != skipNone {
-		c.Skipped[reason]++
+		skip(reason)
 		return
 	}
 	c.routed++
@@ -870,7 +896,7 @@ func importInput(path string, opts *runOptions, sink articleSink, stop <-chan st
 		log.Printf("[MBOX-IMPORT] file=%q commit wait: %v", path, waitErr)
 		c.CommitFailed = true
 	}
-	if !stopped && foreignOnly(c, 0, 0) {
+	if !stopped && foreignOnly(c, foreignMark{}) {
 		markAllForeign(c, fmt.Sprintf("file=%q", path), opts.sourceGroup, c.Skipped[skipForeign])
 		inputErr = true
 	}

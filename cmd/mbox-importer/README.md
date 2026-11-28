@@ -171,9 +171,10 @@ rule 4, as the versions up to 0.6.24 did.
 - A dotted file name that is no group makes every article of the input foreign: an archive suffix
   the name rule does not know (`alt.test.2014.mbox.gz`, `alt.test.part2.mbox`,
   `alt.test.20141010-1.mbox`) or a plain dotted name (`news.backup.mbox`). So when every article of
-  an input that reached the group choice was skipped as foreign (articles skipped earlier, as
-  `binary`, `no-body`, `too-big` and so on, do not count; one stored, present, rejected or in error
-  does), the importer logs a
+  an input that reached the group choice was skipped as foreign, and no article skipped earlier
+  (as `binary`, `no-body`, `too-big` and so on) lists the name's group either (one stored, present,
+  rejected or in error, or a skipped one that lists the group, shows the name is right), the
+  importer logs a
   `WARNING ... all N importable articles skipped as foreign` line and the input **fails**: it counts as
   an input error (exit code 1, also in a dry run), it is not renamed `.done`, and its row in the
   tracking database is `failed` with the reason `all articles foreign: the file name gives group

@@ -524,13 +524,7 @@ func targetGroup(head []string, opts *runOptions) (string, skipReason) {
 	if opts.sourceDir == "" && opts.sourceGroup == "" {
 		return first, reason
 	}
-	value, _ := headerField(head, "Newsgroups")
-	var listed []string
-	for _, g := range common.SeparatorRegex.Split(value, -1) {
-		if g = strings.TrimSpace(g); g != "" && common.IsValidGroupName(g) {
-			listed = append(listed, g)
-		}
-	}
+	listed := listedGroups(head)
 	if g := groupOfSpoolDir(opts.sourceDir, listed); g != "" {
 		return g, skipNone
 	}
@@ -541,6 +535,19 @@ func targetGroup(head []string, opts *runOptions) (string, skipReason) {
 		return "", skipForeign
 	}
 	return first, reason
+}
+
+// listedGroups returns the valid group names of the Newsgroups header (folded lines joined,
+// split like the processor), in header order.
+func listedGroups(head []string) []string {
+	value, _ := headerField(head, "Newsgroups")
+	var listed []string
+	for _, g := range common.SeparatorRegex.Split(value, -1) {
+		if g = strings.TrimSpace(g); g != "" && common.IsValidGroupName(g) {
+			listed = append(listed, g)
+		}
+	}
+	return listed
 }
 
 // foreignSkips reports whether an article that lists neither the input's file-name group

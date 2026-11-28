@@ -355,11 +355,11 @@ func (w *spoolWalker) readMboxFile(name string, peek []byte, f io.Reader) error 
 	}
 	// the counts before this file: an mbox named after a group whose importable articles
 	// were all skipped as foreign fails the spool input (markAllForeign)
-	routed0, foreign0 := w.c.routed, w.c.Skipped[skipForeign]
+	since := w.c.mark()
 	defer func() {
-		if !w.stopped() && foreignOnly(w.c, routed0, foreign0) {
+		if !w.stopped() && foreignOnly(w.c, since) {
 			markAllForeign(w.c, fmt.Sprintf("spool file=%q mbox=%q", w.label, name), w.opts.sourceGroup,
-				w.c.Skipped[skipForeign]-foreign0)
+				w.c.Skipped[skipForeign]-since.foreign)
 		}
 	}()
 	lastErr := ""
