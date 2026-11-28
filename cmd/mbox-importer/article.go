@@ -27,7 +27,8 @@ const (
 	skipNoNewsgroups
 	skipBadGroup
 	skipTooBig
-	skipLast = skipTooBig // the last reason, for loops over all of them
+	skipForeign               // the input names a group (or hierarchy) the article does not list (-foreign skip)
+	skipLast    = skipForeign // the last reason, for loops over all of them
 )
 
 // maxHeaderLines is the most header lines (continuations included) an article may have.
@@ -64,6 +65,8 @@ func (r skipReason) String() string {
 		return "bad-group"
 	case skipTooBig:
 		return "too-big"
+	case skipForeign:
+		return "foreign"
 	}
 	return "unknown"
 }
@@ -488,13 +491,23 @@ func firstNewsgroup(head []string) (group string, reason skipReason) {
 
 // targetGroup picks the group an article is filed into (crossposts are not processed, so
 // it is exactly one):
-//   - -group or -group-from-name (opts.group): that group;
-//   - the group of the spool directory the article file is in (opts.sourceDir
+//  1. -group or -group-from-name (opts.group): that group;
+//  2. the group of the spool directory the article file is in (opts.sourceDir
 //     "SPOOL/alt/test" -> alt.test), when the article lists it;
-//   - the group of the input's file name (opts.sourceGroup, alt.test.mbox.zip -> alt.test),
+//  3. the group of the input's file name (opts.sourceGroup, alt.test.mbox.zip -> alt.test),
 //     when the article lists it, or else the first listed group below it (a hierarchy dump
 //     free.pt.mbox.7z -> free.pt.foo);
-//   - the first group of the Newsgroups header.
+//  4. the first group of the Newsgroups header.
+//
+// Rule 4 does not apply when rule 3 had a group to go by and -foreign is skip (the default,
+// foreignSkips): an article in alt.test.mbox.gz that lists neither alt.test nor a group
+// below it is skipped as foreign. archive.org's per-group dumps hold such articles now and
+// then (alt.global-warming.20141010.mbox.gz holds de.rec.fotografie articles); nearly all
+// of them are in their own group's file, and filing each one by rule 4 made a one-article
+// batch, a commit of its own, in a group the input is not about. -foreign file keeps rule
+// 4 for them. A spool directory alone (rule 2) never makes an article foreign: a disc's
+// directory names can be cut short (ISO 9660) or laid out by hierarchy, and the article
+// may be the only copy on the disc.
 //
 // Without the source rules a crossposted article went to the first group of its header in
 // every input that holds it: an article of the ca.forsale archive with "Newsgroups:
@@ -511,6 +524,22 @@ func targetGroup(head []string, opts *runOptions) (string, skipReason) {
 	if opts.sourceDir == "" && opts.sourceGroup == "" {
 		return first, reason
 	}
+	listed := listedGroups(head)
+	if g := groupOfSpoolDir(opts.sourceDir, listed); g != "" {
+		return g, skipNone
+	}
+	if g := groupOfSource(opts.sourceGroup, listed); g != "" {
+		return g, skipNone
+	}
+	if foreignSkips(opts) {
+		return "", skipForeign
+	}
+	return first, reason
+}
+
+// listedGroups returns the valid group names of the Newsgroups header (folded lines joined,
+// split like the processor), in header order.
+func listedGroups(head []string) []string {
 	value, _ := headerField(head, "Newsgroups")
 	var listed []string
 	for _, g := range common.SeparatorRegex.Split(value, -1) {
@@ -518,13 +547,16 @@ func targetGroup(head []string, opts *runOptions) (string, skipReason) {
 			listed = append(listed, g)
 		}
 	}
-	if g := groupOfSpoolDir(opts.sourceDir, listed); g != "" {
-		return g, skipNone
-	}
-	if g := groupOfSource(opts.sourceGroup, listed); g != "" {
-		return g, skipNone
-	}
-	return first, reason
+	return listed
+}
+
+// foreignSkips reports whether an article that lists neither the input's file-name group
+// nor a group below it is skipped as foreign (targetGroup): -foreign is skip and the input
+// names a group. Only a name with a dot counts as one ("alt.test", the hierarchy "free.pt"):
+// a one-word name (export.mbox, archive.mbox, g.mbox) is far more often a file name than a
+// group, and taking it as one would skip every article of the input.
+func foreignSkips(opts *runOptions) bool {
+	return !opts.foreignFile && strings.Contains(opts.sourceGroup, ".")
 }
 
 // groupOfSpoolDir returns the listed group whose spool path the directory ends with

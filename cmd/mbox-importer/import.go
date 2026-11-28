@@ -53,6 +53,77 @@ type counters struct {
 	// done and the exit code is unchanged, because a re-walk of a read-only image would
 	// only read the same bad blocks again (and -follow would do it on every scan).
 	FileErrors int
+	// AllForeign counts the files of the input (the input itself, or mbox files inside a
+	// spool) whose importable articles were all skipped as foreign (markAllForeign): the name
+	// most likely gives no group of theirs, so the input is an input error and not marked done.
+	// AllForeignGroup is the group the name of the first such file gave. Neither is summed.
+	AllForeign      int
+	AllForeignGroup string
+	// routed counts the articles that passed the skip rules and the header rewrite and were
+	// handed to targetGroup (handleLines); own counts the articles skipped before that
+	// (binary, no-body, too-big, ...) whose Newsgroups header lists the input's file-name
+	// group or a group below it (noteOwn), plus those whose header was never read
+	// (noteUnknown). Both are the base of foreignOnly.
+	routed, own int
+}
+
+// foreignMark is a snapshot of the counts foreignOnly compares (counters.mark).
+type foreignMark struct{ routed, own, foreign int }
+
+// mark returns the snapshot foreignOnly measures from.
+func (c *counters) mark() foreignMark {
+	return foreignMark{routed: c.routed, own: c.own, foreign: c.Skipped[skipForeign]}
+}
+
+// foreignOnly reports whether the articles since the snapshot show that the file's name gives
+// no group of theirs: at least one was skipped as foreign, every article that reached
+// targetGroup was (none stored, present, rejected, in error or skipped by targetGroup for
+// another reason), and no article skipped before targetGroup (a yEnc binary, an empty body,
+// one over -max-article-size, ...) lists the name's group either. A group file whose own
+// articles are all binaries plus one stray foreign article is therefore no all-foreign file.
+func foreignOnly(c *counters, since foreignMark) bool {
+	n := c.Skipped[skipForeign] - since.foreign
+	return n > 0 && n == c.routed-since.routed && c.own == since.own
+}
+
+// noteUnknown counts n articles whose header was never read (a UAT message the reader drops
+// as too big, a message the mbox parser steps over) as own (counters.own): they may list the
+// name's group and cannot be checked, so they keep the input from failing as all-foreign. A
+// no-op unless foreign skips are on.
+func (c *counters) noteUnknown(n int, opts *runOptions) {
+	if foreignSkips(opts) {
+		c.own += n
+	}
+}
+
+// noteOwn counts an article skipped before targetGroup that lists the input's file-name group
+// or a group below it (counters.own); a no-op unless foreign skips are on (foreignSkips).
+func (c *counters) noteOwn(rawHead []string, opts *runOptions) {
+	if foreignSkips(opts) && groupOfSource(opts.sourceGroup, listedGroups(rawHead)) != "" {
+		c.own++
+	}
+}
+
+// markAllForeign records and logs a file whose importable articles were all skipped as
+// foreign (foreignOnly). where names it in the log ("file=..." or "spool file=... mbox=..."),
+// group is the group its name gave.
+func markAllForeign(c *counters, where, group string, foreign int) {
+	if c.AllForeign == 0 {
+		c.AllForeignGroup = group
+	}
+	c.AllForeign++
+	log.Printf("[MBOX-IMPORT] WARNING %s: all %d importable articles skipped as foreign: none lists %q or a group below it; "+
+		"the input is an input error and not marked done: if the name does not give their group, import it again with "+
+		"-foreign file (-reimport only for a copy an earlier version marked done)", where, foreign, group)
+}
+
+// allForeignReason is the tracking database's reason for an input with AllForeign files.
+func (c *counters) allForeignReason() string {
+	if c.AllForeign == 1 {
+		return fmt.Sprintf("all articles foreign: the file name gives group %q; check it or use -foreign file", c.AllForeignGroup)
+	}
+	return fmt.Sprintf("%d files with all articles foreign (the first name gives group %q); check the names or use -foreign file",
+		c.AllForeign, c.AllForeignGroup)
 }
 
 // spoolDetail is the spool part of the per-input log line ("" for an mbox input).
@@ -105,6 +176,8 @@ func (c *counters) add(o *counters) {
 	c.XrefPointers += o.XrefPointers
 	c.ANewsBatches += o.ANewsBatches
 	c.FileErrors += o.FileErrors
+	c.routed += o.routed
+	c.own += o.own
 	for r, n := range o.Skipped {
 		c.Skipped[r] += n
 	}
@@ -193,6 +266,7 @@ type runOptions struct {
 	groupFromName                      bool   // -group-from-name: the target group of an input is its file name (inputOptions)
 	sourceGroup                        string // group named by the input's file name, preferred when the article lists it (targetGroup)
 	sourceDir                          string // spool directory of the article file ("SPOOL/alt/test"), preferred the same way
+	foreignFile                        bool   // -foreign file: an article that does not list sourceGroup goes to its first group; false (skip): it is skipped as foreign (targetGroup)
 	spool                              bool   // -spool: a positional directory or .zip input is a news spool (disc.go)
 	history, dryRun, keepBinary        bool
 	markDone, strictMsgID              bool
@@ -229,6 +303,7 @@ func readMbox(src *source, opts *runOptions, sink inputSink, stop <-chan struct{
 			}
 			lastErr = err.Error()
 			c.ParserSkipped++
+			c.noteUnknown(1, opts)
 			log.Printf("[MBOX-IMPORT] file=%q parser skipped a message: %v", src.Path, err)
 			continue
 		}
@@ -236,8 +311,8 @@ func readMbox(src *source, opts *runOptions, sink inputSink, stop <-chan struct{
 		c.Read++
 		handleMessage(c, msg.Headers(), msg.BodyReader(), opts, sink)
 		if c.Read%progressEvery == 0 {
-			log.Printf("[MBOX-IMPORT] progress file=%q read=%d stored=%d present=%d skipped=%d rejected=%d errors=%d",
-				src.Path, c.Read, c.Stored, c.Present, c.skippedTotal(), c.Rejected, c.Errors)
+			log.Printf("[MBOX-IMPORT] progress file=%q read=%d stored=%d present=%d skipped=%d (%s) rejected=%d errors=%d",
+				src.Path, c.Read, c.Stored, c.Present, c.skippedTotal(), c.skippedDetail(), c.Rejected, c.Errors)
 		}
 	}
 }
@@ -257,6 +332,7 @@ func handleMessage(c *counters, rawHead []string, bodyReader io.Reader, opts *ru
 	body, isBinary, tooBig := readBody(bodyReader, opts.keepBinary, maxBody)
 	if tooBig {
 		c.Skipped[skipTooBig]++
+		c.noteOwn(rawHead, opts)
 		msgid, _ := headerField(rawHead, "Message-ID")
 		log.Printf("[MBOX-IMPORT] skipped msgid=%q: article over -max-article-size %d bytes", msgid, opts.maxArticleSize)
 		return
@@ -276,24 +352,30 @@ func handleMessage(c *counters, rawHead []string, bodyReader io.Reader, opts *ru
 // skip rules, the header rewrite, the target-group rule and the sink. isBinary says the body
 // was yEnc and left out (readBody), so the article counts as "binary", not "no-body".
 func handleLines(c *counters, rawHead, body []string, isBinary bool, opts *runOptions, sink inputSink) {
+	// a skip before targetGroup: the article still tells whether the name gives a group
+	skip := func(r skipReason) {
+		c.Skipped[r]++
+		c.noteOwn(rawHead, opts)
+	}
 	msgid, reason := messageIDFromHeaders(rawHead, opts.strictMsgID)
 	if reason != skipNone {
-		c.Skipped[reason]++
+		skip(reason)
 		return
 	}
 	if isBinary {
-		c.Skipped[skipBinary]++
+		skip(skipBinary)
 		return
 	}
 	if len(body) == 0 {
-		c.Skipped[skipNoBody]++
+		skip(skipNoBody)
 		return
 	}
 	head, reason := rewriteHead(msgid, rawHead)
 	if reason != skipNone {
-		c.Skipped[reason]++
+		skip(reason)
 		return
 	}
+	c.routed++
 	group, reason := targetGroup(head, opts)
 	if reason != skipNone {
 		c.Skipped[reason]++
@@ -826,12 +908,16 @@ func importInput(path string, opts *runOptions, sink articleSink, stop <-chan st
 		log.Printf("[MBOX-IMPORT] file=%q commit wait: %v", path, waitErr)
 		c.CommitFailed = true
 	}
+	if !stopped && foreignOnly(c, foreignMark{}) {
+		markAllForeign(c, fmt.Sprintf("file=%q", path), opts.sourceGroup, c.Skipped[skipForeign])
+		inputErr = true
+	}
 
 	switch {
 	case opts.dryRun || !opts.markDone:
-	case stopped || c.StoppedEarly || c.Unread || closeErr != nil || c.Errors > 0 || waitErr != nil:
-		log.Printf("[MBOX-IMPORT] file=%q not marked done (stopped=%t stopped-early=%t unread=%t close-error=%t errors=%d commit-wait-error=%t)",
-			path, stopped, c.StoppedEarly, c.Unread, closeErr != nil, c.Errors, waitErr != nil)
+	case stopped || c.StoppedEarly || c.Unread || closeErr != nil || c.Errors > 0 || waitErr != nil || c.AllForeign > 0:
+		log.Printf("[MBOX-IMPORT] file=%q not marked done (stopped=%t stopped-early=%t unread=%t close-error=%t errors=%d commit-wait-error=%t all-foreign=%t)",
+			path, stopped, c.StoppedEarly, c.Unread, closeErr != nil, c.Errors, waitErr != nil, c.AllForeign > 0)
 	case strings.HasSuffix(path, ".done"):
 		log.Printf("[MBOX-IMPORT] file=%q already named .done: not renamed", path)
 	default:
@@ -883,8 +969,8 @@ func logTotals(r *runSummary) {
 	if t == nil {
 		t = newCounters("")
 	}
-	log.Printf("[MBOX-IMPORT] done inputs=%d marked-done=%d input-errors=%d read=%d stored=%d present=%d skipped=%d rejected=%d errors=%d commit-errors=%d",
-		r.Inputs, r.MarkedDone, r.InputErrors, t.Read, t.Stored, t.Present, t.skippedTotal(), t.Rejected, t.Errors, r.CommitErrors)
+	log.Printf("[MBOX-IMPORT] done inputs=%d marked-done=%d input-errors=%d read=%d stored=%d present=%d skipped=%d (%s) rejected=%d errors=%d commit-errors=%d",
+		r.Inputs, r.MarkedDone, r.InputErrors, t.Read, t.Stored, t.Present, t.skippedTotal(), t.skippedDetail(), t.Rejected, t.Errors, r.CommitErrors)
 }
 
 // logDryRunGroups logs the article count per target group, largest first.

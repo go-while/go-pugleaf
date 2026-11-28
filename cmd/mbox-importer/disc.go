@@ -173,14 +173,19 @@ func importSpool(path string, kind spoolKind, opts *runOptions, sink articleSink
 		log.Printf("[MBOX-IMPORT] file=%q commit wait: %v", path, waitErr)
 		c.CommitFailed = true
 	}
+	if !stopped && c.AllForeign > 0 {
+		// an mbox file in the spool named after a group none of its articles lists (the
+		// walker logged it): the input is redone with -foreign file, not marked done
+		inputErr = true
+	}
 
 	switch {
 	case opts.dryRun || !opts.markDone:
 	case kind == spoolDir:
 		log.Printf("[MBOX-IMPORT] file=%q is a spool directory: not renamed", path)
-	case stopped || c.StoppedEarly || noArticles || c.Errors > 0 || waitErr != nil:
-		log.Printf("[MBOX-IMPORT] file=%q not marked done (stopped=%t stopped-early=%t no-articles=%t errors=%d commit-wait-error=%t)",
-			path, stopped, c.StoppedEarly, noArticles, c.Errors, waitErr != nil)
+	case stopped || c.StoppedEarly || noArticles || c.Errors > 0 || waitErr != nil || c.AllForeign > 0:
+		log.Printf("[MBOX-IMPORT] file=%q not marked done (stopped=%t stopped-early=%t no-articles=%t errors=%d commit-wait-error=%t all-foreign-files=%d)",
+			path, stopped, c.StoppedEarly, noArticles, c.Errors, waitErr != nil, c.AllForeign)
 	case strings.HasSuffix(path, ".done"):
 		log.Printf("[MBOX-IMPORT] file=%q already named .done: not renamed", path)
 	default:

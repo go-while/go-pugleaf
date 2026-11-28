@@ -138,12 +138,54 @@ Each article is filed into exactly one group, the first rule that gives one:
    (`alt.amiga.mbox.zip` → `alt.amiga`, also for an mbox file inside a spool) or the name a UAT
    package carries. A file named after a hierarchy (`free.pt.mbox.7z`) gives the first listed group
    below it (`free.pt.foo`).
-4. The first group of the `Newsgroups:` header.
+4. The first group of the `Newsgroups:` header, except for a foreign article (below).
 
 archive.org's collections hold one file per group, and a crossposted article is in the file of every
 group it was posted to. Rules 2 and 3 put each copy into the group of its own file. With only rule 4,
 every copy went to the first listed group (often a typo or a local group), which made thousands of
 one-article groups and left the other groups without the article.
+
+**Foreign articles** (`-foreign`, default `skip`). Some per-group dumps also hold articles of other
+groups: `alt.global-warming.20141010.mbox.gz` holds articles with only `Newsgroups: de.rec.fotografie`.
+They are nearly always in their own group's file as well, and rule 4 filed each one into a group the
+input is not about, as a one-article batch with a commit of its own. With `-foreign skip` an article
+of an input whose file name gives a group (rule 3, the archive date or file count cut off as for
+`-group-from-name`) is skipped and counted as `foreign` when it lists neither that group nor, for a
+file named after a hierarchy (`free.pt.mbox.7z`), a group below it. Articles that list the input's
+group, crossposts included, are filed into it as before. `-foreign file` files foreign articles by
+rule 4, as the versions up to 0.6.24 did.
+
+- Only a file-name group with a dot counts: `alt.test.mbox.gz` and `free.pt.mbox.7z` do, a one-word
+  name (`export.mbox`, `archive.mbox`, `g.mbox`) does not, because it is far more often a plain file
+  name than a group, and taking it as one would skip every article of the input.
+- The name a UAT package carries counts like the file name, and so does the name of a file inside a
+  spool that is read as an mbox. A one-article file or an A-news batch in a spool gets no group from
+  its name (a `misc/news.backup.mbox` holding one article is filed by its directory or rule 4).
+- The directory of a disc image, `.tar.gz` or `-spool` article file (rule 2) never makes an article
+  foreign: an article whose directory group is not listed still falls back to rule 3, then rule 4.
+  Disc directory names can be cut short (ISO 9660) or laid out by hierarchy, and such an article may
+  be the only copy on the disc. The name of the image, zip or `.tar.gz` itself gives no rule-3 group.
+- `-group` and `-group-from-name` (rule 1) file every article into their group, foreign or not:
+  `-foreign` has no effect with them (`mbox-import.sh` uses `-group-from-name`). Inputs whose name
+  gives no group (only rule 4) are unchanged.
+- A dotted file name that is no group makes every article of the input foreign: an archive suffix
+  the name rule does not know (`alt.test.2014.mbox.gz`, `alt.test.part2.mbox`,
+  `alt.test.20141010-1.mbox`) or a plain dotted name (`news.backup.mbox`). So when every article of
+  an input that reached the group choice was skipped as foreign, and no article skipped earlier
+  (as `binary`, `no-body`, `too-big` and so on) lists the name's group either (one stored, present,
+  rejected or in error, or a skipped one that lists the group, shows the name is right; so does a
+  message whose header was never read, one the mbox parser stepped over or a UAT message over
+  `-max-article-size`, because it may be the group's own), the importer logs a
+  `WARNING ... all N importable articles skipped as foreign` line and the input **fails**: it counts as
+  an input error (exit code 1, also in a dry run), it is not renamed `.done`, and its row in the
+  tracking database is `failed` with the reason `all articles foreign: the file name gives group
+  "..."; check it or use -foreign file`. Import it again with `-foreign file` (a failed row is taken
+  again without `-reimport`; `-reimport` is only needed for a copy an earlier version marked done).
+  The same holds for a UAT archive, and for an mbox file inside a disc image, zip, `.tar.gz` or
+  `-spool` directory: the warning names the spool and the mbox file, and the spool input as a whole
+  fails (it is not marked done; its other articles are stored, and are `present` when it is imported
+  again). An input with any other outcome for an article that reached the group choice is handled
+  as before (done, unless it has errors), whatever share of it was foreign. A row with article errors as well names them first.
 
 ## Command Line Options
 
@@ -157,6 +199,7 @@ one-article groups and left the other groups without the article.
 | `-history-mmap-mb` | `0` | SQLite mmap size of the history index per connection in MiB; `0` = the default 16. This is the setting that **shares** memory: mapped pages are the kernel's page cache pages of the file, used by all connections and processes, so a larger mmap adds no private page cache per connection (only address space and page tables). On ZFS those pages sit in the Linux page cache on top of the ARC (the data is held twice), so for a ZFS-backed history the ARC size matters more and a large mmap may bring little. With a mapping, a disk I/O error on a mapped page, or a history file truncated or replaced while the importer runs (e.g. `history-rebuild` or a copy over the live files), ends the process with SIGBUS instead of an error return (SQLite behaviour). At most 2047 (SQLite's own compile-time limit is 2 GiB − 64 KiB per file); a larger value is clamped with a warning. Negative values are refused. No effect with `-history=false`. The start log shows the effective values: `[HISTORY] page cache N MiB per connection (...), mmap K MiB per file (...)` |
 | `-group` | (none) | File every article of the run into this group (see [Target group](#target-group)) |
 | `-group-from-name` | `false` | File every article of an input into the group named by the input's file name: the base name cut before the first `.mbox`, `.bag` or `.usenet` (`de.comm.foo.mbox.gz` becomes `de.comm.foo`, `pl.comp.lang.c.usenet.xz` becomes `pl.comp.lang.c`); a dump date or a file count right before the suffix is cut off as well, as archive.org's collections name their files (`0.akita-inu.20140617.mbox.gz` and `pitt.mac-users.(9).mbox.7z` become `0.akita-inu` and `pitt.mac-users`). A file whose name gives no valid group is an input error. Without the flag the file name's group is still preferred for the articles that list it (see [Target group](#target-group)). A disc image or `-spool` input ignores the flag (it holds many groups; one log line says so). Not together with `-group`. This is what `mbox-import.sh` in the repository root uses for a directory of per-group archives |
+| `-foreign` | `skip` | What happens to an article of an input whose file name gives a group or hierarchy (with a dot) when it lists neither that group nor a group below it: `skip` (counted as skipped `foreign`) or `file` (into the first group of its `Newsgroups:` header, the behaviour up to 0.6.24). No effect with `-group` or `-group-from-name`, on a name without a group, or for the directory of a spool article (see [Target group](#target-group)). Another value is a command-line error |
 | `-disc-reader` | `auto` | How a disc image is read: `mount` (`fuseiso` for `.iso`/`.cdr`, `squashfuse` for `.sqsh`, read in place), `7z` (unpack into `-tmpdir`), `auto` (mount when possible, else 7z), see [Disc images and news spools](#disc-images-and-news-spools) |
 | `-pprof` | (off) | Debug: serve `net/http/pprof` on this address (`127.0.0.1:6061`) with block and mutex profiling on |
 | `-7z` | `7z` | Program used to unpack `.7z` and `.usenet.7z` inputs (name in `PATH` or a full path); also unpacks `.usenet.xz` when `-xz` is not found |
@@ -319,8 +362,8 @@ Exit codes:
 | Code | Meaning |
 |------|---------|
 | `0` | every input was read without an article error (marked done or not, see the log; also when there was nothing to import) |
-| `1` | an input could not be opened or read (open, unpack, 7z exit status, close or rename error; for a UAT input also a missing zstd, a zstd failure or a size mismatch; for a disc image a failed `7z x`, for a spool a failed walk), an article could not be stored (`errors` > 0), or the commit wait failed; a database/processor/hostname error, or the tracking database could not be opened; `-drop-empty-groups`: see [Dropping empty groups](#dropping-empty-groups) |
-| `2` | bad command line (unknown flag, no input, invalid `-group` name, `-group` with `-group-from-name`, `-spool` with `-from-iafetch`, `-useshorthashlen` outside 2-7, negative `-commit-timeout`, `-parallel` outside 1-32, `-max-batch` outside 100-1000, `-max-queue` outside 16-100000, negative `-max-article-size`, negative `-log-keep-runs`, `-status` with `-trackdb off`, `-drop-empty-groups` with inputs, `-from-iafetch` or `-status` or without an explicit `-data`, `-force-stale-runs` without `-drop-empty-groups`, `-from-iafetch` with positional inputs or with `-trackdb off`, negative `-follow`, `-from-iafetch-base`/`-verify-md5`/`-follow` without `-from-iafetch`, and the first scan of `-from-iafetch` failing: a database that cannot be read or a relative path without `-from-iafetch-base`) |
+| `1` | an input could not be opened or read (open, unpack, 7z exit status, close or rename error; for a UAT input also a missing zstd, a zstd failure or a size mismatch; for a disc image a failed `7z x`, for a spool a failed walk), an article could not be stored (`errors` > 0), the commit wait failed, or every importable article of an input (or of an mbox file in a spool) was skipped as `foreign`; a database/processor/hostname error, or the tracking database could not be opened; `-drop-empty-groups`: see [Dropping empty groups](#dropping-empty-groups) |
+| `2` | bad command line (unknown flag, no input, invalid `-group` name, `-group` with `-group-from-name`, `-foreign` other than `skip` or `file`, `-spool` with `-from-iafetch`, `-useshorthashlen` outside 2-7, negative `-commit-timeout`, `-parallel` outside 1-32, `-max-batch` outside 100-1000, `-max-queue` outside 16-100000, negative `-max-article-size`, negative `-log-keep-runs`, `-status` with `-trackdb off`, `-drop-empty-groups` with inputs, `-from-iafetch` or `-status` or without an explicit `-data`, `-force-stale-runs` without `-drop-empty-groups`, `-from-iafetch` with positional inputs or with `-trackdb off`, negative `-follow`, `-from-iafetch-base`/`-verify-md5`/`-follow` without `-from-iafetch`, and the first scan of `-from-iafetch` failing: a database that cannot be read or a relative path without `-from-iafetch-base`) |
 | `130` | stopped by SIGINT/SIGTERM while an input was being imported. A signal that reaches a `-follow` run between two inputs ends it with `0`: while it waits for the next scan, while it scans, and while it was hashing an input for `-verify-md5` (that input is left `stopped` in the tracking database) |
 
 ## Tracking database
@@ -572,8 +615,9 @@ mbox-importer -data /tank0/go-pugleaf/data -status
 
 ## What is stored
 
-- **One group per article.** The target group is the first group of the article's `Newsgroups:`
-  header, or `-group NAME`. Crossposts are not processed: the article is filed in that one group
+- **One group per article.** The target group follows [Target group](#target-group): `-group NAME`,
+  the input's own group when the article lists it, else the first group of the article's
+  `Newsgroups:` header (a foreign article is skipped with `-foreign skip`). Crossposts are not processed: the article is filed in that one group
   only, which is how the fetcher's bulk mode works. Missing groups are created (active) on the fly,
   but only for an article that passed the processor's bulk checks (see **Rejected** below): an
   article these checks refuse creates no group and no group database. A group can still stay
@@ -624,6 +668,7 @@ Skipped articles are counted per reason in the summary line.
 | `no-newsgroups` | has no `Newsgroups:` header |
 | `bad-group` | has a first group in `Newsgroups:` that is not a valid group name (no fallback to a later group) |
 | `too-big` | is larger than `-max-article-size` (header and body; UAT: the stored message size) |
+| `foreign` | lists neither the group its input's file name gives nor a group below it (`-foreign skip`, the default; see [Target group](#target-group)) |
 
 With `-group`, the first group is not looked up, so `bad-group` does not apply. `no-newsgroups`
 still applies, because the processor requires the header.
@@ -735,8 +780,9 @@ target group counts as `present` and the UAT copy is not stored, so the original
 collection stays. A UAT copy imported first is the one that stays: a later mbox import of the same
 article counts it as `present`.
 
-The target group follows the same rule as for mbox inputs: the first group of the article's
-`Newsgroups:` header, or `-group NAME`. The archive's own group name is only logged.
+The target group follows the same rules as for mbox inputs ([Target group](#target-group)): the
+group name the package carries takes the place of the file name's group (rule 3), so with
+`-foreign skip` an article that lists neither it nor a group below it is skipped as `foreign`.
 
 Each UAT input logs one `uat` line before the import and a second one right after its usual summary
 line (with `near-misses=0`):
@@ -967,8 +1013,11 @@ then a totals line:
 ```
 [MBOX-IMPORT] file="…" read=… stored=… present=… skipped=… (no-subject=…,bad-group=…) rejected=… errors=… parser-skipped=… near-misses=… stopped-early=… unread=… marked-done=…
 [MBOX-IMPORT]   near-miss file="…" line=… "…"
-[MBOX-IMPORT] done inputs=… marked-done=… input-errors=… read=… stored=… present=… skipped=… rejected=… errors=… commit-errors=…
+[MBOX-IMPORT] done inputs=… marked-done=… input-errors=… read=… stored=… present=… skipped=… (foreign=…) rejected=… errors=… commit-errors=…
 ```
+
+The progress lines and the totals line carry the per-reason counts after `skipped=` as well (the
+UAT progress line only the total).
 
 A dry run also logs one `[MBOX-IMPORT] dry-run group="…" articles=…` line per target group (largest
 first); there `stored` counts the articles that would be handed to the processor.
