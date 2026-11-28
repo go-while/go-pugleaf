@@ -401,6 +401,66 @@ func TestMboxCmdForcedGroup(t *testing.T) {
 	miCheckGroups(t, data, map[string][]string{forced: {miID1, miID2}}, []string{miID1, miID2, miID3}, miAlpha, miBeta)
 }
 
+// TestMboxCmdNoThreading: -no-threading stores the articles (and their history entries) but
+// writes no threads rows, no thread_cache row and no reply_count; the same import without the
+// flag threads the reply under its root.
+func TestMboxCmdNoThreading(t *testing.T) {
+	miNeedDB(t)
+	miSetup(t)
+	const forced = "t.mbox.forced"
+	// threading counts the threads rows, thread_cache rows and the root's reply_count of forced
+	threading := func(data string) (threads, caches, replies int) {
+		t.Helper()
+		miWithDB(t, data, func(db *database.Database) {
+			g, err := db.GetGroupDB(forced)
+			if err != nil {
+				t.Fatalf("GetGroupDB %s: %v", forced, err)
+			}
+			defer g.Return()
+			for _, q := range []struct {
+				query string
+				arg   []any
+				dst   *int
+			}{
+				{"SELECT COUNT(*) FROM threads", nil, &threads},
+				{"SELECT COUNT(*) FROM thread_cache", nil, &caches},
+				{"SELECT reply_count FROM articles WHERE message_id = ?", []any{miID1}, &replies},
+			} {
+				if err := g.DB.QueryRow(q.query, q.arg...).Scan(q.dst); err != nil {
+					t.Fatalf("%s: %v", q.query, err)
+				}
+			}
+		})
+		return
+	}
+	for _, tc := range []struct {
+		name                     string
+		args                     []string
+		threads, caches, replies int
+	}{
+		{"threaded", nil, 2, 1, 1},
+		{"no-threading", []string{"-no-threading"}, 0, 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := filepath.Join(t.TempDir(), "data")
+			in := miWrite(t, t.TempDir(), "g.mbox", miFixture())
+			args := append(append([]string{"-data", data, "-group", forced}, tc.args...), in)
+			code, sum := miRun(t, args...)
+			if code != 0 {
+				t.Fatalf("exit %d", code)
+			}
+			miCheck(t, sum, 3, 2, 0, 0, 0, "no-subject=1")
+			miCheckGroups(t, data, map[string][]string{forced: {miID1, miID2}}, []string{miID1, miID2, miID3})
+			miCheckHistory(t, data, miID1, miID2)
+			threads, caches, replies := threading(data)
+			if threads != tc.threads || caches != tc.caches || replies != tc.replies {
+				t.Errorf("threads=%d thread_cache=%d reply_count=%d, want %d/%d/%d",
+					threads, caches, replies, tc.threads, tc.caches, tc.replies)
+			}
+		})
+	}
+}
+
 func TestMboxCmdStopped(t *testing.T) {
 	miNeedDB(t)
 	miSetup(t)

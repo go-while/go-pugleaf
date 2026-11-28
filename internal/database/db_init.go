@@ -89,8 +89,9 @@ type DBConfig struct {
 
 	// DisableThreading skips the batch writer's threading phase (threads, thread_cache and
 	// articles.reply_count): only the web view reads them. For a standalone NNTP server
-	// (nntp-server -disable-webserver-post-threads). recover-db -rebuild-threads builds the
-	// threads later if a web server is put on the data; reply_count is not rebuilt.
+	// (nntp-server -disable-webserver-post-threads) and bulk imports (mbox-importer
+	// -no-threading). recover-db -rebuild-threads builds the threads later, reply_count
+	// included (RebuildThreadsFromScratch step 6).
 	DisableThreading bool
 
 	// Backup settings

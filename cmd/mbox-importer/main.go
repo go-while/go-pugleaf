@@ -81,6 +81,7 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		maxBatch        = fs.Int("max-batch", 1000, "articles the batch writer commits per group database transaction (100-1000)")
 		maxArtSize      = fs.Int("max-article-size", defaultMaxArticleSize, "skip articles larger than this many bytes, header and body, counted as too-big (0 = no limit)")
 		maxQueue        = fs.Int("max-queue", 0, "articles the batch writer may hold queued over all groups (16-100000; 0 = 2 x parallel x max-batch, at least 1280)")
+		noThreading     = fs.Bool("no-threading", false, "store articles without threading them (no threads, thread_cache or reply_count updates): faster bulk imports; the web view shows the new articles in threads only after recover-db -rebuild-threads (or -reorder-by-datesent) for each imported group")
 		trackDBFlag     = fs.String("trackdb", "", "import tracking database (\"\" = <data>/cfg/"+trackDBName+", \"off\" = no tracking); never opened in a dry run")
 		reimport        = fs.Bool("reimport", false, "import an input the tracking database knows as done again")
 		logDB           = fs.Bool("log-db", true, "write the log output of the run into the tracking database as well")
@@ -337,6 +338,10 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 	cfg.BackupDir = filepath.Join(opts.dataDir, "backups")
 	cfg.MaxDBbatch = *maxBatch // articles per group database transaction (db_batch.go)
 	cfg.MaxQueued = queueSize  // queued over all groups before the batch divider brakes (db_batch.go)
+	cfg.DisableThreading = *noThreading
+	if *noThreading {
+		log.Printf("[MBOX-IMPORT] -no-threading: articles are stored without threads; run recover-db -rebuild-threads for each imported group afterwards")
+	}
 	db, err := database.OpenDatabase(cfg)
 	if err != nil {
 		log.Printf("[MBOX-IMPORT] Failed to initialize database: %v", err)
