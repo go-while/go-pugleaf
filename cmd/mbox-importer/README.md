@@ -922,7 +922,9 @@ written to `-tmpdir`:
 
 - **Order.** Every member is read as it comes out of the archive, one at a time. The archive does
   not keep the article numbers in order (`.art10124`, `.art1`, `.art10062`, …), so neither are the
-  article numbers a group gets in go-pugleaf; the overview sorts by date.
+  article numbers a group gets in go-pugleaf. The flat group list (newest article number first)
+  shows that order; `recover-db -reorder-by-datesent` writes a copy of the group renumbered by date
+  (`<group>.db.new`, swapped in by hand with the services stopped).
 - **Memory.** As in every spool, a one-article member is read whole before it is handed on: up to
   `-max-article-size` (the rest is read past and it counts as `too-big`), or whole with
   `-max-article-size 0`.

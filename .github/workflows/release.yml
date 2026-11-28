@@ -137,7 +137,6 @@ jobs:
           #"merge-active:merge-active"
           #"merge-descriptions:merge-descriptions"
           #"test-MsgIdItemCache:test-MsgIdItemCache"
-          #"history-rebuild:history-rebuild"
           #"fix-references:fix-references"
           #
           #
@@ -154,7 +153,13 @@ jobs:
             "nntp-transfer:nntp-transfer"
             "post-queue:post-queue"
             "tcp2tor:tcp2tor"
+            "usermgr:usermgr"
+            "history-rebuild:history-rebuild"
           )
+          # mbox-importer uses Unix-only process calls (process groups in disc.go): no Windows build
+          if [ "$GOOS" != "windows" ]; then
+            apps+=("mbox-importer:mbox-importer")
+          fi
 
           for app in "${apps[@]}"; do
             IFS=':' read -r cmd_dir binary_name <<< "$app"
@@ -334,11 +339,14 @@ jobs:
           - `nntp-transfer` - Tool to transfer newsgroups
           - `post-queue` - Tool to send out queued posts
           - `tcp2tor` - TCP to Tor proxy
+          - `usermgr` - Web user management
+          - `history-rebuild` - Rebuilds the message-id history index
+          - `mbox-importer` - Imports mbox files, UAT archives, news spools and disc images (Linux and macOS only)
 
           ### NOT included:
-          Every other tool in `cmd/`, among them `mbox-importer`, `history-rebuild`, `usermgr`, `nntpmgr`,
-          `audit-web-posts`, `fix-references`, `merge-active` and `merge-descriptions`. Build them from source with
-          their `build_<tool>.sh` script (Go 1.27.1 or newer and a C compiler for cgo).
+          Every other tool in `cmd/`, among them `nntpmgr`, `audit-web-posts`, `fix-references`, `merge-active` and
+          `merge-descriptions`. Build them from source with their `build_<tool>.sh` script (Go 1.27.4 or newer and a C
+          compiler for cgo).
 
           ### Platform Support:
           - Linux (amd64, arm64)

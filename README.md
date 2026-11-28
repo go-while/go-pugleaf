@@ -208,7 +208,7 @@ commands, intake and the outgoing feed); POST and the ids this server generates 
 # -post-commit-wait d   wait for the commit of a POSTed article before 240 (default 5s, 0 = no wait)
 # -laxmid               accept and feed RFC 3977 message-ids without '@' (IHAVE/CHECK/TAKETHIS; POST stays strict; default: off)
 # -disable-webserver-post-threads   standalone server: build no threads (only the web view uses them;
-#                       recover-db -rebuild-threads builds them later, reply counts stay 0)
+#                       recover-db -rebuild-threads builds them later, reply counts included)
 # -idletimeout, -articledelay, -groupdelay, -errordelay, -local430ttl: see -h
 ```
 
