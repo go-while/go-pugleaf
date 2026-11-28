@@ -322,6 +322,64 @@ func TestForeignSpoolInnerMbox(t *testing.T) {
 	}
 }
 
+// TestForeignOtherOutcomesNotAllForeign: only articles that reached the group choice count
+// for the all-foreign failure. A group file whose own articles are all yEnc (skipped as
+// binary before the group choice) plus one stray foreign article, and one whose own article
+// is rejected (a control message) plus a foreign one, are no input errors: both are done.
+// On 99d99ef both failed as "all foreign".
+func TestForeignOtherOutcomesNotAllForeign(t *testing.T) {
+	miNeedDB(t)
+	miSetup(t)
+	dir := t.TempDir()
+	yenc := func(id string) string {
+		return strings.Replace(miArticle(id, miAlpha, "binary"), "\nbody of "+id+"\n",
+			"\n=ybegin line=128 size=3 name=a.bin\nxyz\n=yend size=3\n", 1)
+	}
+	binIn := miWrite(t, dir, miAlpha+".mbox", yenc(fgOwn[0])+yenc(fgOwn[1])+miArticle(fgFor[0], fgForeign, "stray"))
+	rejIn := miWrite(t, dir, miBeta+".mbox",
+		miArticle(fgOwn[2], miBeta, "control", "Control: cancel <x@foreign.test.invalid>")+miArticle(fgFor[1], fgForeign, "stray"))
+	data := filepath.Join(t.TempDir(), "data")
+
+	code, sum, out := fgCapture(t, "-data", data, binIn, rejIn)
+	if code != 0 || sum == nil || sum.InputErrors != 0 || sum.MarkedDone != 2 {
+		t.Fatalf("exit %d summary %+v, want exit 0, no input error, 2 marked done\n%s", code, sum, out)
+	}
+	miCheck(t, sum, 5, 0, 0, 1, 0, "binary=2,foreign=2")
+	if strings.Contains(out, "skipped as foreign: none lists") {
+		t.Errorf("all-foreign warning\n%s", out)
+	}
+	track := mtRaw(t, filepath.Join(data, "cfg"))
+	for _, in := range []string{binIn, rejIn} {
+		if status, reason := mtStatusOf(t, track, in); status != "done" {
+			t.Errorf("tracking row of %s %q / %q, want done", filepath.Base(in), status, reason)
+		}
+	}
+}
+
+// TestForeignSpoolNamedNonMbox: in a spool only a file read as an mbox gets a group from its
+// name. A one-article file named misc/news.backup.mbox and an A-news batch named
+// misc/old.news.bag are filed by their Newsgroups (rule 4), not skipped as foreign. On
+// 99d99ef both were skipped as foreign.
+func TestForeignSpoolNamedNonMbox(t *testing.T) {
+	tree := t.TempDir()
+	spoolWrite(t, tree, "misc/news.backup.mbox", spoolArticleText("<single@foreign.test.invalid>", miAlpha, "single"))
+	spoolWrite(t, tree, "misc/old.news.bag", spoolANewsText)
+
+	code, sum, out := fgCapture(t, "-dry-run", "-spool", tree)
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	miCheck(t, sum, 2, 2, 0, 0, 0, "-")
+	for _, want := range []string{
+		fmt.Sprintf("[MBOX-IMPORT] dry-run group=%q articles=1", miAlpha),
+		`[MBOX-IMPORT] dry-run group="net.games" articles=1`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log lacks %q\n%s", want, out)
+		}
+	}
+}
+
 // TestForeignSkipsNames pins which file names make foreign skips (foreignSkips on the group
 // groupFromFileName gives): every dotted name counts, also one that is no group (an archive
 // suffix the name rule does not know); such an input then fails (TestForeignAllForeignFails).

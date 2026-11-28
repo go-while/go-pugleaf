@@ -174,7 +174,7 @@ func importUAT(path string, opts *runOptions, sink articleSink, stop <-chan stru
 		log.Printf("[MBOX-IMPORT] file=%q commit wait: %v", path, waitErr)
 		c.CommitFailed = true
 	}
-	if !stopped && foreignOnly(c, 0, 0, 0) {
+	if !stopped && foreignOnly(c, 0, 0) {
 		markAllForeign(c, fmt.Sprintf("file=%q", path), opts.sourceGroup, c.Skipped[skipForeign])
 		inputErr = true
 	}

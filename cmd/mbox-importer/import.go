@@ -59,13 +59,19 @@ type counters struct {
 	// AllForeignGroup is the group the name of the first such file gave. Neither is summed.
 	AllForeign      int
 	AllForeignGroup string
+	// routed counts the articles that passed the skip rules and the header rewrite and were
+	// handed to targetGroup (handleLines): the base of foreignOnly.
+	routed int
 }
 
-// foreignOnly reports whether the articles c counted since the snapshot (stored, present,
-// foreign skips) were all skipped as foreign: at least one foreign skip, none stored or
-// present. A rejected article does not change it (it would not have been stored either).
-func foreignOnly(c *counters, stored, present, foreign int) bool {
-	return c.Skipped[skipForeign] > foreign && c.Stored == stored && c.Present == present
+// foreignOnly reports whether every article that reached targetGroup since the snapshot
+// (routed, foreign skips) was skipped as foreign: at least one, and no other outcome. An
+// article skipped before targetGroup (binary, no-body, too-big, ...) does not count; one
+// that was stored, present, rejected, errored or skipped by targetGroup for another reason
+// means the name does give a group the input holds.
+func foreignOnly(c *counters, routed, foreign int) bool {
+	n := c.Skipped[skipForeign] - foreign
+	return n > 0 && n == c.routed-routed
 }
 
 // markAllForeign records and logs a file whose importable articles were all skipped as
@@ -140,6 +146,7 @@ func (c *counters) add(o *counters) {
 	c.XrefPointers += o.XrefPointers
 	c.ANewsBatches += o.ANewsBatches
 	c.FileErrors += o.FileErrors
+	c.routed += o.routed
 	for r, n := range o.Skipped {
 		c.Skipped[r] += n
 	}
@@ -330,6 +337,7 @@ func handleLines(c *counters, rawHead, body []string, isBinary bool, opts *runOp
 		c.Skipped[reason]++
 		return
 	}
+	c.routed++
 	group, reason := targetGroup(head, opts)
 	if reason != skipNone {
 		c.Skipped[reason]++
@@ -862,7 +870,7 @@ func importInput(path string, opts *runOptions, sink articleSink, stop <-chan st
 		log.Printf("[MBOX-IMPORT] file=%q commit wait: %v", path, waitErr)
 		c.CommitFailed = true
 	}
-	if !stopped && foreignOnly(c, 0, 0, 0) {
+	if !stopped && foreignOnly(c, 0, 0) {
 		markAllForeign(c, fmt.Sprintf("file=%q", path), opts.sourceGroup, c.Skipped[skipForeign])
 		inputErr = true
 	}

@@ -728,7 +728,14 @@ func (t *tracker) finishInput(id int64, c *counters, inputErr, stopped bool) {
 	case stopped:
 		status, reason = trackStopped, "shutdown signal"
 	case inputErr && c != nil && c.AllForeign > 0:
+		// real article errors and a failed commit wait (in other files of a spool) first
 		status, reason = trackFailed, c.allForeignReason()
+		if c.CommitFailed {
+			reason = "commit wait failed; " + reason
+		}
+		if c.Errors > 0 {
+			reason = fmt.Sprintf("%d article error(s); %s", c.Errors, reason)
+		}
 	case inputErr:
 		status, reason = trackFailed, "input error"
 	case c == nil:

@@ -158,18 +158,22 @@ rule 4, as the versions up to 0.6.24 did.
 - Only a file-name group with a dot counts: `alt.test.mbox.gz` and `free.pt.mbox.7z` do, a one-word
   name (`export.mbox`, `archive.mbox`, `g.mbox`) does not, because it is far more often a plain file
   name than a group, and taking it as one would skip every article of the input.
-- The name a UAT package carries counts like the file name, and so does the name of an mbox file
-  inside a spool.
+- The name a UAT package carries counts like the file name, and so does the name of a file inside a
+  spool that is read as an mbox. A one-article file or an A-news batch in a spool gets no group from
+  its name (a `misc/news.backup.mbox` holding one article is filed by its directory or rule 4).
 - The directory of a disc image, `.tar.gz` or `-spool` article file (rule 2) never makes an article
   foreign: an article whose directory group is not listed still falls back to rule 3, then rule 4.
   Disc directory names can be cut short (ISO 9660) or laid out by hierarchy, and such an article may
   be the only copy on the disc. The name of the image, zip or `.tar.gz` itself gives no rule-3 group.
-- `-group` and `-group-from-name` (rule 1) file every article into their group, foreign or not.
-  Inputs whose name gives no group (only rule 4) are unchanged.
+- `-group` and `-group-from-name` (rule 1) file every article into their group, foreign or not:
+  `-foreign` has no effect with them (`mbox-import.sh` uses `-group-from-name`). Inputs whose name
+  gives no group (only rule 4) are unchanged.
 - A dotted file name that is no group makes every article of the input foreign: an archive suffix
   the name rule does not know (`alt.test.2014.mbox.gz`, `alt.test.part2.mbox`,
-  `alt.test.20141010-1.mbox`) or a plain dotted name (`news.backup.mbox`). So when every importable
-  article of an input was skipped as foreign (none stored or present), the importer logs a
+  `alt.test.20141010-1.mbox`) or a plain dotted name (`news.backup.mbox`). So when every article of
+  an input that reached the group choice was skipped as foreign (articles skipped earlier, as
+  `binary`, `no-body`, `too-big` and so on, do not count; one stored, present, rejected or in error
+  does), the importer logs a
   `WARNING ... all N importable articles skipped as foreign` line and the input **fails**: it counts as
   an input error (exit code 1, also in a dry run), it is not renamed `.done`, and its row in the
   tracking database is `failed` with the reason `all articles foreign: the file name gives group
@@ -178,8 +182,8 @@ rule 4, as the versions up to 0.6.24 did.
   The same holds for a UAT archive, and for an mbox file inside a disc image, zip, `.tar.gz` or
   `-spool` directory: the warning names the spool and the mbox file, and the spool input as a whole
   fails (it is not marked done; its other articles are stored, and are `present` when it is imported
-  again). An input with at least one article stored or present is done as before, whatever share of
-  it was foreign.
+  again). An input with any other outcome for an article that reached the group choice is handled
+  as before (done, unless it has errors), whatever share of it was foreign. A row with article errors as well names them first.
 
 ## Command Line Options
 

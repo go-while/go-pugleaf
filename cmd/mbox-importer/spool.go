@@ -163,18 +163,26 @@ func (w *spoolWalker) stopped() bool {
 }
 
 // setFileSource points w.opts at the input's options plus the source of file name: its
-// directory (SPOOL/alt/test/1 -> alt.test) and, for an mbox file in the spool, the group
-// of its name (targetGroup prefers them when the article lists them; with -foreign skip an
-// article of such an mbox that lists neither is skipped as foreign, the directory alone never
-// skips one). The input's own name (a disc image, zip or .tar.gz) is no file-name group here.
+// directory (SPOOL/alt/test/1 -> alt.test), which targetGroup prefers when the article lists
+// it (the directory alone never makes an article foreign). The input's own name (a disc
+// image, zip or .tar.gz) is no file-name group here, and neither is the name of a file before
+// it is classified: only an mbox file gets one (setMboxFileGroup).
 func (w *spoolWalker) setFileSource(name string) {
 	w.file = *w.base
 	w.file.sourceDir = w.sourceDirOf(path.Dir(name))
 	w.file.sourceGroup = ""
+	w.opts = &w.file
+}
+
+// setMboxFileGroup gives an mbox file of the spool the group of its name (DOUG.alt.test.mbox
+// -> alt.test): targetGroup prefers it when the article lists it, and with -foreign skip an
+// article that lists neither it nor the directory's group is skipped as foreign. A
+// one-article file or an A-news batch never gets one: a name like news.backup.mbox on such a
+// file says nothing about its group.
+func (w *spoolWalker) setMboxFileGroup(name string) {
 	if g, err := groupFromFileName(name); err == nil {
 		w.file.sourceGroup = g
 	}
-	w.opts = &w.file
 }
 
 // sourceDirOf returns the spool directory targetGroup matches the article's groups against:
@@ -279,6 +287,7 @@ func (w *spoolWalker) readOpened(name string, f io.Reader) error {
 	peek := w.buf[:n]
 	switch classifySpoolFile(peek, truncated) {
 	case spoolMboxFile:
+		w.setMboxFileGroup(name)
 		return w.readMboxFile(name, peek, f)
 	case spoolANewsBatch:
 		return w.readANewsFile(name, peek, f)
@@ -346,9 +355,9 @@ func (w *spoolWalker) readMboxFile(name string, peek []byte, f io.Reader) error 
 	}
 	// the counts before this file: an mbox named after a group whose importable articles
 	// were all skipped as foreign fails the spool input (markAllForeign)
-	stored0, present0, foreign0 := w.c.Stored, w.c.Present, w.c.Skipped[skipForeign]
+	routed0, foreign0 := w.c.routed, w.c.Skipped[skipForeign]
 	defer func() {
-		if !w.stopped() && foreignOnly(w.c, stored0, present0, foreign0) {
+		if !w.stopped() && foreignOnly(w.c, routed0, foreign0) {
 			markAllForeign(w.c, fmt.Sprintf("spool file=%q mbox=%q", w.label, name), w.opts.sourceGroup,
 				w.c.Skipped[skipForeign]-foreign0)
 		}
