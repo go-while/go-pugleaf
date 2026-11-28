@@ -16,6 +16,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/go-while/mbox2nntp/uat"
 )
 
 const (
@@ -233,6 +235,31 @@ func TestForeignUAT(t *testing.T) {
 	res := importInputs([]string{in}, &runOptions{zstd: "zstd"}, newCountingSink(), make(chan struct{}))
 	if res.Total.Read != 2 || res.Total.Stored != 1 || res.Total.skippedDetail() != "foreign=1" {
 		t.Errorf("read=%d stored=%d skipped=%s; want 2, 1, foreign=1", res.Total.Read, res.Total.Stored, res.Total.skippedDetail())
+	}
+}
+
+// TestForeignUATTooBigOwn: a UAT message the reader drops as too big has no header to check,
+// so it may be the package's own article: a package whose only own message is over
+// -max-article-size plus one small foreign message is no all-foreign input (exit 0, done).
+// On f454b32 it failed as all-foreign.
+func TestForeignUATTooBigOwn(t *testing.T) {
+	miNeedDB(t)
+	miSetup(t)
+	old := uat.MaxMessageSize // the run sets it from -max-article-size
+	t.Cleanup(func() { uat.MaxMessageSize = old })
+	in := uaWrite(t, t.TempDir(), uaGroup, []string{
+		uaMessage(uaIDPolish, uaGroup, "big one", strings.Repeat("big body line\n", 200)),
+		uaMessage(uaIDCross, uaOther, "elsewhere", "foreign\n"),
+	})
+	data := filepath.Join(t.TempDir(), "data")
+
+	code, sum, out := fgCapture(t, "-data", data, "-tmpdir", t.TempDir(), "-max-article-size", "1024", in)
+	if code != 0 || sum == nil || sum.InputErrors != 0 || sum.MarkedDone != 1 {
+		t.Fatalf("exit %d summary %+v, want exit 0, no input error, marked done\n%s", code, sum, out)
+	}
+	miCheck(t, sum, 2, 0, 0, 0, 0, "too-big=1,foreign=1")
+	if status, reason := mtStatusOf(t, mtRaw(t, filepath.Join(data, "cfg")), in); status != "done" {
+		t.Errorf("tracking row %q / %q, want done", status, reason)
 	}
 }
 

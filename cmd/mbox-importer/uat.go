@@ -162,6 +162,7 @@ func importUAT(path string, opts *runOptions, sink articleSink, stop <-chan stru
 		// messages over uat.MaxMessageSize (-max-article-size): read past by Each
 		c.Read += p.TooBig
 		c.Skipped[skipTooBig] += p.TooBig
+		c.noteUnknown(p.TooBig, opts) // no header: they may be the package's own articles
 		log.Printf("[MBOX-IMPORT] uat file=%q skipped %d message(s) over -max-article-size", path, p.TooBig)
 	}
 	closeErr := p.Close()

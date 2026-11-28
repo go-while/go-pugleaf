@@ -62,7 +62,8 @@ type counters struct {
 	// routed counts the articles that passed the skip rules and the header rewrite and were
 	// handed to targetGroup (handleLines); own counts the articles skipped before that
 	// (binary, no-body, too-big, ...) whose Newsgroups header lists the input's file-name
-	// group or a group below it (noteOwn). Both are the base of foreignOnly.
+	// group or a group below it (noteOwn), plus those whose header was never read
+	// (noteUnknown). Both are the base of foreignOnly.
 	routed, own int
 }
 
@@ -83,6 +84,16 @@ func (c *counters) mark() foreignMark {
 func foreignOnly(c *counters, since foreignMark) bool {
 	n := c.Skipped[skipForeign] - since.foreign
 	return n > 0 && n == c.routed-since.routed && c.own == since.own
+}
+
+// noteUnknown counts n articles whose header was never read (a UAT message the reader drops
+// as too big, a message the mbox parser steps over) as own (counters.own): they may list the
+// name's group and cannot be checked, so they keep the input from failing as all-foreign. A
+// no-op unless foreign skips are on.
+func (c *counters) noteUnknown(n int, opts *runOptions) {
+	if foreignSkips(opts) {
+		c.own += n
+	}
 }
 
 // noteOwn counts an article skipped before targetGroup that lists the input's file-name group
@@ -292,6 +303,7 @@ func readMbox(src *source, opts *runOptions, sink inputSink, stop <-chan struct{
 			}
 			lastErr = err.Error()
 			c.ParserSkipped++
+			c.noteUnknown(1, opts)
 			log.Printf("[MBOX-IMPORT] file=%q parser skipped a message: %v", src.Path, err)
 			continue
 		}

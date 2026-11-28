@@ -380,6 +380,7 @@ func (w *spoolWalker) readMboxFile(name string, peek []byte, f io.Reader) error 
 			}
 			lastErr = err.Error()
 			w.c.ParserSkipped++
+			w.c.noteUnknown(1, w.opts)
 			log.Printf("[MBOX-IMPORT] spool file=%q: mbox %q: parser skipped a message: %v", w.label, name, err)
 			continue
 		}
