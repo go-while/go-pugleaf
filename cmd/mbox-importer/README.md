@@ -166,10 +166,20 @@ rule 4, as the versions up to 0.6.24 did.
   be the only copy on the disc. The name of the image, zip or `.tar.gz` itself gives no rule-3 group.
 - `-group` and `-group-from-name` (rule 1) file every article into their group, foreign or not.
   Inputs whose name gives no group (only rule 4) are unchanged.
-- When every importable article of an mbox input was skipped as foreign (none stored or present),
-  the importer logs a warning: the file name most likely does not name the group of its articles
-  (an archive suffix it does not know); import it again with `-foreign file` (and `-reimport` with
-  the tracking database).
+- A dotted file name that is no group makes every article of the input foreign: an archive suffix
+  the name rule does not know (`alt.test.2014.mbox.gz`, `alt.test.part2.mbox`,
+  `alt.test.20141010-1.mbox`) or a plain dotted name (`news.backup.mbox`). So when every importable
+  article of an input was skipped as foreign (none stored or present), the importer logs a
+  `WARNING ... all N importable articles skipped as foreign` line and the input **fails**: it counts as
+  an input error (exit code 1, also in a dry run), it is not renamed `.done`, and its row in the
+  tracking database is `failed` with the reason `all articles foreign: the file name gives group
+  "..."; check it or use -foreign file`. Import it again with `-foreign file` (a failed row is taken
+  again without `-reimport`; `-reimport` is only needed for a copy an earlier version marked done).
+  The same holds for a UAT archive, and for an mbox file inside a disc image, zip, `.tar.gz` or
+  `-spool` directory: the warning names the spool and the mbox file, and the spool input as a whole
+  fails (it is not marked done; its other articles are stored, and are `present` when it is imported
+  again). An input with at least one article stored or present is done as before, whatever share of
+  it was foreign.
 
 ## Command Line Options
 
@@ -346,7 +356,7 @@ Exit codes:
 | Code | Meaning |
 |------|---------|
 | `0` | every input was read without an article error (marked done or not, see the log; also when there was nothing to import) |
-| `1` | an input could not be opened or read (open, unpack, 7z exit status, close or rename error; for a UAT input also a missing zstd, a zstd failure or a size mismatch; for a disc image a failed `7z x`, for a spool a failed walk), an article could not be stored (`errors` > 0), or the commit wait failed; a database/processor/hostname error, or the tracking database could not be opened; `-drop-empty-groups`: see [Dropping empty groups](#dropping-empty-groups) |
+| `1` | an input could not be opened or read (open, unpack, 7z exit status, close or rename error; for a UAT input also a missing zstd, a zstd failure or a size mismatch; for a disc image a failed `7z x`, for a spool a failed walk), an article could not be stored (`errors` > 0), the commit wait failed, or every importable article of an input (or of an mbox file in a spool) was skipped as `foreign`; a database/processor/hostname error, or the tracking database could not be opened; `-drop-empty-groups`: see [Dropping empty groups](#dropping-empty-groups) |
 | `2` | bad command line (unknown flag, no input, invalid `-group` name, `-group` with `-group-from-name`, `-foreign` other than `skip` or `file`, `-spool` with `-from-iafetch`, `-useshorthashlen` outside 2-7, negative `-commit-timeout`, `-parallel` outside 1-32, `-max-batch` outside 100-1000, `-max-queue` outside 16-100000, negative `-max-article-size`, negative `-log-keep-runs`, `-status` with `-trackdb off`, `-drop-empty-groups` with inputs, `-from-iafetch` or `-status` or without an explicit `-data`, `-force-stale-runs` without `-drop-empty-groups`, `-from-iafetch` with positional inputs or with `-trackdb off`, negative `-follow`, `-from-iafetch-base`/`-verify-md5`/`-follow` without `-from-iafetch`, and the first scan of `-from-iafetch` failing: a database that cannot be read or a relative path without `-from-iafetch-base`) |
 | `130` | stopped by SIGINT/SIGTERM while an input was being imported. A signal that reaches a `-follow` run between two inputs ends it with `0`: while it waits for the next scan, while it scans, and while it was hashing an input for `-verify-md5` (that input is left `stopped` in the tracking database) |
 

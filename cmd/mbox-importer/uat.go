@@ -174,12 +174,16 @@ func importUAT(path string, opts *runOptions, sink articleSink, stop <-chan stru
 		log.Printf("[MBOX-IMPORT] file=%q commit wait: %v", path, waitErr)
 		c.CommitFailed = true
 	}
+	if !stopped && foreignOnly(c, 0, 0, 0) {
+		markAllForeign(c, fmt.Sprintf("file=%q", path), opts.sourceGroup, c.Skipped[skipForeign])
+		inputErr = true
+	}
 
 	switch {
 	case opts.dryRun || !opts.markDone:
-	case stopped || c.StoppedEarly || closeErr != nil || c.Errors > 0 || waitErr != nil:
-		log.Printf("[MBOX-IMPORT] file=%q not marked done (stopped=%t stopped-early=%t unread=%t close-error=%t errors=%d commit-wait-error=%t)",
-			path, stopped, c.StoppedEarly, c.Unread, closeErr != nil, c.Errors, waitErr != nil)
+	case stopped || c.StoppedEarly || closeErr != nil || c.Errors > 0 || waitErr != nil || c.AllForeign > 0:
+		log.Printf("[MBOX-IMPORT] file=%q not marked done (stopped=%t stopped-early=%t unread=%t close-error=%t errors=%d commit-wait-error=%t all-foreign=%t)",
+			path, stopped, c.StoppedEarly, c.Unread, closeErr != nil, c.Errors, waitErr != nil, c.AllForeign > 0)
 	case strings.HasSuffix(path, ".done"):
 		log.Printf("[MBOX-IMPORT] file=%q already named .done: not renamed", path)
 	default:

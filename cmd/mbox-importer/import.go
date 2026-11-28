@@ -53,6 +53,41 @@ type counters struct {
 	// done and the exit code is unchanged, because a re-walk of a read-only image would
 	// only read the same bad blocks again (and -follow would do it on every scan).
 	FileErrors int
+	// AllForeign counts the files of the input (the input itself, or mbox files inside a
+	// spool) whose importable articles were all skipped as foreign (markAllForeign): the name
+	// most likely gives no group of theirs, so the input is an input error and not marked done.
+	// AllForeignGroup is the group the name of the first such file gave. Neither is summed.
+	AllForeign      int
+	AllForeignGroup string
+}
+
+// foreignOnly reports whether the articles c counted since the snapshot (stored, present,
+// foreign skips) were all skipped as foreign: at least one foreign skip, none stored or
+// present. A rejected article does not change it (it would not have been stored either).
+func foreignOnly(c *counters, stored, present, foreign int) bool {
+	return c.Skipped[skipForeign] > foreign && c.Stored == stored && c.Present == present
+}
+
+// markAllForeign records and logs a file whose importable articles were all skipped as
+// foreign (foreignOnly). where names it in the log ("file=..." or "spool file=... mbox=..."),
+// group is the group its name gave.
+func markAllForeign(c *counters, where, group string, foreign int) {
+	if c.AllForeign == 0 {
+		c.AllForeignGroup = group
+	}
+	c.AllForeign++
+	log.Printf("[MBOX-IMPORT] WARNING %s: all %d importable articles skipped as foreign: none lists %q or a group below it; "+
+		"the input is an input error and not marked done: if the name does not give their group, import it again with "+
+		"-foreign file (-reimport only for a copy an earlier version marked done)", where, foreign, group)
+}
+
+// allForeignReason is the tracking database's reason for an input with AllForeign files.
+func (c *counters) allForeignReason() string {
+	if c.AllForeign == 1 {
+		return fmt.Sprintf("all articles foreign: the file name gives group %q; check it or use -foreign file", c.AllForeignGroup)
+	}
+	return fmt.Sprintf("%d files with all articles foreign (the first name gives group %q); check the names or use -foreign file",
+		c.AllForeign, c.AllForeignGroup)
 }
 
 // spoolDetail is the spool part of the per-input log line ("" for an mbox input).
@@ -827,12 +862,16 @@ func importInput(path string, opts *runOptions, sink articleSink, stop <-chan st
 		log.Printf("[MBOX-IMPORT] file=%q commit wait: %v", path, waitErr)
 		c.CommitFailed = true
 	}
+	if !stopped && foreignOnly(c, 0, 0, 0) {
+		markAllForeign(c, fmt.Sprintf("file=%q", path), opts.sourceGroup, c.Skipped[skipForeign])
+		inputErr = true
+	}
 
 	switch {
 	case opts.dryRun || !opts.markDone:
-	case stopped || c.StoppedEarly || c.Unread || closeErr != nil || c.Errors > 0 || waitErr != nil:
-		log.Printf("[MBOX-IMPORT] file=%q not marked done (stopped=%t stopped-early=%t unread=%t close-error=%t errors=%d commit-wait-error=%t)",
-			path, stopped, c.StoppedEarly, c.Unread, closeErr != nil, c.Errors, waitErr != nil)
+	case stopped || c.StoppedEarly || c.Unread || closeErr != nil || c.Errors > 0 || waitErr != nil || c.AllForeign > 0:
+		log.Printf("[MBOX-IMPORT] file=%q not marked done (stopped=%t stopped-early=%t unread=%t close-error=%t errors=%d commit-wait-error=%t all-foreign=%t)",
+			path, stopped, c.StoppedEarly, c.Unread, closeErr != nil, c.Errors, waitErr != nil, c.AllForeign > 0)
 	case strings.HasSuffix(path, ".done"):
 		log.Printf("[MBOX-IMPORT] file=%q already named .done: not renamed", path)
 	default:
@@ -849,20 +888,7 @@ func importInput(path string, opts *runOptions, sink articleSink, stop <-chan st
 	for _, nm := range samples {
 		log.Printf("[MBOX-IMPORT]   near-miss file=%q line=%d %q", path, nm.line, nm.text)
 	}
-	warnAllForeign(path, c, opts)
 	return c, inputErr, stopped
-}
-
-// warnAllForeign logs a warning when foreign skips (targetGroup) took every article of an
-// input that was neither stored nor present: the file name most likely does not name the
-// group of its articles (an unknown archive suffix such as ".2014"), and the input should be
-// imported again with -foreign file.
-func warnAllForeign(path string, c *counters, opts *runOptions) {
-	if n := c.Skipped[skipForeign]; n > 0 && c.Stored == 0 && c.Present == 0 {
-		log.Printf("[MBOX-IMPORT] WARNING file=%q: all %d importable articles skipped as foreign: none lists %q or a group below it; "+
-			"if the file name does not name their group, import it again with -foreign file (with the tracking database: and -reimport)",
-			path, n, opts.sourceGroup)
-	}
 }
 
 // markDoneInput renames a fully imported input to INPUT.done. It reports whether the rename

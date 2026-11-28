@@ -8,6 +8,7 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"log"
@@ -343,6 +344,15 @@ func (w *spoolWalker) readMboxFile(name string, peek []byte, f io.Reader) error 
 		}
 		return nil
 	}
+	// the counts before this file: an mbox named after a group whose importable articles
+	// were all skipped as foreign fails the spool input (markAllForeign)
+	stored0, present0, foreign0 := w.c.Stored, w.c.Present, w.c.Skipped[skipForeign]
+	defer func() {
+		if !w.stopped() && foreignOnly(w.c, stored0, present0, foreign0) {
+			markAllForeign(w.c, fmt.Sprintf("spool file=%q mbox=%q", w.label, name), w.opts.sourceGroup,
+				w.c.Skipped[skipForeign]-foreign0)
+		}
+	}()
 	lastErr := ""
 	for {
 		if w.stopped() {

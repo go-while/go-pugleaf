@@ -727,6 +727,8 @@ func (t *tracker) finishInput(id int64, c *counters, inputErr, stopped bool) {
 	switch {
 	case stopped:
 		status, reason = trackStopped, "shutdown signal"
+	case inputErr && c != nil && c.AllForeign > 0:
+		status, reason = trackFailed, c.allForeignReason()
 	case inputErr:
 		status, reason = trackFailed, "input error"
 	case c == nil:

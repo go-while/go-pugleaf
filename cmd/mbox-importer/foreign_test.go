@@ -99,6 +99,13 @@ func TestForeignMboxSkip(t *testing.T) {
 	if strings.Contains(out, "skipped as foreign: none lists") {
 		t.Errorf("warning for an input with stored articles\n%s", out)
 	}
+	// a mixed input (own and foreign articles) is done as before
+	if !miExists(in + ".done") {
+		t.Errorf("mixed input not renamed .done")
+	}
+	if status, reason := mtStatusOf(t, mtRaw(t, filepath.Join(data, "cfg")), in); status != "done" {
+		t.Errorf("tracking row %q / %q, want done", status, reason)
+	}
 }
 
 // TestForeignMboxFile: -foreign file restores the old rule: the foreign articles go to their
@@ -170,7 +177,8 @@ func TestForeignMboxNoGroupName(t *testing.T) {
 }
 
 // TestForeignDryRun: the dry run counts foreign skips the same way and lists no target group
-// for them; an input whose articles are all foreign gets a warning. No database is opened.
+// for them; an input whose articles are all foreign gets a warning and is an input error
+// (exit 1), as in a real run. No database is opened.
 func TestForeignDryRun(t *testing.T) {
 	dir := t.TempDir()
 	in := fgWriteGz(t, dir, fgArchiveName, fgMbox())
@@ -178,8 +186,8 @@ func TestForeignDryRun(t *testing.T) {
 	data := filepath.Join(t.TempDir(), "data")
 
 	code, sum, out := fgCapture(t, "-data", data, "-dry-run", in, allForeign)
-	if code != 0 {
-		t.Fatalf("exit %d\n%s", code, out)
+	if code != 1 || sum == nil || sum.InputErrors != 1 {
+		t.Fatalf("exit %d summary %+v, want exit 1 with 1 input error\n%s", code, sum, out)
 	}
 	miCheck(t, sum, 8, 4, 0, 0, 0, "foreign=4")
 	if miExists(data) {
@@ -191,7 +199,7 @@ func TestForeignDryRun(t *testing.T) {
 		fmt.Sprintf("[MBOX-IMPORT] file=%q read=6 stored=4 present=0 skipped=2 (foreign=2) ", in),
 		fmt.Sprintf("[MBOX-IMPORT] file=%q read=2 stored=0 present=0 skipped=2 (foreign=2) ", allForeign),
 		fmt.Sprintf("[MBOX-IMPORT] WARNING file=%q: all 2 importable articles skipped as foreign: none lists %q", allForeign, miBeta),
-		"[MBOX-IMPORT] done inputs=2 marked-done=0 input-errors=0 read=8 stored=4 present=0 skipped=4 (foreign=4) ",
+		"[MBOX-IMPORT] done inputs=2 marked-done=0 input-errors=1 read=8 stored=4 present=0 skipped=4 (foreign=4) ",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("log lacks %q\n%s", want, out)
@@ -225,5 +233,123 @@ func TestForeignUAT(t *testing.T) {
 	res := importInputs([]string{in}, &runOptions{zstd: "zstd"}, newCountingSink(), make(chan struct{}))
 	if res.Total.Read != 2 || res.Total.Stored != 1 || res.Total.skippedDetail() != "foreign=1" {
 		t.Errorf("read=%d stored=%d skipped=%s; want 2, 1, foreign=1", res.Total.Read, res.Total.Stored, res.Total.skippedDetail())
+	}
+}
+
+// TestForeignAllForeignFails: a real run of an input whose name is dotted but no group of its
+// articles (an archive suffix the name rule does not know) skips every article as foreign;
+// such an input is an input error (exit 1), is not renamed .done, and its tracking row is
+// failed with a reason that names the group, so the next run takes it again (with -foreign
+// file). An input next to it with stored articles is done as usual. On 17a9eb0 the input was
+// marked done with only a warning.
+func TestForeignAllForeignFails(t *testing.T) {
+	miNeedDB(t)
+	miSetup(t)
+	dir := t.TempDir()
+	bad := miWrite(t, dir, miAlpha+".2014.mbox", miArticle(fgOwn[0], miAlpha, "own 1")+miArticle(fgOwn[1], miAlpha, "own 2"))
+	good := fgWriteGz(t, dir, fgArchiveName, fgMbox())
+	data := filepath.Join(t.TempDir(), "data")
+
+	code, sum, out := fgCapture(t, "-data", data, bad, good)
+	if code != 1 || sum == nil || sum.InputErrors != 1 || sum.MarkedDone != 1 {
+		t.Fatalf("exit %d summary %+v, want exit 1, 1 input error, 1 marked done\n%s", code, sum, out)
+	}
+	if !miExists(bad) || miExists(bad+".done") {
+		t.Errorf("all-foreign input renamed: %t %t", miExists(bad), miExists(bad+".done"))
+	}
+	if !miExists(good + ".done") {
+		t.Errorf("mixed input not renamed .done")
+	}
+	if want := fmt.Sprintf("[MBOX-IMPORT] WARNING file=%q: all 2 importable articles skipped as foreign: none lists %q",
+		bad, miAlpha+".2014"); !strings.Contains(out, want) {
+		t.Errorf("log lacks %q\n%s", want, out)
+	}
+	track := mtRaw(t, filepath.Join(data, "cfg"))
+	status, reason := mtStatusOf(t, track, bad)
+	if status != "failed" || !strings.Contains(reason, "all articles foreign") || !strings.Contains(reason, miAlpha+".2014") {
+		t.Errorf("tracking row of the all-foreign input %q / %q, want failed / all articles foreign ... %s", status, reason, miAlpha+".2014")
+	}
+	if status, reason := mtStatusOf(t, track, good); status != "done" {
+		t.Errorf("tracking row of the mixed input %q / %q, want done", status, reason)
+	}
+
+	// the failed input is taken again on the next run; -foreign file imports it
+	code, sum = miRun(t, "-data", data, "-foreign", "file", bad)
+	if code != 0 || sum == nil || sum.MarkedDone != 1 {
+		t.Fatalf("rerun with -foreign file: exit %d summary %+v", code, sum)
+	}
+	miCheck(t, sum, 2, 0, 2, 0, 0, "-") // its articles came with the mixed input already
+	if status, reason := mtStatusOf(t, track, bad); status != "done" {
+		t.Errorf("tracking row after the rerun %q / %q, want done", status, reason)
+	}
+}
+
+// TestForeignSpoolInnerMbox: an mbox file inside a -spool directory, named after a group none
+// of its articles lists, is all foreign: the walker warns with the spool and the file, the
+// other articles of the spool are stored, and the spool input fails (input error, tracking
+// row failed) so it is redone with -foreign file.
+func TestForeignSpoolInnerMbox(t *testing.T) {
+	miNeedDB(t)
+	miSetup(t)
+	tree := t.TempDir()
+	const inner = "misc/t.mbox.backup.mbox"
+	for name, content := range map[string]string{
+		"t/mbox/alpha/1": miArticle(fgOwn[0], miAlpha, "own"),
+		inner:            miArticle(fgFor[0], fgForeign, "f1") + miArticle(fgFor[1], fgForeign, "f2"),
+	} {
+		p := filepath.Join(tree, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	data := filepath.Join(t.TempDir(), "data")
+
+	code, sum, out := fgCapture(t, "-data", data, "-spool", tree)
+	if code != 1 || sum == nil || sum.InputErrors != 1 {
+		t.Fatalf("exit %d summary %+v, want exit 1 with 1 input error\n%s", code, sum, out)
+	}
+	miCheck(t, sum, 3, 1, 0, 0, 0, "foreign=2")
+	if want := fmt.Sprintf("[MBOX-IMPORT] WARNING spool file=%q mbox=%q: all 2 importable articles skipped as foreign: none lists %q",
+		tree, inner, "t.mbox.backup"); !strings.Contains(out, want) {
+		t.Errorf("log lacks %q\n%s", want, out)
+	}
+	miCheckGroups(t, data, map[string][]string{miAlpha: {fgOwn[0]}}, []string{fgOwn[0], fgFor[0], fgFor[1]}, fgForeign)
+	if status, reason := mtStatusOf(t, mtRaw(t, filepath.Join(data, "cfg")), tree); status != "failed" || !strings.Contains(reason, "all articles foreign") {
+		t.Errorf("tracking row %q / %q, want failed / all articles foreign", status, reason)
+	}
+}
+
+// TestForeignSkipsNames pins which file names make foreign skips (foreignSkips on the group
+// groupFromFileName gives): every dotted name counts, also one that is no group (an archive
+// suffix the name rule does not know); such an input then fails (TestForeignAllForeignFails).
+func TestForeignSkipsNames(t *testing.T) {
+	for _, c := range []struct {
+		name, group string
+		skips       bool
+	}{
+		{"alt.test.mbox.gz", "alt.test", true},
+		{"alt.test.20141010.mbox.gz", "alt.test", true},
+		{"alt.test.(9).mbox.7z", "alt.test", true},
+		{"free.pt.mbox.7z", "free.pt", true},
+		{"alt.test.2014.mbox.gz", "alt.test.2014", true},
+		{"alt.test.part2.mbox", "alt.test.part2", true},
+		{"news.backup.mbox", "news.backup", true},
+		{"export.mbox", "export", false},
+		{"g.mbox", "g", false},
+	} {
+		g, err := groupFromFileName(c.name)
+		if err != nil || g != c.group {
+			t.Errorf("groupFromFileName(%q) = %q, %v; want %q", c.name, g, err, c.group)
+			continue
+		}
+		if got := foreignSkips(&runOptions{sourceGroup: g}); got != c.skips {
+			t.Errorf("foreignSkips(%q) = %t, want %t", g, got, c.skips)
+		}
+		if foreignSkips(&runOptions{sourceGroup: g, foreignFile: true}) {
+			t.Errorf("foreignSkips(%q) with -foreign file = true", g)
+		}
 	}
 }
