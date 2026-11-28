@@ -216,6 +216,7 @@ rule 4, as the versions up to 0.6.24 did.
 | `-parallel` | `1` | Inputs imported at the same time (1-32). Each worker takes the next input in the given order; the summary keeps that order. Every worker still hands its articles to the one batch writer, so more workers mostly help with many small inputs or slow unpacking |
 | `-max-batch` | `1000` | Articles the batch writer commits per group database transaction (100-1000). Smaller batches commit sooner and hold less in memory; larger ones are faster on big inputs |
 | `-max-queue` | `0` | Articles the batch writer may hold queued over all groups (16-100000) before it stops taking more. `0` sizes it from the other two flags: twice `-parallel` × `-max-batch`, at least 1280 (so `-parallel 4` gives 8000). See [Throughput](#throughput) |
+| `-no-threading` | `false` | Store the articles without threading them: the batch writer skips the `threads` and `thread_cache` rows and `reply_count`. Faster for bulk imports; the web view lists the new articles in threads only after `recover-db -rebuild-threads` (or `-reorder-by-datesent`) for each imported group. See [Throughput](#throughput) |
 | `-trackdb` | (none) | The [tracking database](#tracking-database). Empty means `<data>/cfg/mbox-import.sq3`; `off` turns the tracking off (the behaviour of the versions before it existed). A dry run never opens it, and a run with nothing to import does not create it |
 | `-reimport` | `false` | Import an input the tracking database knows as done again (it is read once more; its articles are then counted as `present`) |
 | `-log-db` | `true` | Write the log output of the run into the `log` table of the tracking database as well |
@@ -316,6 +317,20 @@ before sending articles to the batch writer. Committed articles enter history wi
 group and article numbers. The history writer releases capacity after each flush. Raising
 `-max-queue` leaves the history budget at 20,000. If a history write fails and the writer can
 shut down normally, the importer logs the error and exits with an error status.
+
+Threading costs most of a batch in a large group: a parent lookup per reply, the `threads`
+rows, the reply counts and the rewrite of each touched thread's `thread_cache` row. A bulk import
+can skip it with `-no-threading` and build the threads afterwards, once per group and after the
+importer has finished writing into that group:
+
+```bash
+recover-db -data /path/to/data -force -rebuild-threads -group gmane.linux.kernel
+```
+
+`-reorder-by-datesent` rebuilds the threads of the reordered group as well, in the new
+`<group>.db.new` file it writes (swapped in by hand with the services stopped). Until then the
+articles are stored, counted and served over NNTP, but the web view does not list them in
+threads.
 
 The input is renamed to `INPUT.done` when all of these hold:
 
