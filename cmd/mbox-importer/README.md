@@ -327,7 +327,8 @@ importer has finished writing into that group:
 recover-db -data /path/to/data -force -rebuild-threads -group gmane.linux.kernel
 ```
 
-`-reorder-by-datesent` rebuilds the threads of the reordered group as well. Until then the
+`-reorder-by-datesent` rebuilds the threads of the reordered group as well, in the new
+`<group>.db.new` file it writes (swapped in by hand with the services stopped). Until then the
 articles are stored, counted and served over NNTP, but the web view does not list them in
 threads.
 
